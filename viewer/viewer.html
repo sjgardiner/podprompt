@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Viewer</title>
+
+<!-- Applies saved font-size/width/theme before first paint, so there's no
+     flash of default sizing on load. Kept intentionally tiny and dependency-free. -->
+<script>
+(function() {
+  try {
+    var s = JSON.parse(localStorage.getItem('viewerSettings') || '{}');
+    var root = document.documentElement;
+    if (s.fontSize) root.style.setProperty('--font-size', s.fontSize + 'px');
+    if (s.width) root.style.setProperty('--content-width', s.width + 'px');
+    if (s.theme === 'light') root.setAttribute('data-theme', 'light');
+  } catch (e) {}
+})();
+</script>
+
+<!-- KaTeX -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+
+<!-- marked (markdown) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+
+<!-- highlight.js -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+<style>
+  /* ── Design tokens ─────────────────────────────────────────────────── */
+  :root {
+    --bg:        #0f1117;
+    --surface:   #181c27;
+    --border:    #252a38;
+    --text:      #d4d8e8;
+    --muted:     #5a617a;
+    --accent:    #5b8dee;
+    --user-bg:   #1a1f2e;
+    --user-border: #2a3050;
+    --assistant-bg: #181c27;
+    --code-bg:   #12151f;
+    --green:     #4ade80;
+    --purple:    #a78bfa;
+    --heading:   #eef0f8;
+    --em-color:  #b0bcd8;
+    --inline-code-color: #a5b4fc;
+    --zebra-row: rgba(255,255,255,.02);
+    --sans: 'Inter', 'Helvetica Neue', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --radius: 10px;
+    --font-size: 15px;
+    --content-width: 860px;
+    --label-font-size: 11px;
+  }
+
+  /* ── Light theme override ─────────────────────────────────────────── */
+  /* Values chosen for the same WCAG-friendly contrast a dark-on-light chat
+     UI needs (headings/code darker than body text, not near-white
+     accents carried over unchanged from the dark palette). */
+  :root[data-theme="light"] {
+    --bg:        #f4f5fa;
+    --surface:   #ffffff;
+    --border:    #e1e4ee;
+    --text:      #1d2233;
+    --muted:     #5b6478;
+    --accent:    #3b6fe0;
+    --user-bg:   #eaeefb;
+    --user-border: #c7d2f4;
+    --assistant-bg: #ffffff;
+    --code-bg:   #f0f1f6;
+    --green:     #15803d;
+    --purple:    #7c3aed;
+    --heading:   #10131f;
+    --em-color:  #475569;
+    --inline-code-color: #4338ca;
+    --zebra-row: rgba(15,23,42,.035);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: var(--font-size);
+    line-height: 1.65;
+  }
+
+  /* ── Layout ────────────────────────────────────────────────────────── */
+  #app {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    height: 100vh;
+    max-width: var(--content-width);
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* ── Header ────────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--muted);
+    letter-spacing: .02em;
+  }
+  header .logo {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: .85;
+    flex-shrink: 0;
+  }
+  header span { flex: 1; }
+  #status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+  #status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background .3s;
+  }
+  #status-dot.live  { background: var(--green); }
+  #status-dot.error { background: #f87171; }
+
+  header button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 5px 7px;
+    border-radius: 6px;
+  }
+  header button:hover { background: var(--border); color: var(--text); }
+
+  /* ── Settings panel ────────────────────────────────────────────────── */
+  #settings-panel {
+    display: none;
+    position: absolute;
+    top: 48px;
+    right: 20px;
+    width: 230px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    z-index: 20;
+  }
+  #settings-panel.open { display: block; }
+  .settings-row { margin-bottom: 14px; font-size: 13px; }
+  .settings-row:last-child { margin-bottom: 0; }
+  .settings-row label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+  }
+  .settings-row input[type="range"] { width: 100%; margin-top: 6px; grid-column: 1 / -1; }
+  .settings-row .row-value { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .settings-row select {
+    background: var(--code-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 6px;
+    font-size: 12px;
+  }
+  .settings-row.disabled label { opacity: .45; }
+  .settings-group-title {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+
+  /* ── Message feed ──────────────────────────────────────────────────── */
+  #feed {
+    position: relative;
+    overflow-y: auto;
+    padding: 28px 20px 60px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    scroll-behavior: smooth;
+  }
+  #feed::-webkit-scrollbar { width: 6px; }
+  #feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  #new-pill {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 999px;
+    padding: 7px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 6px 20px rgba(0,0,0,.35);
+    display: none;
+    z-index: 15;
+  }
+  #new-pill.show { display: block; }
+
+  /* ── Message bubble ─────────────────────────────────────────────────── */
+  .msg {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    animation: fadein .2s ease;
+    position: relative;
+  }
+  @keyframes fadein { from { opacity: 0; transform: translateY(6px); } }
+
+  #feed.hide-tools .msg.tool { display: none; }
+
+  .msg-label {
+    font-size: var(--label-font-size);
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-left: 4px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .msg-label .ts {
+    font-size: .9em;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--muted);
+    opacity: .7;
+  }
+  .msg-label .ts:empty { display: none; }
+  .msg.user   .msg-label { color: var(--accent); }
+  .msg.assistant .msg-label { color: var(--muted); }
+  .msg.tool   .msg-label { color: var(--green); }
+  .msg.agent  .msg-label { color: var(--purple); }
+
+  /* whole-message copy button (assistant only) */
+  .msg-copy-btn {
+    position: absolute;
+    top: 22px;
+    right: 0;
+    background: var(--border);
+    color: var(--muted);
+    border: none;
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .15s;
+  }
+  .msg.assistant:hover .msg-copy-btn { opacity: 1; }
+  .msg-copy-btn:hover { background: var(--accent); color: #fff; }
+
+  /* agent report: raw, collapsed by default */
+  .agent-summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: .85em;
+    user-select: none;
+  }
+  .agent-raw {
+    display: none;
+    white-space: pre-wrap;
+    font-family: var(--mono);
+    font-size: .82em;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+  .agent-body.expanded .agent-raw { display: block; }
+
+  .msg-body {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    line-height: 1.7;
+  }
+  .msg.user .msg-body {
+    background: var(--user-bg);
+    border-color: var(--user-border);
+  }
+  .msg.tool .msg-body {
+    padding: 8px 14px;
+    font-size: .88em;
+    color: var(--muted);
+    background: var(--code-bg);
+  }
+  .msg.tool .msg-body p { margin: 0; }
+
+  /* streaming cursor */
+  .msg-body.streaming::after {
+    content: '▋';
+    display: inline;
+    color: var(--accent);
+    animation: blink .8s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── Markdown inside bubbles ────────────────────────────────────────── */
+  .msg-body h1, .msg-body h2, .msg-body h3 {
+    font-weight: 600;
+    margin: 1.1em 0 .5em;
+    color: var(--heading);
+  }
+  .msg-body h1 { font-size: 1.3em; }
+  .msg-body h2 { font-size: 1.15em; }
+  .msg-body h3 { font-size: 1em; }
+  .msg-body p  { margin: .6em 0; }
+  .msg-body ul, .msg-body ol { padding-left: 1.4em; margin: .6em 0; }
+  .msg-body li { margin: .3em 0; }
+
+  .msg-body strong { color: var(--heading); font-weight: 600; }
+  .msg-body em { color: var(--em-color); }
+  .msg-body a  { color: var(--accent); text-decoration: none; }
+  .msg-body a:hover { text-decoration: underline; }
+  .msg-body hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+
+  /* inline code */
+  .msg-body code:not(pre code) {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--inline-code-color);
+  }
+
+  /* fenced code blocks */
+  .msg-body pre {
+    background: var(--code-bg) !important;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: .8em 0;
+    position: relative;
+  }
+  .msg-body pre code {
+    font-family: var(--mono);
+    font-size: .82em;
+    background: none !important;
+    border: none !important;
+    padding: 0 !important;
+    color: inherit;
+  }
+
+  /* copy button */
+  .copy-btn {
+    position: absolute;
+    top: 8px; right: 8px;
+    background: var(--border);
+    color: var(--muted);
+    border: none;
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .15s;
+  }
+  .msg-body pre:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { background: var(--accent); color: #fff; }
+
+  /* ── KaTeX overrides ────────────────────────────────────────────────── */
+  .katex-display {
+    overflow-x: auto;
+    padding: 6px 0;
+    margin: .8em 0 !important;
+  }
+  .katex { font-size: 1.05em; }
+
+  /* ── Empty state ────────────────────────────────────────────────────── */
+  #empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 14px;
+    text-align: center;
+    padding: 40px;
+  }
+  #empty .icon {
+    font-size: 36px;
+    opacity: .4;
+  }
+  #empty code {
+    font-family: var(--mono);
+    font-size: .85em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 8px;
+  }
+
+  /* ── Blockquote ─────────────────────────────────────────────────────── */
+  .msg-body blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 14px;
+    color: var(--muted);
+    margin: .6em 0;
+  }
+
+  /* ── Table ──────────────────────────────────────────────────────────── */
+  .msg-body table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: .8em 0;
+    font-size: .9em;
+  }
+  .msg-body th, .msg-body td {
+    border: 1px solid var(--border);
+    padding: 7px 12px;
+    text-align: left;
+  }
+  .msg-body th { background: var(--code-bg); color: var(--heading); font-weight: 600; }
+  .msg-body tr:nth-child(even) td { background: var(--zebra-row); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo"></div>
+    <span>Claude Viewer</span>
+    <div id="status">
+      <div id="status-dot"></div>
+      <span id="status-label">connecting…</span>
+    </div>
+    <button id="export-btn" title="Export conversation as Markdown">⬇</button>
+    <button id="settings-btn" title="Settings">⚙</button>
+  </header>
+
+  <div id="settings-panel">
+    <div class="settings-row">
+      <label>Font size <span class="row-value" id="font-size-val">15px</span></label>
+      <input type="range" id="font-size-slider" min="12" max="22" step="1" value="15">
+    </div>
+    <div class="settings-row">
+      <label>Content width <span class="row-value" id="width-val">860px</span></label>
+      <input type="range" id="width-slider" min="600" max="1400" step="20" value="860">
+    </div>
+    <div class="settings-row">
+      <label>Label size <span class="row-value" id="label-size-val">11px</span></label>
+      <input type="range" id="label-size-slider" min="9" max="16" step="1" value="11">
+    </div>
+    <div class="settings-row">
+      <label><span>Light theme</span> <input type="checkbox" id="theme-toggle"></label>
+    </div>
+    <div class="settings-row">
+      <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
+    </div>
+
+    <div class="settings-group-title">Timestamps</div>
+    <div class="settings-row">
+      <label>Format
+        <select id="ts-format">
+          <option value="hidden">Hidden</option>
+          <option value="time" selected>Time only</option>
+          <option value="datetime">Date + time</option>
+        </select>
+      </label>
+    </div>
+    <div class="settings-row" id="ts-24h-row">
+      <label><span>24-hour time</span> <input type="checkbox" id="ts-24h"></label>
+    </div>
+    <div class="settings-row" id="ts-tz-row">
+      <label><span>Show time zone</span> <input type="checkbox" id="ts-tz"></label>
+    </div>
+  </div>
+
+  <div id="feed">
+    <div id="empty">
+      <div class="icon">⌨</div>
+      <p>Waiting for messages from Claude Code…</p>
+      <p>Type a prompt in your terminal — it will appear here, rendered.</p>
+    </div>
+  </div>
+  <button id="new-pill">↓ New messages</button>
+</div>
+
+<script>
+// ── marked config ────────────────────────────────────────────────────────────
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+});
+
+const renderer = new marked.Renderer();
+renderer.code = (code, lang) => {
+  const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+  const highlighted = hljs.highlight(code, { language }).value;
+  return `<pre><button class="copy-btn" onclick="copyCode(this)">copy</button><code class="hljs language-${language}">${highlighted}</code></pre>`;
+};
+marked.use({ renderer });
+
+function copyCode(btn) {
+  const code = btn.nextElementSibling.innerText;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = 'copy', 1500);
+  });
+}
+
+// ── KaTeX render ─────────────────────────────────────────────────────────────
+// Math is extracted and rendered to HTML *before* marked.parse() runs, so
+// markdown (in particular `breaks: true`, which turns newlines into <br>)
+// can't mangle multi-line LaTeX like \begin{aligned}/\begin{pmatrix}.
+let mathStore = [];
+
+function extractMath(text) {
+  mathStore = [];
+  const pattern = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$([^\$\n]+?)\$/g;
+  return text.replace(pattern, (match, disp1, disp2, inl1, inl2) => {
+    const isDisplay = disp1 !== undefined || disp2 !== undefined;
+    const src = disp1 ?? disp2 ?? inl1 ?? inl2;
+    const idx = mathStore.push({ src, isDisplay }) - 1;
+    return `@@MATH${idx}@@`;
+  });
+}
+
+function injectMath(html) {
+  return html.replace(/@@MATH(\d+)@@/g, (match, i) => {
+    const { src, isDisplay } = mathStore[i];
+    try {
+      return katex.renderToString(src, { displayMode: isDisplay, throwOnError: false });
+    } catch (e) {
+      return match;
+    }
+  });
+}
+
+// ── DOM helpers ───────────────────────────────────────────────────────────────
+const feed   = document.getElementById('feed');
+const empty  = document.getElementById('empty');
+const dot    = document.getElementById('status-dot');
+const label  = document.getElementById('status-label');
+const msgs   = {};   // id → { el, rawText, role, tsEl, revealTimer }
+const feedOrder = []; // ids in the order they were created, for export
+
+function setStatus(state, text) {
+  dot.className = state;
+  label.textContent = text;
+}
+
+function removeEmpty() {
+  if (empty.parentNode) empty.remove();
+}
+
+function labelFor(role) {
+  if (role === 'user') return 'You';
+  if (role === 'tool') return 'Tool';
+  if (role === 'agent') return 'Agent';
+  return 'Claude';
+}
+
+function formatTs(iso) {
+  if (!iso || settings.tsFormat === 'hidden') return '';
+  const opts = { hour: '2-digit', minute: '2-digit', hour12: !settings.hour24 };
+  if (settings.tsFormat === 'datetime') {
+    opts.year = 'numeric';
+    opts.month = 'short';
+    opts.day = 'numeric';
+  }
+  if (settings.showTz) opts.timeZoneName = 'short';
+  try {
+    return new Date(iso).toLocaleString([], opts);
+  } catch (e) {
+    return '';
+  }
+}
+
+// Timestamp settings (format/12h-24h/timezone) apply retroactively, since
+// they're cheap to recompute — every rendered message keeps its raw ISO
+// string precisely so this can re-derive the display text on demand.
+function refreshTimestamps() {
+  for (const id of feedOrder) {
+    const entry = msgs[id];
+    if (entry && entry.tsEl) entry.tsEl.textContent = formatTs(entry.ts);
+  }
+}
+
+function getOrCreate(id, role) {
+  if (msgs[id]) return msgs[id];
+
+  removeEmpty();
+  feedOrder.push(id);
+
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+
+  if (role === 'agent') {
+    // Async subagent reports are raw and often long — collapsed by default,
+    // click to expand. Rendered as plain text, not markdown, since the
+    // content is XML-ish tool output rather than prose.
+    wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
+                      <div class="msg-body agent-body">
+                        <div class="agent-summary">▸ agent report — click to expand</div>
+                        <pre class="agent-raw"></pre>
+                      </div>`;
+    const bodyEl = wrap.querySelector('.agent-body');
+    bodyEl.querySelector('.agent-summary').addEventListener('click', () => {
+      bodyEl.classList.toggle('expanded');
+    });
+    feed.appendChild(wrap);
+    msgs[id] = {
+      el: bodyEl,
+      rawEl: bodyEl.querySelector('.agent-raw'),
+      tsEl: wrap.querySelector('.ts'),
+      rawText: '', ts: null, role, revealTimer: null,
+    };
+    return msgs[id];
+  }
+
+  wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
+                    <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
+                    ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
+  feed.appendChild(wrap);
+
+  const body = wrap.querySelector('.msg-body');
+  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), rawText: '', ts: null, role, revealTimer: null };
+
+  const copyBtn = wrap.querySelector('.msg-copy-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(msgs[id].rawText || '').then(() => {
+        copyBtn.textContent = 'copied!';
+        setTimeout(() => copyBtn.textContent = 'copy', 1500);
+      });
+    });
+  }
+
+  return msgs[id];
+}
+
+function renderBody(entry) {
+  if (entry.role === 'agent') {
+    entry.rawEl.textContent = entry.rawText || '';
+    return;
+  }
+  const html = marked.parse(extractMath(entry.rawText || ''));
+  entry.el.innerHTML = injectMath(html);
+}
+
+// Messages arrive whole, not token-by-token — reveal them word-by-word so
+// they still feel live instead of popping in all at once.
+// Duration is capped so long responses don't take forever to display.
+function revealText(entry, fullText) {
+  const words = fullText.split(/(\s+)/).filter(w => w.length > 0);
+  const totalWords = words.length || 1;
+  const steps = Math.min(totalWords, 40);
+  const totalDurationMs = Math.min(900, Math.max(200, totalWords * 12));
+  const stepMs = totalDurationMs / steps;
+  const wordsPerStep = Math.ceil(totalWords / steps);
+  let shown = 0;
+
+  clearInterval(entry.revealTimer);
+  entry.el.classList.add('streaming');
+
+  entry.revealTimer = setInterval(() => {
+    shown = Math.min(totalWords, shown + wordsPerStep);
+    entry.rawText = words.slice(0, shown).join('');
+    renderBody(entry);
+    scrollBottom();
+    if (shown >= totalWords) {
+      clearInterval(entry.revealTimer);
+      entry.el.classList.remove('streaming');
+    }
+  }, stepMs);
+}
+
+// Autoscroll-lock: only force-scroll on new content if the user was already
+// pinned to the bottom. If they've scrolled up to reread something, show a
+// pill instead of yanking them back down on every reveal tick.
+const newPill = document.getElementById('new-pill');
+let pinnedToBottom = true;
+
+function isNearBottom() {
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+}
+
+feed.addEventListener('scroll', () => {
+  pinnedToBottom = isNearBottom();
+  if (pinnedToBottom) newPill.classList.remove('show');
+});
+
+newPill.addEventListener('click', () => {
+  feed.scrollTop = feed.scrollHeight;
+  pinnedToBottom = true;
+  newPill.classList.remove('show');
+});
+
+function scrollBottom() {
+  if (pinnedToBottom) {
+    feed.scrollTop = feed.scrollHeight;
+  } else {
+    newPill.classList.add('show');
+  }
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+let es;
+let reconnectTimer;
+
+function connect() {
+  es = new EventSource('/events');
+
+  es.onopen = () => {
+    setStatus('live', 'live');
+    clearTimeout(reconnectTimer);
+  };
+
+  es.onerror = () => {
+    setStatus('error', 'reconnecting…');
+    es.close();
+    reconnectTimer = setTimeout(connect, 2000);
+  };
+
+  // Complete messages, tailed from the session transcript
+  es.addEventListener('message', e => {
+    const msg = JSON.parse(e.data);
+    const { id, role, text, ts } = msg;
+    const entry = getOrCreate(id, role);
+    entry.ts = ts;
+    if (entry.tsEl) entry.tsEl.textContent = formatTs(ts);
+    if (role === 'user' || role === 'agent') {
+      entry.rawText = text;
+      entry.el.classList.remove('streaming');
+      renderBody(entry);
+      scrollBottom();
+    } else {
+      revealText(entry, text);
+    }
+  });
+
+  // History replay on reconnect
+  es.addEventListener('history', e => {
+    const entry = JSON.parse(e.data);
+    if (entry.type === 'message') {
+      const m = getOrCreate(entry.id, entry.role);
+      m.ts = entry.ts;
+      if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
+      m.rawText = entry.text;
+      m.el.classList.remove('streaming');
+      renderBody(m);
+      scrollBottom();
+    }
+  });
+}
+
+// ── Settings panel ──────────────────────────────────────────────────────────
+const SETTINGS_KEY = 'viewerSettings';
+const SETTINGS_DEFAULTS = {
+  fontSize: 15, width: 860, labelFontSize: 11, theme: 'dark', showTools: true,
+  tsFormat: 'time', hour24: false, showTz: false,
+};
+
+function loadSettings() {
+  try {
+    return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
+  } catch (e) {
+    return Object.assign({}, SETTINGS_DEFAULTS);
+  }
+}
+
+function saveSettings() {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function applySettings() {
+  document.documentElement.style.setProperty('--font-size', settings.fontSize + 'px');
+  document.documentElement.style.setProperty('--content-width', settings.width + 'px');
+  document.documentElement.style.setProperty('--label-font-size', settings.labelFontSize + 'px');
+  document.documentElement.setAttribute('data-theme', settings.theme === 'light' ? 'light' : 'dark');
+  feed.classList.toggle('hide-tools', !settings.showTools);
+  const tsHidden = settings.tsFormat === 'hidden';
+  ts24hRow.classList.toggle('disabled', tsHidden);
+  tsTzRow.classList.toggle('disabled', tsHidden);
+  ts24h.disabled = tsHidden;
+  tsTz.disabled = tsHidden;
+  refreshTimestamps();
+}
+
+const settings = loadSettings();
+
+const fontSlider    = document.getElementById('font-size-slider');
+const fontVal       = document.getElementById('font-size-val');
+const widthSlider    = document.getElementById('width-slider');
+const widthVal       = document.getElementById('width-val');
+const labelSlider    = document.getElementById('label-size-slider');
+const labelVal       = document.getElementById('label-size-val');
+const themeToggle    = document.getElementById('theme-toggle');
+const toolsToggle    = document.getElementById('tools-toggle');
+const tsFormat       = document.getElementById('ts-format');
+const ts24h          = document.getElementById('ts-24h');
+const tsTz           = document.getElementById('ts-tz');
+const ts24hRow       = document.getElementById('ts-24h-row');
+const tsTzRow        = document.getElementById('ts-tz-row');
+const settingsBtn    = document.getElementById('settings-btn');
+const settingsPanel  = document.getElementById('settings-panel');
+const exportBtn      = document.getElementById('export-btn');
+
+fontSlider.value = settings.fontSize;
+fontVal.textContent = settings.fontSize + 'px';
+widthSlider.value = settings.width;
+widthVal.textContent = settings.width + 'px';
+labelSlider.value = settings.labelFontSize;
+labelVal.textContent = settings.labelFontSize + 'px';
+themeToggle.checked = settings.theme === 'light';
+toolsToggle.checked = settings.showTools;
+tsFormat.value = settings.tsFormat;
+ts24h.checked = settings.hour24;
+tsTz.checked = settings.showTz;
+applySettings();
+
+fontSlider.addEventListener('input', () => {
+  settings.fontSize = Number(fontSlider.value);
+  fontVal.textContent = settings.fontSize + 'px';
+  applySettings();
+  saveSettings();
+});
+
+// Width reflows the whole feed, which fights with the drag if applied live —
+// 'input' fires continuously while dragging, so only update the value label
+// there; the actual resize happens on 'change', once the mouse is released.
+widthSlider.addEventListener('input', () => {
+  widthVal.textContent = widthSlider.value + 'px';
+});
+widthSlider.addEventListener('change', () => {
+  settings.width = Number(widthSlider.value);
+  widthVal.textContent = settings.width + 'px';
+  applySettings();
+  saveSettings();
+});
+
+labelSlider.addEventListener('input', () => {
+  settings.labelFontSize = Number(labelSlider.value);
+  labelVal.textContent = settings.labelFontSize + 'px';
+  applySettings();
+  saveSettings();
+});
+
+themeToggle.addEventListener('change', () => {
+  settings.theme = themeToggle.checked ? 'light' : 'dark';
+  applySettings();
+  saveSettings();
+});
+
+toolsToggle.addEventListener('change', () => {
+  settings.showTools = toolsToggle.checked;
+  applySettings();
+  saveSettings();
+});
+
+tsFormat.addEventListener('change', () => {
+  settings.tsFormat = tsFormat.value;
+  applySettings();
+  saveSettings();
+});
+
+ts24h.addEventListener('change', () => {
+  settings.hour24 = ts24h.checked;
+  applySettings();
+  saveSettings();
+});
+
+tsTz.addEventListener('change', () => {
+  settings.showTz = tsTz.checked;
+  applySettings();
+  saveSettings();
+});
+
+settingsBtn.addEventListener('click', () => {
+  settingsPanel.classList.toggle('open');
+});
+
+document.addEventListener('click', e => {
+  if (settingsPanel.classList.contains('open') &&
+      !settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+    settingsPanel.classList.remove('open');
+  }
+});
+
+// ── Export conversation ─────────────────────────────────────────────────────
+function exportMarkdown() {
+  const lines = [];
+  for (const id of feedOrder) {
+    const entry = msgs[id];
+    if (!entry) continue;
+    lines.push(`### ${labelFor(entry.role)}`, '', entry.rawText || '', '');
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'claude-conversation.md';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+exportBtn.addEventListener('click', exportMarkdown);
+
+// Wait for KaTeX to load before connecting
+window.addEventListener('load', () => {
+  connect();
+});
+</script>
+</body>
+</html>

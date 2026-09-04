@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Docker — Setup Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:         #0f1117;
+    --bg-raised:  #1e2330;
+    --bg-code:    #161b27;
+    --border:     #2a3045;
+    --text:       #e8eaf0;
+    --text-muted: #8892a4;
+    --accent:     #f0a500;
+    --accent-dim: #7a5200;
+    --link:       #6ea8fe;
+    --danger:     #f87171;
+    --success:    #6ee7b7;
+
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+    --prose-width: 68ch;
+    --sidebar-width: 220px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  /* ── Layout ─────────────────────────────────────────────── */
+
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) 1fr;
+    min-height: 100vh;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────── */
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding: 2rem 0;
+    background: var(--bg);
+  }
+
+  .sidebar-brand {
+    padding: 0 1.5rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.25rem;
+  }
+
+  .sidebar-brand .product {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--accent);
+    font-family: var(--font-mono);
+  }
+
+  .sidebar-brand .tagline {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: .2rem;
+  }
+
+  .nav-group {
+    padding: 0 1rem .75rem;
+  }
+
+  .nav-group-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    color: var(--text-muted);
+    padding: 0 .5rem .4rem;
+    text-transform: uppercase;
+  }
+
+  .nav-link {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: .3rem .5rem;
+    border-radius: 4px;
+    transition: color .15s, background .15s;
+  }
+
+  .nav-link:hover {
+    color: var(--text);
+    background: var(--bg-raised);
+  }
+
+  .nav-link.active {
+    color: var(--accent);
+  }
+
+  /* ── Main content ────────────────────────────────────────── */
+
+  main {
+    padding: 3rem 3rem 6rem;
+    max-width: calc(var(--prose-width) + 6rem);
+  }
+
+  .page-header {
+    margin-bottom: 3rem;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .page-header h1 {
+    font-size: 1.75rem;
+    font-weight: 600;
+    line-height: 1.25;
+    margin-bottom: .5rem;
+  }
+
+  .page-header .subtitle {
+    color: var(--text-muted);
+    font-size: .95rem;
+  }
+
+  .files-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin-top: 1.25rem;
+  }
+
+  .file-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: .25rem .65rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .file-pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  /* ── Sections ────────────────────────────────────────────── */
+
+  section {
+    margin-bottom: 3rem;
+  }
+
+  section h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 1rem;
+    padding-bottom: .5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+  }
+
+  section h2 .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+
+  section h3 {
+    font-size: .9rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin: 1.5rem 0 .6rem;
+  }
+
+  p {
+    margin-bottom: .85rem;
+    max-width: var(--prose-width);
+  }
+
+  p:last-child { margin-bottom: 0; }
+
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Code blocks ─────────────────────────────────────────── */
+
+  .code-block {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: .75rem 0 1.25rem;
+    overflow: hidden;
+  }
+
+  .code-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .4rem .9rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-raised);
+  }
+
+  .code-block-label {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+
+  .copy-btn {
+    font-size: 11px;
+    font-family: var(--font-sans);
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: .2rem .4rem;
+    border-radius: 3px;
+    transition: color .15s, background .15s;
+  }
+
+  .copy-btn:hover {
+    color: var(--text);
+    background: var(--border);
+  }
+
+  .copy-btn.copied {
+    color: var(--success);
+  }
+
+  pre {
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+
+  /* inline code */
+  :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: .85em;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: .1em .35em;
+    color: var(--accent);
+  }
+
+  /* ── Callouts ────────────────────────────────────────────── */
+
+  .callout {
+    border-left: 3px solid var(--border);
+    background: var(--bg-raised);
+    border-radius: 0 6px 6px 0;
+    padding: .85rem 1.1rem;
+    margin: 1rem 0 1.25rem;
+    font-size: .9rem;
+    max-width: var(--prose-width);
+  }
+
+  .callout.warn { border-left-color: var(--accent); }
+  .callout.info { border-left-color: var(--link); }
+  .callout.danger { border-left-color: var(--danger); }
+
+  .callout-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin-bottom: .35rem;
+  }
+
+  .callout.warn  .callout-label { color: var(--accent); }
+  .callout.info  .callout-label { color: var(--link); }
+  .callout.danger .callout-label { color: var(--danger); }
+
+  .callout p { font-size: inherit; margin-bottom: .4rem; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ── Option table ────────────────────────────────────────── */
+
+  .option-table {
+    width: 100%;
+    max-width: var(--prose-width);
+    border-collapse: collapse;
+    font-size: .875rem;
+    margin: .75rem 0 1.25rem;
+  }
+
+  .option-table th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: .4rem .75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .option-table td {
+    padding: .55rem .75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .option-table tr:last-child td { border-bottom: none; }
+
+  .option-table td:first-child {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .option-table td:last-child {
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* ── Env var list ────────────────────────────────────────── */
+
+  .env-list {
+    list-style: none;
+    max-width: var(--prose-width);
+    margin: .75rem 0 1.25rem;
+  }
+
+  .env-list li {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: .15rem;
+    padding: .7rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: .875rem;
+  }
+
+  .env-list li:last-child { border-bottom: none; }
+
+  .env-name {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+
+  .env-required {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-left: .5rem;
+    color: var(--text-muted);
+  }
+
+  .env-required.req { color: var(--danger); }
+
+  .env-desc {
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* ── Responsive ──────────────────────────────────────────── */
+
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    main { padding: 2rem 1.25rem 4rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Sidebar nav ── -->
+  <nav class="sidebar" aria-label="Page navigation">
+    <div class="sidebar-brand">
+      <div class="product">claude-docker</div>
+      <div class="tagline">Setup &amp; reference guide</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Setup</div>
+      <a class="nav-link" href="#files">Files in this package</a>
+      <a class="nav-link" href="#step-1">1. Get the files</a>
+      <a class="nav-link" href="#step-2">2. Set up credentials</a>
+      <a class="nav-link" href="#step-3">3. Make script executable</a>
+      <a class="nav-link" href="#step-4">4. Build the image</a>
+      <a class="nav-link" href="#step-5">5. Install viewer (optional)</a>
+      <a class="nav-link" href="#step-6">6. Select a model</a>
+      <a class="nav-link" href="#step-7">7. Launch</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Reference</div>
+      <a class="nav-link" href="#options">Command-line options</a>
+      <a class="nav-link" href="#env-vars">Environment variables</a>
+      <a class="nav-link" href="#providers">Providers (3)</a>
+      <a class="nav-link" href="#viewer">Viewer</a>
+      <a class="nav-link" href="#state">Persistent state</a>
+      <a class="nav-link" href="#smoke-test">LiteLLM smoke test</a>
+    </div>
+  </nav>
+
+  <!-- ── Main ── -->
+  <main>
+
+    <div class="page-header">
+      <h1>Claude Docker — Setup Guide</h1>
+      <p class="subtitle">
+        Run Claude Code inside a Docker sandbox with your working directory
+        mounted in and your credentials kept safely outside version control.
+        Supports claude.ai subscription (OAuth), direct Anthropic API access,
+        and a LiteLLM proxy.
+      </p>
+      <div class="files-strip" id="files">
+        <span class="file-pill"><span class="dot"></span>Dockerfile</span>
+        <span class="file-pill"><span class="dot"></span>run-claude-docker.sh</span>
+        <span class="file-pill"><span class="dot"></span>claude-docker.env.template</span>
+        <span class="file-pill"><span class="dot"></span>claude-docker-setup.html <em style="font-style:normal;opacity:.5">(this file)</em></span>
+        <span class="file-pill"><span class="dot"></span>viewer/server.py</span>
+        <span class="file-pill"><span class="dot"></span>viewer/viewer.html</span>
+      </div>
+    </div>
+
+    <!-- ── Step 1 ── -->
+    <section id="step-1">
+      <h2><span class="step-num">1</span> Get the files</h2>
+      <p>
+        Place <code>Dockerfile</code>, <code>run-claude-docker.sh</code>, and
+        <code>claude-docker.env.template</code> together in a stable location —
+        a dotfiles repo or a dedicated directory like <code>~/bin/claude-docker/</code>
+        works well. The run script and Dockerfile are the only things you need
+        to invoke day-to-day.
+      </p>
+      <div class="callout info">
+        <div class="callout-label">Note</div>
+        <p>All subsequent commands assume you are in the directory containing
+        these files.</p>
+      </div>
+    </section>
+
+    <!-- ── Step 2 ── -->
+    <section id="step-2">
+      <h2><span class="step-num">2</span> Set up credentials</h2>
+      <p>
+        Copy the template to your home directory and lock it down. This file
+        holds API keys and should never be committed to version control.
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>cp claude-docker.env.template ~/.claude-docker.env
+chmod 600 ~/.claude-docker.env</pre>
+      </div>
+      <p>
+        Open <code>~/.claude-docker.env</code> in an editor and fill in your values:
+      </p>
+      <ul class="env-list">
+        <li>
+          <span class="env-name">ANTHROPIC_API_KEY <span class="env-required">optional</span></span>
+          <span class="env-desc">Your Anthropic API key, obtained from
+          <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>.
+          Only needed for <code>--direct-api</code> mode (per-token API billing).
+          The default <code>--direct</code> mode uses OAuth via your claude.ai
+          subscription and does not require this key.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_URL <span class="env-required req">required for --litellm</span></span>
+          <span class="env-desc">Base URL of your organisation's LiteLLM proxy instance,
+          e.g. <code>https://llm.example.com</code>. Ask your LiteLLM administrator for this.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_API_KEY <span class="env-required req">required for --litellm</span></span>
+          <span class="env-desc">API key accepted by your LiteLLM instance.
+          Ask your LiteLLM administrator.</span>
+        </li>
+      </ul>
+      <p>
+        Then add a line to your shell's startup file so the variables are
+        available in every new terminal:
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">~/.zshrc or ~/.bashrc</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>source ~/.claude-docker.env</pre>
+      </div>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash — reload your shell config</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>source ~/.zshrc   # or source ~/.bashrc</pre>
+      </div>
+    </section>
+
+    <!-- ── Step 3 ── -->
+    <section id="step-3">
+      <h2><span class="step-num">3</span> Make the script executable</h2>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>chmod +x run-claude-docker.sh</pre>
+      </div>
+    </section>
+
+    <!-- ── Step 4 ── -->
+    <section id="step-4">
+      <h2><span class="step-num">4</span> Build the Docker image</h2>
+      <p>
+        From the directory containing the <code>Dockerfile</code>:
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>docker build -t claude-sandbox .</pre>
+      </div>
+      <p>
+        This installs Claude Code into the image. The build only needs to be
+        re-run when the <code>Dockerfile</code> itself changes — not between
+        sessions.
+      </p>
+      <div class="callout warn">
+        <div class="callout-label">First launch — authentication</div>
+        <p>The first time you run the container in default (<code>--direct</code>)
+        mode, Claude Code will walk you through a browser-based OAuth login with
+        your claude.ai account. Follow the prompts in the terminal. Your credentials
+        are saved into <code>~/.claude-docker/</code> and reused on all subsequent
+        runs — you will not be prompted again unless the credentials expire.</p>
+        <p>If you use <code>--direct-api</code> instead, no interactive login is
+        needed — Claude Code authenticates using your <code>ANTHROPIC_API_KEY</code>
+        directly.</p>
+      </div>
+    </section>
+
+    <!-- ── Step 5 ── -->
+    <section id="step-5">
+      <h2><span class="step-num">5</span> Install the viewer <em style="font-weight:400;font-size:.85rem;color:var(--text-muted)">(optional)</em></h2>
+      <p>
+        The viewer renders Claude's responses as rich text — markdown, KaTeX
+        math, and syntax-highlighted code — in a browser tab while you continue
+        typing in the terminal. It runs inside the container and is exposed on
+        a host port.
+      </p>
+      <p>
+        Copy <code>viewer/server.py</code>, <code>viewer/viewer.html</code>,
+        and <code>viewer/start-viewer.sh</code> into your config directory:
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>mkdir -p ~/.claude-docker/viewer
+cp viewer/server.py ~/.claude-docker/viewer/
+cp viewer/viewer.html ~/.claude-docker/viewer/
+cp viewer/start-viewer.sh ~/.claude-docker/viewer/</pre>
+      </div>
+      <p>
+        That's all — no rebuild required. The run script bind-mounts
+        <code>~/.claude-docker/</code> into the container, so the viewer files
+        are available immediately at <code>/home/claude/.claude/viewer/</code>.
+      </p>
+      <div class="callout info">
+        <div class="callout-label">How it works</div>
+        <p>
+          Claude runs exactly as normal in the terminal. The viewer server
+          tails the session's JSONL transcript directly — no hooks, no
+          <code>settings.json</code> changes — and emits a message for each
+          user prompt, each assistant response, and a compact line per tool
+          call as they're written.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Step 6 ── -->
+    <section id="step-6">
+      <h2><span class="step-num">6</span> Model selection <em style="font-weight:400;font-size:.85rem;color:var(--text-muted)">(--litellm only)</em></h2>
+      <p>
+        When you launch with <code>--litellm</code>, an interactive model picker
+        runs automatically before the container starts. No extra flag is needed.
+        Two prompts are shown in sequence:
+      </p>
+      <p>
+        First, a numbered list of all models on your LiteLLM instance — select
+        the primary model. Then a second prompt for the small/fast model used
+        for Claude Code's background tasks (title generation, summaries). The
+        small model defaults to "disable" on bare Enter, or you can choose
+        "same as primary" or any other listed model.
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">example interaction</span>
+        </div>
+        <pre>LiteLLM server OK (HTTP 200).
+
+Available models on https://llm.example.com:
+
+    1) azure/claude-sonnet-4-6
+    2) openai/gpt-oss-120b
+    3) qwen/qwen3-coder-next
+    ...
+
+Select primary model [1-42]: 3
+Primary model: qwen/qwen3-coder-next
+
+Select small/fast model for background tasks (title generation, summaries):
+
+    0) Disable background model calls (default)
+    1) Same as primary (qwen/qwen3-coder-next)
+    2) azure/claude-sonnet-4-6
+    3) openai/gpt-oss-120b
+    ...
+
+Select small model [0-42] (Enter = disable): 3
+Small model: openai/gpt-oss-120b</pre>
+      </div>
+      <p>
+        Selections apply to the current session only. Use <code>--list-models</code>
+        to preview what's available without launching.
+      </p>
+      <div class="callout info">
+        <div class="callout-label">Background model calls</div>
+        <p>
+          If you select "disable" for the small model,
+          <code>DISABLE_NON_ESSENTIAL_MODEL_CALLS=1</code> is set automatically.
+          If you pick a small model, it is passed as both
+          <code>ANTHROPIC_DEFAULT_HAIKU_MODEL</code> and
+          <code>ANTHROPIC_SMALL_FAST_MODEL</code>.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Step 7 ── -->
+    <section id="step-7">
+      <h2><span class="step-num">7</span> Launch</h2>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash — common invocations</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre># claude.ai subscription (OAuth), terminal UI — default
+./run-claude-docker.sh
+
+# Anthropic API key billing instead of subscription
+./run-claude-docker.sh --direct-api
+
+# LiteLLM — interactive model picker runs automatically
+./run-claude-docker.sh --litellm
+
+# Any provider + rendered browser viewer
+./run-claude-docker.sh --viewer
+./run-claude-docker.sh --litellm --viewer
+
+# Viewer on a non-default port
+./run-claude-docker.sh --viewer --viewer-port 7844
+
+# List available LiteLLM models without launching
+./run-claude-docker.sh --list-models
+
+# Pass a flag through to claude (see Pass-through options below)
+./run-claude-docker.sh --dangerously-skip-permissions</pre>
+      </div>
+      <p>
+        Run from whichever directory you want Claude to work in — it is mounted
+        as <code>/workspace</code> inside the container.
+      </p>
+    </section>
+
+    <!-- ── Reference: options ── -->
+    <section id="options">
+      <h2>Command-line options</h2>
+
+      <h3>Provider</h3>
+      <table class="option-table">
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>(default) / --direct</td>
+            <td>Authenticate via your claude.ai subscription (OAuth). No API key
+            required. On first run you will be prompted to log in via a browser;
+            credentials persist in <code>~/.claude-docker/</code> for subsequent
+            runs. Usage is billed to your Claude subscription, not an API account.</td>
+          </tr>
+          <tr>
+            <td>--direct-api</td>
+            <td>Use the Anthropic API with an API key, billed per token to your
+            Anthropic Console account. Requires <code>ANTHROPIC_API_KEY</code>.
+            Claude Code connects to <code>api.anthropic.com</code> using its
+            built-in default model.</td>
+          </tr>
+          <tr>
+            <td>--litellm</td>
+            <td>Route requests through your LiteLLM proxy. Requires
+            <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>.
+            An interactive model picker runs automatically before launch —
+            no extra flag needed. See the Providers section for the full list
+            of env vars set automatically.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Model selection (--litellm)</h3>
+      <p>
+        When using <code>--litellm</code>, an interactive model picker runs
+        automatically before launch — no flag needed. You are prompted first
+        for the primary model, then for an optional small/fast model for
+        background tasks. Use <code>--list-models</code> to preview the
+        available models without launching.
+      </p>
+
+      <h3>Utility</h3>
+      <table class="option-table">
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>--viewer</td>
+            <td>Start the browser viewer before launching. Renders Claude's
+            responses as markdown, math, and syntax-highlighted code at
+            <code>http://localhost:VIEWER_PORT</code> by tailing the session's
+            JSONL transcript directly — no hooks involved. Requires
+            <code>viewer/server.py</code>, <code>viewer/viewer.html</code>,
+            and <code>viewer/start-viewer.sh</code> to be installed in
+            <code>~/.claude-docker/viewer/</code>.</td>
+          </tr>
+          <tr>
+            <td>--viewer-port PORT</td>
+            <td>Host port for the viewer server. Default: <code>7843</code>.
+            Only meaningful with <code>--viewer</code>.</td>
+          </tr>
+          <tr>
+            <td>--help, -h</td>
+            <td>Print a full usage summary and exit.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Pass-through options</h3>
+      <p>
+        Any flag not listed above is passed directly to the <code>claude</code>
+        binary inside the container. Pass-through arguments are forwarded after
+        all recognised flags have been consumed, so they can be freely mixed
+        with the above. Examples:
+      </p>
+      <table class="option-table">
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>--dangerously-skip-permissions</td>
+            <td>Disable Claude Code's interactive permission prompts. Only use
+            this against repos you fully trust.</td>
+          </tr>
+          <tr>
+            <td>--print "prompt"</td>
+            <td>Run non-interactively: send a single prompt, print the response,
+            and exit. Useful for scripting.</td>
+          </tr>
+          <tr>
+            <td>--agent NAME</td>
+            <td>Launch a specific subagent at startup.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ── Reference: env vars ── -->
+    <section id="env-vars">
+      <h2>Environment variables</h2>
+      <p>
+        All variables should be set via <code>~/.claude-docker.env</code>
+        (sourced in your shell startup file) rather than hardcoded in the script.
+        The script validates that the required variables for the chosen provider
+        are present before attempting to start.
+      </p>
+      <ul class="env-list">
+        <li>
+          <span class="env-name">ANTHROPIC_API_KEY <span class="env-required">optional — direct-api mode only</span></span>
+          <span class="env-desc">API key for the Anthropic API, used only with <code>--direct-api</code>.
+          Not needed for the default <code>--direct</code> (OAuth) mode.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_URL <span class="env-required req">required — litellm mode</span></span>
+          <span class="env-desc">Base URL of your LiteLLM proxy, e.g. <code>https://llm.example.com</code>. Also used by <code>--list-models</code>.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_API_KEY <span class="env-required req">required — litellm mode</span></span>
+          <span class="env-desc">API key for your LiteLLM instance. Also used by <code>--list-models</code>.</span>
+        </li>
+      </ul>
+    </section>
+
+    <!-- ── Reference: providers ── -->
+    <section id="providers">
+      <h2>Providers</h2>
+      <p>
+        The script supports three providers. They are mutually exclusive per
+        session; to switch you restart the container with a different flag.
+        There is no way to change provider mid-session within Claude Code itself.
+      </p>
+
+      <h3>Subscription OAuth (default / --direct)</h3>
+      <p>
+        Authenticates using your claude.ai account via an OAuth browser flow.
+        No API key is required. On first run, Claude Code will print a URL and
+        wait for you to log in; after that, the credentials stored in
+        <code>~/.claude-docker/</code> are reused automatically. Usage is billed
+        to your Claude subscription (Pro, Team, or Enterprise) rather than to a
+        per-token API account.
+      </p>
+
+      <h3>Direct API key (--direct-api)</h3>
+      <p>
+        Sends requests to <code>api.anthropic.com</code> using an API key from
+        <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>,
+        billed per token to that account. No interactive login is required.
+        Claude Code uses its own built-in default model; no base URL or model
+        override is set.
+      </p>
+
+      <h3>LiteLLM proxy (--litellm)</h3>
+      <p>
+        Routes all requests through your organisation's LiteLLM instance, which
+        can serve multiple model backends under a single endpoint. Because Claude
+        Code is designed for Anthropic's API, the script sets several env vars
+        automatically to make it work correctly:
+      </p>
+      <ul style="list-style:none;max-width:var(--prose-width);margin:.5rem 0 1rem;">
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">ANTHROPIC_BASE_URL</code> → your LiteLLM URL</li>
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">ANTHROPIC_AUTH_TOKEN</code> → your LiteLLM API key</li>
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">ANTHROPIC_MODEL</code> → your chosen model (if set)</li>
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">ANTHROPIC_DEFAULT_HAIKU_MODEL</code> + <code style="font-size:.8rem">ANTHROPIC_SMALL_FAST_MODEL</code> → your picked small model (if chosen)</li>
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">DISABLE_NON_ESSENTIAL_MODEL_CALLS=1</code> — suppresses background model calls when no small model is configured</li>
+        <li style="padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1</code> — prevents beta headers some LiteLLM versions reject</li>
+        <li style="padding:.35rem 0;font-size:.875rem;color:var(--text-muted)"><code style="font-size:.8rem">DISABLE_TELEMETRY=1</code> — stops telemetry pings to Anthropic's servers</li>
+      </ul>
+      <p>
+        Use <code>--list-models</code> to preview what's available without
+        launching. Model selection happens automatically at launch via the
+        interactive picker.
+      </p>
+      <div class="callout warn">
+        <div class="callout-label">LiteLLM route requirement</div>
+        <p>
+          Claude Code speaks Anthropic's <code>/v1/messages</code> format
+          exclusively — it does not speak the OpenAI-compatible
+          <code>/v1/chat/completions</code> route. Your LiteLLM instance must
+          have the <code>/v1/messages</code> (Anthropic-format) route enabled.
+          See the <a href="#smoke-test">smoke test</a> section below to verify this.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Reference: state ── -->
+    <!-- ── Reference: viewer ── -->
+    <section id="viewer">
+      <h2>Viewer</h2>
+      <p>
+        The viewer renders Claude's responses as rich text in a browser tab
+        while you type in the terminal normally. It is an optional add-on —
+        the run script works without it.
+      </p>
+
+      <h3>How it works</h3>
+      <p>
+        Claude runs exactly as normal in the terminal. The viewer server,
+        running inside the container, tails the session's <code>*.jsonl</code>
+        transcript directly and polls for new lines — no hooks, no
+        <code>settings.json</code> changes. It emits a message for each real
+        user prompt, each assistant text block, and a compact one-line summary
+        for each tool call, as they're written.
+      </p>
+      <p>
+        Because it reads complete transcript entries rather than streaming raw
+        model output, messages appear as whole chunks rather than
+        character-by-character — the browser UI plays them back with a brief
+        word-by-word reveal so it still feels live.
+      </p>
+
+      <h3>Installation</h3>
+      <p>Copy the viewer files into your config directory once:</p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>mkdir -p ~/.claude-docker/viewer
+cp viewer/server.py ~/.claude-docker/viewer/
+cp viewer/viewer.html ~/.claude-docker/viewer/
+cp viewer/start-viewer.sh ~/.claude-docker/viewer/</pre>
+      </div>
+      <p>
+        No Docker rebuild needed. The files are available inside the container
+        at <code>/home/claude/.claude/viewer/</code> via the existing config
+        dir bind mount.
+      </p>
+    </section>
+
+    <!-- ── Reference: state ── -->
+    <section id="state">
+      <h2>Persistent state</h2>
+      <p>
+        <code>~/.claude-docker/</code> on your host is bind-mounted into the
+        container as <code>/home/claude/.claude</code>. This single directory
+        holds everything Claude Code needs to persist between sessions:
+      </p>
+      <ul style="list-style:none;max-width:var(--prose-width);margin:.75rem 0 1rem;">
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <code style="font-size:.8rem">settings.json</code> — model picker entries, hooks, and other settings (including synced LiteLLM models)
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <code style="font-size:.8rem">.claude.json</code> — OAuth credentials (subscription login), per-project trust decisions, personal MCP servers
+        </li>
+        <li style="padding:.4rem 0;font-size:.875rem;color:var(--text-muted)">
+          Session history and conversation state
+        </li>
+      </ul>
+      <p>
+        The directory is created automatically on first run. Back it up if
+        losing your session history or settings would be disruptive.
+      </p>
+    </section>
+
+    <!-- ── Reference: smoke test ── -->
+    <section id="smoke-test">
+      <h2>LiteLLM smoke test</h2>
+      <p>
+        Before relying on <code>--litellm</code> for real work, verify that your
+        LiteLLM instance has the Anthropic-format <code>/v1/messages</code> route
+        enabled. Run this from your host (not inside the container), with your
+        env file already sourced:
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>curl -s "$LITELLM_URL/v1/messages" \
+  -H "x-api-key: $LITELLM_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"your-model-name","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'</pre>
+      </div>
+      <p>
+        A valid JSON response (even a short one) means the route is working. A
+        <code>404</code> means the route isn't configured on the LiteLLM side —
+        raise this with your LiteLLM administrator.
+      </p>
+      <div class="callout info">
+        <div class="callout-label">Beta header errors</div>
+        <p>
+          Some LiteLLM versions reject the <code>anthropic-beta</code> headers
+          that recent Claude Code versions send, returning an opaque HTTP 400.
+          If you encounter this, ask your administrator to update LiteLLM, or
+          add <code>CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1</code> to your
+          <code>~/.claude-docker.env</code> as a workaround.
+        </p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  function copyCode(btn) {
+    const pre = btn.closest('.code-block').querySelector('pre');
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 1800);
+    });
+  }
+
+  // Highlight active nav link based on scroll position
+  const sections = document.querySelectorAll('section[id], div[id]');
+  const navLinks = document.querySelectorAll('.nav-link');
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(l => l.classList.remove('active'));
+        const active = document.querySelector(`.nav-link[href="#${entry.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>

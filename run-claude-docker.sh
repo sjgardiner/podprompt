@@ -45,17 +45,23 @@ UTILITY OPTIONS:
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
 
-  --viewer        Start the claude-viewer browser UI before launching Claude Code.
-                  Opens a rendered view of Claude's responses (markdown, math,
-                  syntax-highlighted code) at http://localhost:VIEWER_PORT.
+  --viewer        Start the claude-viewer browser UI instead of launching an
+                  interactive terminal session. Opens a rendered view of
+                  Claude's responses (markdown, math, syntax-highlighted code)
+                  at http://localhost:VIEWER_PORT, with a bidirectional driver
+                  (built on the Claude Agent SDK) so the browser drives
+                  prompts directly — no terminal UI is attached at all.
                   Requires the viewer/ directory (server.py, viewer.html,
-                  start-viewer.sh) to be copied into ~/.claude-docker/viewer/
-                  first. The server runs inside the container and tails the
-                  session's JSONL transcript directly — no hooks, no
-                  settings.json changes.
+                  start-viewer.sh, driver.mjs, package.json + installed
+                  node_modules) to be copied into ~/.claude-docker/viewer/ first.
 
   --viewer-port PORT
-                  Port for the viewer server. Default: 7843.
+                  Port for the viewer server (browser page + SSE feed).
+                  Default: 7843.
+
+  --viewer-driver-port PORT
+                  Port for the bidirectional driver (accepts prompts/
+                  permission responses from the browser). Default: 7844.
 
   --help, -h      Show this message and exit.
 
@@ -114,7 +120,7 @@ EXAMPLES:
   # Any mode + rendered browser viewer (markdown, math, syntax highlighting)
   ./run-claude-docker.sh --viewer
   ./run-claude-docker.sh --litellm --viewer
-  ./run-claude-docker.sh --viewer --viewer-port 7844
+  ./run-claude-docker.sh --viewer --viewer-port 7900
 
   # Pass a flag through to claude
   ./run-claude-docker.sh --dangerously-skip-permissions
@@ -128,6 +134,7 @@ LITELLM_URL="${LITELLM_URL:-<MY-LITELLM-URL>}"
 LITELLM_API_KEY="${LITELLM_API_KEY:-}"
 
 VIEWER_PORT=7843
+VIEWER_DRIVER_PORT=7844
 CONFIG_DIR="$HOME/.claude-docker"
 # ------------------------------------------------------------------------
 
@@ -282,9 +289,10 @@ pick_model() {
 
 remove_stale_viewer_hooks() {
     # Earlier versions of this script injected Stop/UserPromptSubmit hooks
-    # that POSTed to the viewer server. The viewer no longer uses hooks at
-    # all (it tails the session transcript directly), so this strips any
-    # such hooks a previous run may have left behind in settings.json.
+    # that POSTed to the viewer server. The viewer has never needed hooks
+    # since (first a transcript tailer, now the Agent SDK driver), so this
+    # strips any such hooks a previous run may have left behind in
+    # settings.json.
     # Safe to call unconditionally and repeatedly — a no-op once cleaned,
     # and it never touches the file if nothing matches.
     local settings_file="$CONFIG_DIR/settings.json"
@@ -349,6 +357,10 @@ while [ $# -gt 0 ]; do
             ;;
         --viewer-port)
             VIEWER_PORT="$2"
+            shift 2
+            ;;
+        --viewer-driver-port)
+            VIEWER_DRIVER_PORT="$2"
             shift 2
             ;;
         *)
@@ -416,19 +428,26 @@ CONNECT_CONFIG="${CONFIG_DIR}:/home/claude/.claude:z"
 VIEWER_PORT_FLAGS=()
 
 if [ "$VIEWER_ENABLED" = 1 ]; then
-    for f in server.py viewer.html start-viewer.sh; do
+    for f in server.py viewer.html start-viewer.sh driver.mjs package.json; do
         if [ ! -f "$CONFIG_DIR/viewer/$f" ]; then
             echo "Error: $CONFIG_DIR/viewer/$f not found."
-            echo "Copy the whole viewer/ directory (server.py, viewer.html, start-viewer.sh) into $CONFIG_DIR/viewer/ first."
+            echo "Copy the whole viewer/ directory into $CONFIG_DIR/viewer/ first, then run 'npm install' there."
             exit 1
         fi
     done
+    if [ ! -d "$CONFIG_DIR/viewer/node_modules" ]; then
+        echo "Error: $CONFIG_DIR/viewer/node_modules not found."
+        echo "Run 'npm install' in $CONFIG_DIR/viewer/ first (needed for driver.mjs's Agent SDK dependency)."
+        exit 1
+    fi
 
-    VIEWER_PORT_FLAGS=(-p "127.0.0.1:${VIEWER_PORT}:${VIEWER_PORT}")
+    VIEWER_PORT_FLAGS=(-p "127.0.0.1:${VIEWER_PORT}:${VIEWER_PORT}" -p "127.0.0.1:${VIEWER_DRIVER_PORT}:${VIEWER_DRIVER_PORT}")
     free_host_port "$VIEWER_PORT"
+    free_host_port "$VIEWER_DRIVER_PORT"
 
-    # The server starts inside the container and reads the session's JSONL
-    # transcript directly — no hooks involved.
+    # server.py is a plain broadcast relay; driver.mjs (Agent SDK-based) is
+    # what actually drives Claude and is what the browser will talk to once
+    # it has an input box. Both start inside the container.
     echo "Viewer: opening http://localhost:$VIEWER_PORT in your browser once it's up..."
     wait_and_open_viewer "$VIEWER_PORT" &
     VIEWER_OPEN_PID=$!
@@ -484,6 +503,7 @@ docker run -it --rm \
   -e HOME=/home/claude \
   -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
   -e VIEWER_PORT="$VIEWER_PORT" \
+  -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
   ${EFFECTIVE_TOKEN:+-e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"} \
   ${EFFECTIVE_MODEL:+-e ANTHROPIC_MODEL="$EFFECTIVE_MODEL"} \
   "${LITELLM_ENV_FLAGS[@]}" \

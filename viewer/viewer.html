@@ -55,6 +55,7 @@
     --font-size: 15px;
     --content-width: 860px;
     --label-font-size: 11px;
+    --status-font-size: 12px;
   }
 
   /* ── Light theme override ─────────────────────────────────────────── */
@@ -94,7 +95,7 @@
   /* ── Layout ────────────────────────────────────────────────────────── */
   #app {
     display: grid;
-    grid-template-rows: 48px 1fr;
+    grid-template-rows: 48px 1fr auto;
     height: 100vh;
     max-width: var(--content-width);
     margin: 0 auto;
@@ -191,6 +192,117 @@
     margin: 0 0 8px;
   }
 
+  /* ── Sessions panel ────────────────────────────────────────────────── */
+  #sessions-panel {
+    display: none;
+    position: absolute;
+    top: 48px;
+    left: 20px;
+    width: 280px;
+    max-height: 70vh;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    z-index: 20;
+    overflow: hidden;
+    flex-direction: column;
+  }
+  #sessions-panel.open { display: flex; }
+  #sessions-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+  }
+  #new-chat-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #sessions-view-toggle {
+    display: flex;
+    gap: 2px;
+    padding: 8px 14px 0;
+  }
+  .sessions-tab {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 5px 10px;
+    border-radius: 6px 6px 0 0;
+    cursor: pointer;
+  }
+  .sessions-tab.active { color: var(--accent); background: var(--code-bg); }
+
+  #sessions-list { overflow-y: auto; }
+  .session-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    position: relative;
+  }
+  .session-item:last-child { border-bottom: none; }
+  .session-item:hover { background: var(--code-bg); }
+  .session-item.current { background: var(--code-bg); border-left: 3px solid var(--accent); }
+  .session-title {
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 60px; /* room for hover actions */
+  }
+  .session-title-input {
+    font-size: 13px;
+    font-family: var(--sans);
+    color: var(--text);
+    background: var(--code-bg);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 1px 4px;
+    width: calc(100% - 8px);
+  }
+  .session-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .session-actions {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    display: none;
+    gap: 4px;
+  }
+  .session-item:hover .session-actions { display: flex; }
+  .session-action-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .session-action-btn:hover { border-color: var(--accent); color: var(--text); }
+  .session-action-btn.session-delete-btn:hover { border-color: #f87171; color: #f87171; }
+  .session-action-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .session-action-btn:disabled:hover { border-color: var(--border); color: var(--muted); }
+
   /* ── Message feed ──────────────────────────────────────────────────── */
   #feed {
     position: relative;
@@ -222,6 +334,130 @@
     z-index: 15;
   }
   #new-pill.show { display: block; }
+
+  /* ── Turn-in-flight indicator ──────────────────────────────────────── */
+  /* Ephemeral "Thinking…" / "Running `Bash`… (12s)" line — covers the gap
+     before any content has streamed in yet, and long-running tool calls.
+     Disappears the moment real content starts streaming (see stream_start
+     handling) or the turn ends. */
+  #turn-indicator {
+    display: none;
+    padding: 4px 20px 0;
+    font-size: var(--status-font-size);
+    color: var(--muted);
+    font-style: italic;
+  }
+  #turn-indicator.show { display: block; }
+
+  /* ── Input bar ─────────────────────────────────────────────────────── */
+  #input-bar {
+    position: relative;
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    background: var(--bg);
+  }
+  #input-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+  }
+  #palette-btn, #stop-btn, #send-btn {
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #palette-btn { font-family: var(--mono); padding: 9px 12px; }
+  #send-btn { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #send-btn:disabled, #palette-btn:disabled { opacity: .5; cursor: not-allowed; }
+  #stop-btn { background: #f87171; border-color: #f87171; color: #fff; display: none; }
+  #stop-btn.show { display: block; }
+  #send-btn.hide-for-stop { display: none; }
+
+  #prompt-input {
+    flex: 1;
+    resize: none;
+    min-height: 40px;
+    max-height: 200px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: var(--font-size);
+    line-height: 1.4;
+  }
+  #prompt-input:disabled { opacity: .6; }
+  #prompt-input:focus { outline: 1px solid var(--accent); }
+
+  /* ── Command palette ──────────────────────────────────────────────── */
+  #palette-dropdown {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 20px;
+    right: 20px;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  }
+  #palette-dropdown.show { display: block; }
+  .palette-item {
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .palette-item:last-child { border-bottom: none; }
+  .palette-item:hover { background: var(--code-bg); }
+  .palette-empty { padding: 10px 14px; color: var(--muted); font-size: 13px; }
+
+  /* ── Permission / question cards ──────────────────────────────────── */
+  .perm-card { display: flex; flex-direction: column; gap: 10px; }
+  .perm-q-text { font-weight: 600; color: var(--heading); }
+  .perm-tool-summary {
+    font-family: var(--mono);
+    font-size: .85em;
+    color: var(--muted);
+  }
+  .perm-question { display: flex; flex-direction: column; gap: 6px; }
+  .perm-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .perm-option-btn {
+    border: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 7px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .perm-option-btn:hover { border-color: var(--accent); }
+  .perm-option-btn.selected { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .perm-option-btn.perm-allow:hover { border-color: var(--green); }
+  .perm-option-btn.perm-deny:hover { border-color: #f87171; }
+  .perm-submit-btn {
+    align-self: flex-start;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 7px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .perm-submit-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .perm-resolved { color: var(--muted); font-size: .9em; font-style: italic; }
 
   /* ── Message bubble ─────────────────────────────────────────────────── */
   .msg {
@@ -259,6 +495,21 @@
   .msg.assistant .msg-label { color: var(--muted); }
   .msg.tool   .msg-label { color: var(--green); }
   .msg.agent  .msg-label { color: var(--purple); }
+  .msg.thinking .msg-label { color: var(--purple); }
+  .msg.permission .msg-label { color: var(--accent); }
+  .msg.permission .msg-body { border-color: var(--accent); }
+
+  /* thinking blocks: distinct from assistant text, subdued/italic like the
+     TUI's collapsed thinking display */
+  .msg.thinking .msg-body {
+    font-style: italic;
+    color: var(--muted);
+    background: var(--code-bg);
+  }
+
+  /* tool bubbles can now hold real diffs (Edit/Write), not just a one-liner —
+     cap height so a huge diff doesn't dominate the feed */
+  .msg.tool .msg-body pre { max-height: 400px; overflow-y: auto; }
 
   /* whole-message copy button (assistant only) */
   .msg-copy-btn {
@@ -450,6 +701,7 @@
 <body>
 <div id="app">
   <header>
+    <button id="sessions-btn" title="Sessions">☰</button>
     <div class="logo"></div>
     <span>Claude Viewer</span>
     <div id="status">
@@ -460,18 +712,34 @@
     <button id="settings-btn" title="Settings">⚙</button>
   </header>
 
+  <div id="sessions-panel">
+    <div id="sessions-panel-header">
+      <span>Sessions</span>
+      <button id="new-chat-btn">+ New chat</button>
+    </div>
+    <div id="sessions-view-toggle">
+      <button class="sessions-tab active" data-view="active">Active</button>
+      <button class="sessions-tab" data-view="archived">Archived</button>
+    </div>
+    <div id="sessions-list"></div>
+  </div>
+
   <div id="settings-panel">
     <div class="settings-row">
       <label>Font size <span class="row-value" id="font-size-val">15px</span></label>
-      <input type="range" id="font-size-slider" min="12" max="22" step="1" value="15">
+      <input type="range" id="font-size-slider" min="8" max="40" step="1" value="15">
     </div>
     <div class="settings-row">
       <label>Content width <span class="row-value" id="width-val">860px</span></label>
-      <input type="range" id="width-slider" min="600" max="1400" step="20" value="860">
+      <input type="range" id="width-slider" min="360" max="2600" step="20" value="860">
     </div>
     <div class="settings-row">
       <label>Label size <span class="row-value" id="label-size-val">11px</span></label>
-      <input type="range" id="label-size-slider" min="9" max="16" step="1" value="11">
+      <input type="range" id="label-size-slider" min="6" max="32" step="1" value="11">
+    </div>
+    <div class="settings-row">
+      <label>Status text size <span class="row-value" id="status-size-val">12px</span></label>
+      <input type="range" id="status-size-slider" min="6" max="32" step="1" value="12">
     </div>
     <div class="settings-row">
       <label><span>Light theme</span> <input type="checkbox" id="theme-toggle"></label>
@@ -502,10 +770,21 @@
     <div id="empty">
       <div class="icon">⌨</div>
       <p>Waiting for messages from Claude Code…</p>
-      <p>Type a prompt in your terminal — it will appear here, rendered.</p>
+      <p>Type a prompt below, or in your terminal — either way, it renders here.</p>
     </div>
   </div>
   <button id="new-pill">↓ New messages</button>
+  <div id="turn-indicator"></div>
+
+  <div id="input-bar">
+    <div id="palette-dropdown"></div>
+    <div id="input-row">
+      <button id="palette-btn" title="Commands">/</button>
+      <textarea id="prompt-input" rows="1" placeholder="Message Claude… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send-btn">Send</button>
+      <button id="stop-btn">Stop</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -572,6 +851,17 @@ function setStatus(state, text) {
   label.textContent = text;
 }
 
+const turnIndicator = document.getElementById('turn-indicator');
+function setTurnIndicator(text) {
+  if (!text) {
+    turnIndicator.classList.remove('show');
+    turnIndicator.textContent = '';
+    return;
+  }
+  turnIndicator.textContent = text;
+  turnIndicator.classList.add('show');
+}
+
 function removeEmpty() {
   if (empty.parentNode) empty.remove();
 }
@@ -580,7 +870,15 @@ function labelFor(role) {
   if (role === 'user') return 'You';
   if (role === 'tool') return 'Tool';
   if (role === 'agent') return 'Agent';
+  if (role === 'thinking') return 'Thinking';
+  if (role === 'permission') return 'Permission';
   return 'Claude';
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function formatTs(iso) {
@@ -636,7 +934,7 @@ function getOrCreate(id, role) {
       el: bodyEl,
       rawEl: bodyEl.querySelector('.agent-raw'),
       tsEl: wrap.querySelector('.ts'),
-      rawText: '', ts: null, role, revealTimer: null,
+      rawText: '', ts: null, role, revealTimer: null, permId: id,
     };
     return msgs[id];
   }
@@ -647,7 +945,7 @@ function getOrCreate(id, role) {
   feed.appendChild(wrap);
 
   const body = wrap.querySelector('.msg-body');
-  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), rawText: '', ts: null, role, revealTimer: null };
+  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), rawText: '', ts: null, role, revealTimer: null, permId: id };
 
   const copyBtn = wrap.querySelector('.msg-copy-btn');
   if (copyBtn) {
@@ -667,8 +965,155 @@ function renderBody(entry) {
     entry.rawEl.textContent = entry.rawText || '';
     return;
   }
+  if (entry.role === 'permission') {
+    renderPermissionCard(entry);
+    return;
+  }
+  if (entry.role === 'tool') {
+    // No math extraction here: tool bubbles are command lines, file paths,
+    // and diffs — full of bare `$` (positional/shell params, `$(...)`,
+    // regex anchors, etc.) that extractMath()'s blind regex can't tell
+    // apart from real LaTeX delimiters. Markdown/code-fence rendering
+    // (needed for the Edit/Write diff blocks) still applies, just without
+    // the math pass in front of it.
+    entry.el.innerHTML = marked.parse(entry.rawText || '');
+    return;
+  }
   const html = marked.parse(extractMath(entry.rawText || ''));
   entry.el.innerHTML = injectMath(html);
+}
+
+// ── Permission / AskUserQuestion cards ──────────────────────────────────────
+// entry.rawText is JSON: {kind: 'permission'|'question', toolName, toolInput}.
+// entry.resolved/resolvedText are set locally once acted on — there's no
+// server-side memory of resolution state, so a stale reconnect could show
+// live buttons for an already-resolved request again; clicking them just
+// gets a 404 from driver.mjs (handled below), not a crash.
+async function resolvePermission(id, payload) {
+  try {
+    const res = await fetch(`${driverBase}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, ...payload }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.error('Failed to resolve permission:', e);
+    return false;
+  }
+}
+
+function renderPermissionCard(entry) {
+  let data;
+  try {
+    data = JSON.parse(entry.rawText || '{}');
+  } catch (e) {
+    entry.el.textContent = entry.rawText || '';
+    return;
+  }
+
+  // entry.resolved/resolvedText are the instant, purely-local flag this same
+  // tab sets the moment it clicks Allow/Deny/submit (before the round trip
+  // to the driver even completes). data.resolved/resolvedText are the
+  // durable, server-broadcast version driver.mjs now sends once it actually
+  // records the decision — present on reload/reconnect, or in a second tab,
+  // where entry.resolved was never set locally at all.
+  if (entry.resolved || data.resolved) {
+    const text = entry.resolved ? entry.resolvedText : data.resolvedText;
+    entry.el.innerHTML = `<div class="perm-resolved">${escapeHtml(text || 'Resolved')}</div>`;
+    return;
+  }
+
+  const { kind, toolName, toolInput } = data;
+  entry.el.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'perm-card';
+
+  if (kind === 'question') {
+    const questions = toolInput?.questions || [];
+    const answers = {};
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'perm-submit-btn';
+    submitBtn.textContent = questions.length > 1 ? 'Submit answers' : 'Submit answer';
+    submitBtn.disabled = true;
+
+    questions.forEach((q, qi) => {
+      const qDiv = document.createElement('div');
+      qDiv.className = 'perm-question';
+      const qText = document.createElement('div');
+      qText.className = 'perm-q-text';
+      qText.textContent = q.question || q.header || `Question ${qi + 1}`;
+      qDiv.appendChild(qText);
+
+      const optsDiv = document.createElement('div');
+      optsDiv.className = 'perm-options';
+      (q.options || []).forEach((opt) => {
+        const btn = document.createElement('button');
+        btn.className = 'perm-option-btn';
+        btn.textContent = opt.label;
+        if (opt.description) btn.title = opt.description;
+        btn.addEventListener('click', () => {
+          answers[qi] = opt.label;
+          optsDiv.querySelectorAll('.perm-option-btn').forEach((b) => b.classList.remove('selected'));
+          btn.classList.add('selected');
+          submitBtn.disabled = Object.keys(answers).length < questions.length;
+        });
+        optsDiv.appendChild(btn);
+      });
+      qDiv.appendChild(optsDiv);
+      card.appendChild(qDiv);
+    });
+
+    submitBtn.addEventListener('click', async () => {
+      submitBtn.disabled = true;
+      const formatted = questions
+        .map((q, qi) => `${q.header || q.question}: ${answers[qi]}`)
+        .join('; ');
+      const ok = await resolvePermission(entry.permId, { answer: formatted });
+      entry.resolved = true;
+      entry.resolvedText = ok ? `Answered: ${formatted}` : 'This request already expired.';
+      renderPermissionCard(entry);
+    });
+    card.appendChild(submitBtn);
+  } else {
+    const qText = document.createElement('div');
+    qText.className = 'perm-q-text';
+    qText.innerHTML = `Approve <code>${escapeHtml(toolName || 'tool')}</code>?`;
+    card.appendChild(qText);
+
+    const actions = document.createElement('div');
+    actions.className = 'perm-options';
+
+    const allowBtn = document.createElement('button');
+    allowBtn.className = 'perm-option-btn perm-allow';
+    allowBtn.textContent = 'Allow';
+    allowBtn.addEventListener('click', async () => {
+      allowBtn.disabled = true;
+      denyBtn.disabled = true;
+      const ok = await resolvePermission(entry.permId, { allow: true });
+      entry.resolved = true;
+      entry.resolvedText = ok ? 'Allowed' : 'This request already expired.';
+      renderPermissionCard(entry);
+    });
+
+    const denyBtn = document.createElement('button');
+    denyBtn.className = 'perm-option-btn perm-deny';
+    denyBtn.textContent = 'Deny';
+    denyBtn.addEventListener('click', async () => {
+      allowBtn.disabled = true;
+      denyBtn.disabled = true;
+      const ok = await resolvePermission(entry.permId, { allow: false });
+      entry.resolved = true;
+      entry.resolvedText = ok ? 'Denied' : 'This request already expired.';
+      renderPermissionCard(entry);
+    });
+
+    actions.appendChild(allowBtn);
+    actions.appendChild(denyBtn);
+    card.appendChild(actions);
+  }
+
+  entry.el.appendChild(card);
 }
 
 // Messages arrive whole, not token-by-token — reveal them word-by-word so
@@ -687,13 +1132,23 @@ function revealText(entry, fullText) {
   entry.el.classList.add('streaming');
 
   entry.revealTimer = setInterval(() => {
-    shown = Math.min(totalWords, shown + wordsPerStep);
-    entry.rawText = words.slice(0, shown).join('');
-    renderBody(entry);
-    scrollBottom();
-    if (shown >= totalWords) {
-      clearInterval(entry.revealTimer);
-      entry.el.classList.remove('streaming');
+    try {
+      shown = Math.min(totalWords, shown + wordsPerStep);
+      entry.rawText = words.slice(0, shown).join('');
+      renderBody(entry);
+      scrollBottom();
+    } catch (e) {
+      // If rendering ever throws (a markdown/KaTeX edge case), force
+      // completion instead of retrying the same failing render forever —
+      // otherwise this interval never reaches the cleanup below, and the
+      // streaming cursor is left blinking on that bubble permanently.
+      console.error('Error during message reveal, forcing completion:', e);
+      shown = totalWords;
+    } finally {
+      if (shown >= totalWords) {
+        clearInterval(entry.revealTimer);
+        entry.el.classList.remove('streaming');
+      }
     }
   }, stepMs);
 }
@@ -737,6 +1192,7 @@ function connect() {
   es.onopen = () => {
     setStatus('live', 'live');
     clearTimeout(reconnectTimer);
+    resyncTurnStatus();
   };
 
   es.onerror = () => {
@@ -745,14 +1201,23 @@ function connect() {
     reconnectTimer = setTimeout(connect, 2000);
   };
 
-  // Complete messages, tailed from the session transcript
+  // Complete messages, broadcast live by driver.mjs
   es.addEventListener('message', e => {
     const msg = JSON.parse(e.data);
     const { id, role, text, ts } = msg;
     const entry = getOrCreate(id, role);
     entry.ts = ts;
     if (entry.tsEl) entry.tsEl.textContent = formatTs(ts);
-    if (role === 'user' || role === 'agent') {
+    if (role === 'user' || role === 'agent' || role === 'permission') {
+      entry.rawText = text;
+      entry.el.classList.remove('streaming');
+      renderBody(entry);
+      scrollBottom();
+    } else if (entry.liveStreamed) {
+      // Already typed out live via stream_delta — this is just the
+      // authoritative final text for the same bubble, not new content to
+      // reveal again. Render it instantly instead of re-animating.
+      entry.liveStreamed = false;
       entry.rawText = text;
       entry.el.classList.remove('streaming');
       renderBody(entry);
@@ -775,12 +1240,73 @@ function connect() {
       scrollBottom();
     }
   });
+
+  // Ephemeral turn-in-flight signal from driver.mjs (not part of message_log
+  // — see server.py's /status handler). Keeps the Send/Stop toggle correct
+  // even if this tab reconnects mid-turn or another tab started it.
+  es.addEventListener('status', e => {
+    const s = JSON.parse(e.data);
+    if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); }
+    if (s.type === 'turn_end') { setTurnInFlight(false); setTurnIndicator(null); }
+
+    // Live thinking-token estimate during the redacted-thinking phase, when
+    // no actual thinking text streams yet (see SDKThinkingTokensMessage).
+    if (s.type === 'thinking_tokens') setTurnIndicator(`Thinking… (${s.estimated_tokens} tokens)`);
+
+    // Ticking status for long-running tool calls (mirrors the TUI's
+    // "esc to interrupt (12s)" line).
+    if (s.type === 'tool_progress') setTurnIndicator(`Running \`${s.toolName}\`… (${Math.round(s.elapsedSeconds)}s)`);
+
+    // Real per-token streaming (includePartialMessages): a text/thinking
+    // block just started — create its bubble now and mark it as
+    // live-streamed so the eventual 'message' event finalizes instead of
+    // re-revealing. Real content is here now, so the placeholder line goes
+    // away.
+    if (s.type === 'stream_start') {
+      const entry = getOrCreate(s.id, s.role);
+      entry.liveStreamed = true;
+      entry.el.classList.add('streaming');
+      setTurnIndicator(null);
+    }
+
+    if (s.type === 'stream_delta') {
+      const entry = getOrCreate(s.id, s.role);
+      entry.liveStreamed = true;
+      entry.rawText = s.text;
+      renderBody(entry);
+      scrollBottom();
+    }
+  });
+
+  // Session switch / new chat: driver.mjs replaced the whole history.
+  // Wipe the feed and re-render from scratch, same rendering path history
+  // replay already uses (no reveal animation — this is loaded content, not
+  // something newly generated live).
+  es.addEventListener('reset', e => {
+    const entries = JSON.parse(e.data);
+    clearFeed();
+    for (const entry of entries) {
+      const m = getOrCreate(entry.id, entry.role);
+      m.ts = entry.ts;
+      if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
+      m.rawText = entry.text;
+      // getOrCreate() bakes the 'streaming' class into every fresh assistant
+      // bubble unconditionally (see its template) — the 'message' and
+      // 'history' handlers both explicitly strip it back off, but this one
+      // never did, so every assistant message loaded via a session switch/
+      // new-chat reset was left with a permanent blinking cursor.
+      m.el.classList.remove('streaming');
+      m.liveStreamed = false;
+      renderBody(m);
+    }
+    scrollBottom();
+  });
 }
 
 // ── Settings panel ──────────────────────────────────────────────────────────
 const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
-  fontSize: 15, width: 860, labelFontSize: 11, theme: 'dark', showTools: true,
+  fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
   tsFormat: 'time', hour24: false, showTz: false,
 };
 
@@ -800,6 +1326,7 @@ function applySettings() {
   document.documentElement.style.setProperty('--font-size', settings.fontSize + 'px');
   document.documentElement.style.setProperty('--content-width', settings.width + 'px');
   document.documentElement.style.setProperty('--label-font-size', settings.labelFontSize + 'px');
+  document.documentElement.style.setProperty('--status-font-size', settings.statusFontSize + 'px');
   document.documentElement.setAttribute('data-theme', settings.theme === 'light' ? 'light' : 'dark');
   feed.classList.toggle('hide-tools', !settings.showTools);
   const tsHidden = settings.tsFormat === 'hidden';
@@ -818,6 +1345,8 @@ const widthSlider    = document.getElementById('width-slider');
 const widthVal       = document.getElementById('width-val');
 const labelSlider    = document.getElementById('label-size-slider');
 const labelVal       = document.getElementById('label-size-val');
+const statusSlider   = document.getElementById('status-size-slider');
+const statusVal      = document.getElementById('status-size-val');
 const themeToggle    = document.getElementById('theme-toggle');
 const toolsToggle    = document.getElementById('tools-toggle');
 const tsFormat       = document.getElementById('ts-format');
@@ -835,6 +1364,8 @@ widthSlider.value = settings.width;
 widthVal.textContent = settings.width + 'px';
 labelSlider.value = settings.labelFontSize;
 labelVal.textContent = settings.labelFontSize + 'px';
+statusSlider.value = settings.statusFontSize;
+statusVal.textContent = settings.statusFontSize + 'px';
 themeToggle.checked = settings.theme === 'light';
 toolsToggle.checked = settings.showTools;
 tsFormat.value = settings.tsFormat;
@@ -867,6 +1398,29 @@ labelSlider.addEventListener('input', () => {
   labelVal.textContent = settings.labelFontSize + 'px';
   applySettings();
   saveSettings();
+});
+
+// The status line this slider controls is normally only visible mid-turn,
+// so there's usually nothing on-screen to judge the size against while
+// dragging. Fake a preview line for the duration of the drag (only if
+// there isn't a real one already showing — a real turn already gives you
+// something to look at), and drop it again once the mouse is released.
+let statusSizePreview = false;
+statusSlider.addEventListener('input', () => {
+  settings.statusFontSize = Number(statusSlider.value);
+  statusVal.textContent = settings.statusFontSize + 'px';
+  applySettings();
+  saveSettings();
+  if (!turnInFlight) {
+    statusSizePreview = true;
+    setTurnIndicator('Thinking… (preview)');
+  }
+});
+statusSlider.addEventListener('change', () => {
+  if (statusSizePreview && !turnInFlight) {
+    setTurnIndicator(null);
+  }
+  statusSizePreview = false;
 });
 
 themeToggle.addEventListener('change', () => {
@@ -929,9 +1483,412 @@ function exportMarkdown() {
 
 exportBtn.addEventListener('click', exportMarkdown);
 
+// ── Input bar: talks to driver.mjs directly (a different port from this
+// page's own server.py), not through the SSE connection above ────────────
+let driverBase = null; // resolved from /config before the input bar works
+let turnInFlight = false;
+
+const promptInput  = document.getElementById('prompt-input');
+const sendBtn       = document.getElementById('send-btn');
+const stopBtn       = document.getElementById('stop-btn');
+const paletteBtn    = document.getElementById('palette-btn');
+const paletteDropdown = document.getElementById('palette-dropdown');
+
+async function loadDriverConfig() {
+  try {
+    const res = await fetch('/config');
+    const cfg = await res.json();
+    driverBase = `${location.protocol}//${location.hostname}:${cfg.driverPort}`;
+  } catch (e) {
+    console.error('Failed to load /config:', e);
+  }
+}
+
+function setTurnInFlight(inFlight) {
+  turnInFlight = inFlight;
+  promptInput.disabled = inFlight;
+  sendBtn.classList.toggle('hide-for-stop', inFlight);
+  stopBtn.classList.toggle('show', inFlight);
+}
+
+// Defense-in-depth: turn_start/turn_end are ephemeral SSE broadcasts, not
+// replayed on reconnect. If one is ever missed (a reconnect landing mid-turn,
+// a dropped event), this is what recovers — called on every SSE reconnect,
+// asks the driver directly rather than trusting only what's been broadcast.
+async function resyncTurnStatus() {
+  if (!driverBase) return;
+  try {
+    const res = await fetch(`${driverBase}/turn-status`);
+    const data = await res.json();
+    setTurnInFlight(!!data.inFlight);
+  } catch (e) {
+    console.error('Failed to resync turn status:', e);
+  }
+}
+
+function autoResizeInput() {
+  promptInput.style.height = 'auto';
+  promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
+}
+
+// Renders a message locally only — not sent to server.py/message_log, not
+// synced to other tabs. For client-side observations (submission failures)
+// that don't need to persist or replay on reconnect, just be visible now.
+function showLocalNotice(text) {
+  const id = 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  const entry = getOrCreate(id, 'tool');
+  entry.ts = new Date().toISOString();
+  if (entry.tsEl) entry.tsEl.textContent = formatTs(entry.ts);
+  entry.rawText = text;
+  renderBody(entry);
+  scrollBottom();
+}
+
+async function submitPrompt() {
+  const text = promptInput.value.trim();
+  if (!text || turnInFlight || !driverBase) return;
+  promptInput.value = '';
+  autoResizeInput();
+  dismissPalette();
+  setTurnInFlight(true);
+  try {
+    const res = await fetch(`${driverBase}/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      setTurnInFlight(false);
+      const errText = await res.text();
+      console.error('Prompt submission failed:', errText);
+      showLocalNotice(`*(message not sent: ${errText})*`);
+    }
+    // On success, setTurnInFlight(false) happens via the 'status' SSE event
+    // (turn_end) once the driver's runTurn() actually finishes — not here,
+    // since the real work happens asynchronously after this 202 response.
+  } catch (e) {
+    setTurnInFlight(false);
+    console.error('Prompt submission failed:', e);
+    showLocalNotice(`*(message not sent: ${e.message})*`);
+  }
+}
+
+promptInput.addEventListener('input', autoResizeInput);
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitPrompt();
+  }
+});
+sendBtn.addEventListener('click', submitPrompt);
+
+stopBtn.addEventListener('click', async () => {
+  if (!driverBase) return;
+  try {
+    await fetch(`${driverBase}/abort`, { method: 'POST' });
+  } catch (e) {
+    console.error('Abort failed:', e);
+  }
+});
+
+// ── Command palette ─────────────────────────────────────────────────────────
+function dismissPalette() {
+  paletteDropdown.classList.remove('show');
+  paletteDropdown.innerHTML = '';
+}
+
+async function openPalette() {
+  if (!driverBase) return;
+  if (paletteDropdown.classList.contains('show')) {
+    dismissPalette();
+    return;
+  }
+  paletteDropdown.innerHTML = '<div class="palette-empty">Loading…</div>';
+  paletteDropdown.classList.add('show');
+  try {
+    const res = await fetch(`${driverBase}/commands`);
+    const cmds = await res.json();
+    const visible = (cmds.slash_commands || [])
+      .filter((name) => !(cmds.terminal_slash_commands || []).includes(name))
+      .sort();
+    if (visible.length === 0) {
+      paletteDropdown.innerHTML = '<div class="palette-empty">No commands yet — send one message first (the list populates from that session\'s init).</div>';
+      return;
+    }
+    paletteDropdown.innerHTML = '';
+    for (const name of visible) {
+      const item = document.createElement('div');
+      item.className = 'palette-item';
+      item.textContent = `/${name}`;
+      item.addEventListener('click', () => {
+        promptInput.value = `/${name} `;
+        autoResizeInput();
+        dismissPalette();
+        promptInput.focus();
+      });
+      paletteDropdown.appendChild(item);
+    }
+  } catch (e) {
+    paletteDropdown.innerHTML = '<div class="palette-empty">Failed to load commands.</div>';
+    console.error('Failed to load /commands:', e);
+  }
+}
+
+paletteBtn.addEventListener('click', openPalette);
+document.addEventListener('click', (e) => {
+  if (paletteDropdown.classList.contains('show') &&
+      !paletteDropdown.contains(e.target) && e.target !== paletteBtn) {
+    dismissPalette();
+  }
+});
+
+// ── Session picker ───────────────────────────────────────────────────────────
+const sessionsBtn    = document.getElementById('sessions-btn');
+const sessionsPanel  = document.getElementById('sessions-panel');
+const sessionsList   = document.getElementById('sessions-list');
+const newChatBtn     = document.getElementById('new-chat-btn');
+const sessionsTabs   = document.querySelectorAll('.sessions-tab');
+
+let sessionsView = 'active'; // 'active' | 'archived'
+let lastSessionsResult = null; // cached {sessions, currentSessionId} from the last fetch
+
+// Wipes the visible feed and its associated state entirely — used when the
+// driver's /reset broadcast means a different session (or a fresh one) is
+// now current. Any in-flight reveal animations get stopped first so a
+// stale setInterval doesn't keep firing against a detached DOM node.
+function clearFeed() {
+  for (const m of Object.values(msgs)) {
+    if (m.revealTimer) clearInterval(m.revealTimer);
+  }
+  for (const k of Object.keys(msgs)) delete msgs[k];
+  feedOrder.length = 0;
+  feed.innerHTML = '';
+  feed.appendChild(empty);
+}
+
+function formatSessionWhen(lastModified) {
+  try {
+    return new Date(lastModified).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    });
+  } catch (e) {
+    return '';
+  }
+}
+
+function startRenameEdit(titleEl, session) {
+  const current = session.customTitle || session.summary || session.firstPrompt || '';
+  const input = document.createElement('input');
+  input.className = 'session-title-input';
+  input.value = current;
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const newTitle = input.value.trim();
+    if (save && newTitle && newTitle !== current && driverBase) {
+      try {
+        await fetch(`${driverBase}/rename-session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: session.sessionId, title: newTitle }),
+        });
+      } catch (e) {
+        console.error('Failed to rename session:', e);
+      }
+    }
+    await refreshSessionsList();
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function renderSessionsList() {
+  const data = lastSessionsResult;
+  if (!data) return;
+  const wantArchived = sessionsView === 'archived';
+  const sessions = (data.sessions || []).filter((s) => (s.tag === 'archived') === wantArchived);
+
+  sessionsList.innerHTML = '';
+  if (sessions.length === 0) {
+    sessionsList.innerHTML = `<div class="palette-empty">${wantArchived ? 'No archived sessions.' : 'No sessions yet.'}</div>`;
+    return;
+  }
+
+  for (const s of sessions) {
+    const isCurrent = s.sessionId === data.currentSessionId;
+    const item = document.createElement('div');
+    item.className = 'session-item' + (isCurrent ? ' current' : '');
+    const title = s.customTitle || s.summary || s.firstPrompt || '(untitled)';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'session-title';
+    titleEl.textContent = title;
+    titleEl.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      startRenameEdit(titleEl, s);
+    });
+
+    const metaEl = document.createElement('div');
+    metaEl.className = 'session-meta';
+    metaEl.textContent = formatSessionWhen(s.lastModified);
+
+    const actions = document.createElement('div');
+    actions.className = 'session-actions';
+
+    if (wantArchived) {
+      const unarchiveBtn = document.createElement('button');
+      unarchiveBtn.className = 'session-action-btn';
+      unarchiveBtn.textContent = 'Unarchive';
+      unarchiveBtn.addEventListener('click', (e) => { e.stopPropagation(); unarchiveSession(s.sessionId); });
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'session-action-btn session-delete-btn';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.disabled = isCurrent;
+      deleteBtn.title = isCurrent ? 'Switch away from this session first' : '';
+      deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteSessionFromUi(s.sessionId, title); });
+
+      actions.appendChild(unarchiveBtn);
+      actions.appendChild(deleteBtn);
+    } else {
+      const archiveBtn = document.createElement('button');
+      archiveBtn.className = 'session-action-btn';
+      archiveBtn.textContent = 'Archive';
+      archiveBtn.addEventListener('click', (e) => { e.stopPropagation(); archiveSession(s.sessionId); });
+      actions.appendChild(archiveBtn);
+    }
+
+    item.appendChild(titleEl);
+    item.appendChild(metaEl);
+    item.appendChild(actions);
+    item.addEventListener('click', () => switchSession(s.sessionId));
+    sessionsList.appendChild(item);
+  }
+}
+
+async function refreshSessionsList() {
+  if (!driverBase) return;
+  try {
+    const res = await fetch(`${driverBase}/sessions`);
+    lastSessionsResult = await res.json();
+    renderSessionsList();
+  } catch (e) {
+    sessionsList.innerHTML = '<div class="palette-empty">Failed to load sessions.</div>';
+    console.error('Failed to load /sessions:', e);
+  }
+}
+
+async function openSessionsPanel() {
+  if (sessionsPanel.classList.contains('open')) {
+    sessionsPanel.classList.remove('open');
+    return;
+  }
+  if (!driverBase) return;
+  sessionsList.innerHTML = '<div class="palette-empty">Loading…</div>';
+  sessionsPanel.classList.add('open');
+  await refreshSessionsList();
+}
+
+async function switchSession(sessionId) {
+  if (!driverBase || turnInFlight) return;
+  sessionsPanel.classList.remove('open');
+  try {
+    await fetch(`${driverBase}/switch-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    // Rendering happens via the 'reset' SSE event this triggers, not here.
+  } catch (e) {
+    console.error('Failed to switch session:', e);
+  }
+}
+
+async function archiveSession(sessionId) {
+  if (!driverBase || turnInFlight) return;
+  try {
+    await fetch(`${driverBase}/archive-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    await refreshSessionsList();
+  } catch (e) {
+    console.error('Failed to archive session:', e);
+  }
+}
+
+async function unarchiveSession(sessionId) {
+  if (!driverBase) return;
+  try {
+    await fetch(`${driverBase}/unarchive-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    await refreshSessionsList();
+  } catch (e) {
+    console.error('Failed to unarchive session:', e);
+  }
+}
+
+async function deleteSessionFromUi(sessionId, title) {
+  if (!driverBase) return;
+  if (!confirm(`Permanently delete "${title}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${driverBase}/delete-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Failed to delete session.');
+    }
+    await refreshSessionsList();
+  } catch (e) {
+    console.error('Failed to delete session:', e);
+  }
+}
+
+for (const tab of sessionsTabs) {
+  tab.addEventListener('click', () => {
+    sessionsView = tab.dataset.view;
+    for (const t of sessionsTabs) t.classList.toggle('active', t === tab);
+    renderSessionsList();
+  });
+}
+
+sessionsBtn.addEventListener('click', openSessionsPanel);
+newChatBtn.addEventListener('click', async () => {
+  if (!driverBase || turnInFlight) return;
+  sessionsPanel.classList.remove('open');
+  try {
+    await fetch(`${driverBase}/new-session`, { method: 'POST' });
+  } catch (e) {
+    console.error('Failed to start new session:', e);
+  }
+});
+document.addEventListener('click', (e) => {
+  if (sessionsPanel.classList.contains('open') &&
+      !sessionsPanel.contains(e.target) && e.target !== sessionsBtn) {
+    sessionsPanel.classList.remove('open');
+  }
+});
+
 // Wait for KaTeX to load before connecting
 window.addEventListener('load', () => {
   connect();
+  loadDriverConfig();
 });
 </script>
 </body>

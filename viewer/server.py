@@ -8,7 +8,23 @@ Serves a browser UI that renders Claude Code responses as rich text
 This server is a plain broadcast relay: driver.mjs (the Agent SDK-based
 bidirectional driver) POSTs every message the browser should see to
 /message, and this server fans it out over Server-Sent Events to any
-connected browser tabs, keeping a log for late-joining/reconnecting tabs.
+connected browser tabs.
+
+Multi-session: state is keyed by session id, not global. Each browser tab
+opens /events?session=<id> for whatever session it's currently viewing, and
+only ever sees that session's messages — a different tab (or the same tab,
+later) can independently view a different session at the same time, and a
+turn running in one session has zero effect on any other session's feed.
+There is deliberately no server-side notion of "the current session"
+anymore; that lived entirely in each tab's own choice of which id to
+connect with.
+
+The first time any tab asks to view a session this process hasn't seen live
+traffic for yet, its persisted history is pulled on demand from driver.mjs
+(GET /session-history) and used to seed that session's log before replaying
+it — this replaces the old driver-pushed /reset broadcast, which only made
+sense when there was one shared "current" session for every tab to be reset
+onto.
 
 It used to also tail the session's JSONL transcript directly and derive
 messages from it (no driver involved at all, purely mirroring an
@@ -25,52 +41,112 @@ Open http://localhost:7843 (or whichever host port is mapped) in your browser.
 
 import json
 import threading
+import time
+import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 VIEWER_HTML = Path(__file__).parent / "viewer.html"
 
-# ── Shared state ───────────────────────────────────────────────────────────────
-clients: list[Queue] = []
-clients_lock = threading.Lock()
-message_log: list[dict] = []  # full session history for late-joining tabs
-DRIVER_PORT: int | None = None  # reported to the browser via /config
+# ── Per-session shared state ────────────────────────────────────────────────────
+# sessionId -> {"log": [...], "seeded": bool, "clients": [Queue, ...]}
+sessions: dict[str, dict] = {}
+sessions_lock = threading.Lock()
+DRIVER_PORT: int | None = None
 
 
-def broadcast(event: str, data: str):
+def _get_session(session_id: str) -> dict:
+    with sessions_lock:
+        s = sessions.get(session_id)
+        if s is None:
+            s = {"log": [], "seeded": False, "clients": []}
+            sessions[session_id] = s
+        return s
+
+
+def broadcast_to(session_id: str, event: str, data: str):
+    s = _get_session(session_id)
     payload = f"event: {event}\ndata: {data}\n\n"
     dead = []
-    with clients_lock:
-        for q in clients:
+    with sessions_lock:
+        for q in s["clients"]:
             try:
                 q.put_nowait(payload)
             except Exception:
                 dead.append(q)
         for q in dead:
-            clients.remove(q)
+            s["clients"].remove(q)
 
 
-def _emit(event: str, entry: dict):
-    # Upsert by id rather than blind-append: driver.mjs can now broadcast an
+def _emit(session_id: str, event: str, entry: dict):
+    # Upsert by id rather than blind-append: driver.mjs can broadcast an
     # updated version of a message it already sent (e.g. a permission bubble
     # rebroadcast with the decision baked in once it's answered) under the
-    # same id. Replacing in place means a late-joining tab's history/reset
-    # replay only ever sees the final state for that id, not a stale
-    # unresolved copy followed by the real one — both render fine in order,
-    # but keeping just one entry is cleaner and avoids doubling it up in
-    # /history and the Markdown export.
+    # same id. Replacing in place means a late-joining tab only ever sees
+    # the final state for that id, not a stale copy followed by the real
+    # one — both would render fine in order, but this avoids doubling it up
+    # in /history and the Markdown export.
+    s = _get_session(session_id)
     entry_id = entry.get("id")
-    if entry_id is not None:
-        for i, existing in enumerate(message_log):
-            if existing.get("id") == entry_id:
-                message_log[i] = entry
-                broadcast(event, json.dumps(entry))
-                return
-    message_log.append(entry)
-    broadcast(event, json.dumps(entry))
+    with sessions_lock:
+        replaced = False
+        if entry_id is not None:
+            for i, existing in enumerate(s["log"]):
+                if existing.get("id") == entry_id:
+                    s["log"][i] = entry
+                    replaced = True
+                    break
+        if not replaced:
+            s["log"].append(entry)
+    broadcast_to(session_id, event, json.dumps(entry))
+
+
+def _fetch_session_history(session_id: str) -> list:
+    """Ask driver.mjs to convert this session's persisted transcript into
+    our {role, text, id, ts} shape. A couple of quick retries guard against
+    the narrow startup race where a browser tab connects before driver.mjs
+    has finished binding its port (server.py is started first by
+    start-viewer.sh) — not against any steady-state failure, which just
+    falls back to an empty history (same as a brand-new session)."""
+    url = f"http://127.0.0.1:{DRIVER_PORT}/session-history?sessionId={urllib.parse.quote(session_id)}"
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.3)
+    return []
+
+
+def _ensure_seeded(session_id: str):
+    # Claims the "seeded" flag BEFORE the network call (under the lock) so
+    # concurrent connects for the same session don't both fetch; the actual
+    # fetch and log-splice happen outside the lock so a slow driver call
+    # doesn't block unrelated sessions.
+    s = _get_session(session_id)
+    with sessions_lock:
+        if s["seeded"]:
+            return
+        s["seeded"] = True
+
+    history = _fetch_session_history(session_id)
+    entries = []
+    for h in history:
+        role = h.get("role", "assistant")
+        text = h.get("text", h.get("content", ""))
+        msg_id = h.get("id") or f"{role}-{uuid.uuid4()}"
+        entries.append({"type": "message", "role": role, "text": text,
+                         "id": msg_id, "ts": h.get("ts")})
+
+    with sessions_lock:
+        # Prepend: historical entries always logically precede anything
+        # that could have arrived live while this fetch was in flight.
+        s["log"] = entries + s["log"]
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
@@ -89,7 +165,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query)
+        session_id = (qs.get("session") or [None])[0]
 
         if path == "/":
             self.send_response(200)
@@ -98,6 +177,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(VIEWER_HTML.read_bytes())
 
         elif path == "/events":
+            if not session_id:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            _ensure_seeded(session_id)
+            s = _get_session(session_id)
+
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -105,12 +192,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
             q: Queue = Queue()
-            with clients_lock:
-                clients.append(q)
+            with sessions_lock:
+                s["clients"].append(q)
+                log_snapshot = list(s["log"])
 
             try:
-                # Replay history for late-joining tabs
-                for entry in message_log:
+                # Replay this session's history for late-joining/reconnecting
+                # tabs, or for a tab switching to view this session for the
+                # first time in this browser session.
+                for entry in log_snapshot:
                     payload = f"event: history\ndata: {json.dumps(entry)}\n\n"
                     self.wfile.write(payload.encode())
                 self.wfile.flush()
@@ -126,12 +216,13 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
-                with clients_lock:
-                    if q in clients:
-                        clients.remove(q)
+                with sessions_lock:
+                    if q in s["clients"]:
+                        s["clients"].remove(q)
 
         elif path == "/history":
-            body = json.dumps(message_log).encode()
+            log = _get_session(session_id)["log"] if session_id else []
+            body = json.dumps(log).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -164,38 +255,24 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        session_id = payload.get("sessionId")
+
         # The only ingress point for chat content: driver.mjs posts every
-        # message the browser should see here (also handy for manual
-        # testing, e.g. `curl -d '{"role":"user","text":"hi"}'`).
-        if path == "/message":
+        # message the browser should see here, tagged with which session it
+        # belongs to (also handy for manual testing, e.g.
+        # `curl -d '{"sessionId":"...","role":"user","text":"hi"}'`).
+        if path == "/message" and session_id:
             role = payload.get("role", "assistant")
             text = payload.get("content", payload.get("text", ""))
             msg_id = payload.get("id") or f"{role}-{uuid.uuid4()}"
-            _emit("message", {"type": "message", "role": role,
-                               "text": text, "id": msg_id, "ts": payload.get("ts")})
+            _emit(session_id, "message", {"type": "message", "role": role,
+                                           "text": text, "id": msg_id, "ts": payload.get("ts")})
 
-        # Ephemeral UI-state signals (turn_start/turn_end) — broadcast only,
-        # deliberately not appended to message_log: these are point-in-time
-        # signals, not something that makes sense to replay on reconnect.
-        elif path == "/status":
-            broadcast("status", json.dumps(payload))
-
-        # Session switch / new chat: driver.mjs replaces the whole visible
-        # history wholesale. Connected tabs wipe their feed and re-render
-        # from this — see viewer.html's "reset" SSE handler. Note this
-        # affects every connected tab at once (broadcast is global, not
-        # per-connection), a known limitation for the rare multi-tab case.
-        elif path == "/reset":
-            entries = []
-            for m in payload.get("messages", []):
-                role = m.get("role", "assistant")
-                text = m.get("content", m.get("text", ""))
-                msg_id = m.get("id") or f"{role}-{uuid.uuid4()}"
-                entries.append({"type": "message", "role": role, "text": text,
-                                 "id": msg_id, "ts": m.get("ts")})
-            message_log.clear()
-            message_log.extend(entries)
-            broadcast("reset", json.dumps(entries))
+        # Ephemeral UI-state signals (turn_start/turn_end/stream_delta/...) —
+        # broadcast only, deliberately not appended to any log: these are
+        # point-in-time signals, not something that makes sense to replay.
+        elif path == "/status" and session_id:
+            broadcast_to(session_id, "status", json.dumps(payload))
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -216,7 +293,9 @@ def main():
     parser.add_argument("--driver-port", type=int, default=7844,
                         help="Port driver.mjs listens on — reported to the "
                              "browser via /config so it knows where to POST "
-                             "prompts/permission-responses (default: 7844)")
+                             "prompts/permission-responses, and used directly "
+                             "by this process to pull a session's persisted "
+                             "history on demand (default: 7844)")
     args = parser.parse_args()
     DRIVER_PORT = args.driver_port
 

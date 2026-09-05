@@ -221,6 +221,7 @@
     letter-spacing: .06em;
     color: var(--muted);
   }
+  #new-chat-wrap { position: relative; }
   #new-chat-btn {
     background: var(--accent);
     color: #fff;
@@ -232,6 +233,51 @@
     letter-spacing: normal;
     font-weight: 600;
     cursor: pointer;
+  }
+
+  /* New-chat project picker: which project (existing, or a freshly typed
+     subdirectory) the new session should start in. Defaults effectively to
+     "just continue in the current project" — that row is listed first and
+     marked, so the zero-effort case is still just one extra click, not a
+     detour, while the deliberate cross-project case is right there too. */
+  #new-chat-picker {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 6px;
+    width: 260px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    z-index: 25;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+  }
+  #new-chat-picker.show { display: block; }
+  .new-chat-project-item {
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .new-chat-project-item:hover { background: var(--code-bg); }
+  .new-chat-project-item.current { color: var(--accent); font-weight: 600; }
+  .new-chat-custom-row { padding: 8px 14px; }
+  .new-chat-custom-row input {
+    width: 100%;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-family: var(--mono);
   }
   #sessions-view-toggle {
     display: flex;
@@ -280,6 +326,66 @@
     width: calc(100% - 8px);
   }
   .session-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* Cross-session awareness: visible without switching to that session.
+     needsPermission (a decision is waiting on you) takes visual priority
+     over a plain inFlight dot (still just running) — it's more actionable. */
+  .session-badge {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-left: 6px;
+    vertical-align: middle;
+    background: var(--green);
+  }
+  .session-badge.needs-permission {
+    background: var(--accent);
+    animation: badge-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes badge-pulse { 50% { opacity: .35; } }
+
+  /* Grouped-by-project layout: a section header per project, sorted (like
+     the flat view) by that group's own most-recent session. */
+  .session-group-header {
+    padding: 8px 14px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+  }
+
+  /* Unreachable sessions (project directory no longer resolves — see the
+     'Unreachable sessions' setting): visibly inert, not just dim text —
+     there's genuinely nothing to click here, unlike every other row. */
+  .session-item.session-unreachable {
+    cursor: default;
+    opacity: .55;
+  }
+  .session-item.session-unreachable:hover { background: none; }
+  .unreachable-note {
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    font-style: italic;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Open-in-new-tab affordance, separate from the main clickable row (which
+     stays a plain div with its own click handler) rather than making the
+     whole row an <a> — the row already nests interactive children
+     (rename-on-dblclick, archive/delete buttons), and anchors with nested
+     interactive elements are a real minefield for click/navigation
+     semantics; a small dedicated link sidesteps all of that. */
+  .session-open-tab {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 12px;
+    padding: 2px 5px;
+    border-radius: 4px;
+  }
+  .session-open-tab:hover { color: var(--text); background: var(--border); }
 
   .session-actions {
     position: absolute;
@@ -715,7 +821,10 @@
   <div id="sessions-panel">
     <div id="sessions-panel-header">
       <span>Sessions</span>
-      <button id="new-chat-btn">+ New chat</button>
+      <div id="new-chat-wrap">
+        <button id="new-chat-btn">+ New chat</button>
+        <div id="new-chat-picker"></div>
+      </div>
     </div>
     <div id="sessions-view-toggle">
       <button class="sessions-tab active" data-view="active">Active</button>
@@ -746,6 +855,25 @@
     </div>
     <div class="settings-row">
       <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
+    </div>
+
+    <div class="settings-group-title">Sessions</div>
+    <div class="settings-row">
+      <label>Layout
+        <select id="sessions-layout">
+          <option value="flat" selected>Flat</option>
+          <option value="grouped">Grouped by project</option>
+        </select>
+      </label>
+    </div>
+    <div class="settings-row">
+      <label>Unreachable sessions
+        <select id="unreachable-mode">
+          <option value="hidden">Hidden</option>
+          <option value="count" selected>Show count</option>
+          <option value="shown">Show, greyed out</option>
+        </select>
+      </label>
     </div>
 
     <div class="settings-group-title">Timestamps</div>
@@ -1182,12 +1310,45 @@ function scrollBottom() {
   }
 }
 
+// ── Multi-session: which session THIS TAB is currently viewing ─────────────
+// Each tab owns this independently — there is no server-side notion of "the"
+// current session anymore. Resolution order on first load: an explicit
+// ?session= in the URL (always wins — this is what makes a session
+// bookmarkable/shareable and what "open in new tab" links to), else the
+// last session this browser viewed in any tab (localStorage — shared across
+// tabs, but only ever read once at load time, never watched reactively, so
+// one tab switching never yanks another tab's already-open view), else
+// (truly first-ever launch, nothing to remember yet) a freshly minted id —
+// same as what used to happen server-side on every container launch, just
+// client-side now since there's no single "the" session to pre-seed.
+const LAST_SESSION_KEY = 'lastViewedSessionId';
+
+function resolveInitialSessionId() {
+  const fromUrl = new URLSearchParams(location.search).get('session');
+  if (fromUrl) return fromUrl;
+  const fromStorage = localStorage.getItem(LAST_SESSION_KEY);
+  if (fromStorage) return fromStorage;
+  return crypto.randomUUID();
+}
+
+let currentSessionId = resolveInitialSessionId();
+localStorage.setItem(LAST_SESSION_KEY, currentSessionId);
+// replaceState, not pushState — this is establishing the initial URL, not
+// a new navigation entry — so the address bar is accurate and the page is
+// bookmarkable/shareable right from the first load, even if the id came
+// from localStorage rather than the URL itself.
+{
+  const url = new URL(location.href);
+  url.searchParams.set('session', currentSessionId);
+  history.replaceState({ sessionId: currentSessionId }, '', url);
+}
+
 // ── SSE ───────────────────────────────────────────────────────────────────────
 let es;
 let reconnectTimer;
 
 function connect() {
-  es = new EventSource('/events');
+  es = new EventSource('/events?session=' + encodeURIComponent(currentSessionId));
 
   es.onopen = () => {
     setStatus('live', 'live');
@@ -1278,36 +1439,51 @@ function connect() {
     }
   });
 
-  // Session switch / new chat: driver.mjs replaced the whole history.
-  // Wipe the feed and re-render from scratch, same rendering path history
-  // replay already uses (no reveal animation — this is loaded content, not
-  // something newly generated live).
-  es.addEventListener('reset', e => {
-    const entries = JSON.parse(e.data);
-    clearFeed();
-    for (const entry of entries) {
-      const m = getOrCreate(entry.id, entry.role);
-      m.ts = entry.ts;
-      if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
-      m.rawText = entry.text;
-      // getOrCreate() bakes the 'streaming' class into every fresh assistant
-      // bubble unconditionally (see its template) — the 'message' and
-      // 'history' handlers both explicitly strip it back off, but this one
-      // never did, so every assistant message loaded via a session switch/
-      // new-chat reset was left with a permanent blinking cursor.
-      m.el.classList.remove('streaming');
-      m.liveStreamed = false;
-      renderBody(m);
-    }
-    scrollBottom();
-  });
 }
+
+// Switch THIS TAB's view to a different session id — entirely client-side
+// now (no /switch-session or /new-session driver endpoint anymore): closes
+// the current EventSource, points a new one at /events?session=<id>, and
+// lets that connection's own 'history' replay (already scoped correctly by
+// server.py) populate the feed. This is also what replaces the old
+// driver-pushed 'reset' broadcast — that only made sense when every
+// connected tab shared one "current" session to be reset onto; now each tab
+// asks for exactly the session it wants and nothing else is affected.
+function viewSession(sessionId, { updateUrl = true } = {}) {
+  if (sessionId === currentSessionId) return;
+  if (!(pendingCwdForNewSession && pendingCwdForNewSession.sessionId === sessionId)) {
+    pendingCwdForNewSession = null;
+  }
+  currentSessionId = sessionId;
+  localStorage.setItem(LAST_SESSION_KEY, sessionId);
+  if (updateUrl) {
+    const url = new URL(location.href);
+    url.searchParams.set('session', sessionId);
+    history.pushState({ sessionId }, '', url);
+  }
+  clearFeed();
+  setTurnIndicator(null);
+  clearTimeout(reconnectTimer);
+  if (es) es.close();
+  connect();
+  if (sessionsPanel.classList.contains('open')) renderSessionsList(); // refresh "current" highlight
+}
+
+// Back/forward navigation between sessions (e.g. after following an
+// "open in new tab" link and then hitting Back) — reuses the same switch
+// logic, just without pushing another history entry (the browser already
+// moved us to this URL).
+window.addEventListener('popstate', () => {
+  const id = new URLSearchParams(location.search).get('session');
+  if (id) viewSession(id, { updateUrl: false });
+});
 
 // ── Settings panel ──────────────────────────────────────────────────────────
 const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
   fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
   tsFormat: 'time', hour24: false, showTz: false,
+  sessionsLayout: 'flat', unreachableMode: 'count',
 };
 
 function loadSettings() {
@@ -1349,6 +1525,8 @@ const statusSlider   = document.getElementById('status-size-slider');
 const statusVal      = document.getElementById('status-size-val');
 const themeToggle    = document.getElementById('theme-toggle');
 const toolsToggle    = document.getElementById('tools-toggle');
+const sessionsLayoutSelect = document.getElementById('sessions-layout');
+const unreachableModeSelect = document.getElementById('unreachable-mode');
 const tsFormat       = document.getElementById('ts-format');
 const ts24h          = document.getElementById('ts-24h');
 const tsTz           = document.getElementById('ts-tz');
@@ -1368,6 +1546,8 @@ statusSlider.value = settings.statusFontSize;
 statusVal.textContent = settings.statusFontSize + 'px';
 themeToggle.checked = settings.theme === 'light';
 toolsToggle.checked = settings.showTools;
+sessionsLayoutSelect.value = settings.sessionsLayout;
+unreachableModeSelect.value = settings.unreachableMode;
 tsFormat.value = settings.tsFormat;
 ts24h.checked = settings.hour24;
 tsTz.checked = settings.showTz;
@@ -1435,6 +1615,28 @@ toolsToggle.addEventListener('change', () => {
   saveSettings();
 });
 
+sessionsLayoutSelect.addEventListener('change', () => {
+  settings.sessionsLayout = sessionsLayoutSelect.value;
+  saveSettings();
+  renderSessionsList();
+});
+
+// 'shown' needs the itemized unreachable list, which the driver only
+// bothers assembling (raw transcript reads, not the cheap SDK path) when
+// asked for via ?includeUnreachable=1 — so switching into or out of that
+// specific mode needs a re-fetch, not just a re-render of already-cached
+// data. 'hidden'/'count' can just re-render from what's already cached.
+unreachableModeSelect.addEventListener('change', () => {
+  const wasShown = settings.unreachableMode === 'shown';
+  settings.unreachableMode = unreachableModeSelect.value;
+  saveSettings();
+  if (unreachableModeSelect.value === 'shown' || wasShown) {
+    refreshSessionsList();
+  } else {
+    renderSessionsList();
+  }
+});
+
 tsFormat.addEventListener('change', () => {
   settings.tsFormat = tsFormat.value;
   applySettings();
@@ -1487,6 +1689,12 @@ exportBtn.addEventListener('click', exportMarkdown);
 // page's own server.py), not through the SSE connection above ────────────
 let driverBase = null; // resolved from /config before the input bar works
 let turnInFlight = false;
+// Set by the new-chat project picker for a session that doesn't exist yet;
+// consumed by the next submitPrompt() call for that same session id (its
+// very first prompt), then cleared. viewSession() also clears it if you
+// switch to any OTHER session before sending that first prompt, so it can
+// never leak into some unrelated session's turn.
+let pendingCwdForNewSession = null;
 
 const promptInput  = document.getElementById('prompt-input');
 const sendBtn       = document.getElementById('send-btn');
@@ -1518,7 +1726,7 @@ function setTurnInFlight(inFlight) {
 async function resyncTurnStatus() {
   if (!driverBase) return;
   try {
-    const res = await fetch(`${driverBase}/turn-status`);
+    const res = await fetch(`${driverBase}/turn-status?sessionId=${encodeURIComponent(currentSessionId)}`);
     const data = await res.json();
     setTurnInFlight(!!data.inFlight);
   } catch (e) {
@@ -1551,11 +1759,21 @@ async function submitPrompt() {
   autoResizeInput();
   dismissPalette();
   setTurnInFlight(true);
+  // Only meaningful for a brand-new session's very first prompt (see the
+  // new-chat project picker) — consumed here regardless of outcome, so a
+  // retry after a failed attempt just falls back to the session's default
+  // cwd rather than resending a value that may have been the problem.
+  const cwdForThisPrompt = pendingCwdForNewSession && pendingCwdForNewSession.sessionId === currentSessionId
+    ? pendingCwdForNewSession.cwd
+    : undefined;
+  pendingCwdForNewSession = null;
   try {
+    const body = { sessionId: currentSessionId, text };
+    if (cwdForThisPrompt) body.cwd = cwdForThisPrompt;
     const res = await fetch(`${driverBase}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       setTurnInFlight(false);
@@ -1585,7 +1803,11 @@ sendBtn.addEventListener('click', submitPrompt);
 stopBtn.addEventListener('click', async () => {
   if (!driverBase) return;
   try {
-    await fetch(`${driverBase}/abort`, { method: 'POST' });
+    await fetch(`${driverBase}/abort`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId }),
+    });
   } catch (e) {
     console.error('Abort failed:', e);
   }
@@ -1650,12 +1872,12 @@ const newChatBtn     = document.getElementById('new-chat-btn');
 const sessionsTabs   = document.querySelectorAll('.sessions-tab');
 
 let sessionsView = 'active'; // 'active' | 'archived'
-let lastSessionsResult = null; // cached {sessions, currentSessionId} from the last fetch
+let lastSessionsResult = null; // cached {sessions} from the last fetch
 
-// Wipes the visible feed and its associated state entirely — used when the
-// driver's /reset broadcast means a different session (or a fresh one) is
-// now current. Any in-flight reveal animations get stopped first so a
-// stale setInterval doesn't keep firing against a detached DOM node.
+// Wipes the visible feed and its associated state entirely — used by
+// viewSession() when this tab switches to a different session (or a fresh
+// one). Any in-flight reveal animations get stopped first so a stale
+// setInterval doesn't keep firing against a detached DOM node.
 function clearFeed() {
   for (const m of Object.values(msgs)) {
     if (m.revealTimer) clearInterval(m.revealTimer);
@@ -1711,6 +1933,159 @@ function startRenameEdit(titleEl, session) {
   input.addEventListener('blur', () => finish(true));
 }
 
+// Builds one session row — shared by both the flat and grouped layouts
+// (only the surrounding structure differs between them).
+function buildSessionItem(s, wantArchived) {
+  // "Current" is purely this tab's own local choice now — there's no
+  // server-reported notion of it anymore, so a second tab viewing a
+  // different session correctly shows its OWN current session highlighted
+  // here, not this tab's.
+  const isCurrent = s.sessionId === currentSessionId;
+  const item = document.createElement('div');
+  item.className = 'session-item' + (isCurrent ? ' current' : '');
+  const title = s.customTitle || s.summary || s.firstPrompt || '(untitled)';
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'session-title';
+  titleEl.textContent = title;
+  if (s.needsPermission) {
+    const badge = document.createElement('span');
+    badge.className = 'session-badge needs-permission';
+    badge.title = 'Waiting on a permission decision';
+    titleEl.appendChild(badge);
+  } else if (s.inFlight) {
+    const badge = document.createElement('span');
+    badge.className = 'session-badge';
+    badge.title = 'A turn is running';
+    titleEl.appendChild(badge);
+  }
+  titleEl.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    startRenameEdit(titleEl, s);
+  });
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'session-meta';
+  // The project tag is redundant once already grouped by project, so it
+  // only needs to appear in the flat layout, where sessions from different
+  // projects can sit right next to each other.
+  const metaParts = [formatSessionWhen(s.lastModified)];
+  if (settings.sessionsLayout !== 'grouped' && s.projectLabel) metaParts.push(s.projectLabel);
+  metaEl.textContent = metaParts.filter(Boolean).join(' · ');
+
+  const actions = document.createElement('div');
+  actions.className = 'session-actions';
+
+  // Deliberate open-in-new-tab affordance: a real <a href="?session=...">
+  // rather than making the whole row a link — see the CSS comment on
+  // .session-open-tab for why.
+  const openTabLink = document.createElement('a');
+  openTabLink.className = 'session-open-tab';
+  openTabLink.href = `?session=${encodeURIComponent(s.sessionId)}`;
+  openTabLink.target = '_blank';
+  openTabLink.rel = 'noopener';
+  openTabLink.title = 'Open in new tab';
+  openTabLink.textContent = '⧉';
+  openTabLink.addEventListener('click', (e) => e.stopPropagation());
+  actions.appendChild(openTabLink);
+
+  if (wantArchived) {
+    const unarchiveBtn = document.createElement('button');
+    unarchiveBtn.className = 'session-action-btn';
+    unarchiveBtn.textContent = 'Unarchive';
+    unarchiveBtn.addEventListener('click', (e) => { e.stopPropagation(); unarchiveSession(s.sessionId); });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'session-action-btn session-delete-btn';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.disabled = isCurrent;
+    deleteBtn.title = isCurrent ? 'Switch away from this session first' : '';
+    deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteSessionFromUi(s.sessionId, title); });
+
+    actions.appendChild(unarchiveBtn);
+    actions.appendChild(deleteBtn);
+  } else {
+    const archiveBtn = document.createElement('button');
+    archiveBtn.className = 'session-action-btn';
+    archiveBtn.textContent = 'Archive';
+    archiveBtn.addEventListener('click', (e) => { e.stopPropagation(); archiveSession(s.sessionId); });
+    actions.appendChild(archiveBtn);
+  }
+
+  item.appendChild(titleEl);
+  item.appendChild(metaEl);
+  item.appendChild(actions);
+  item.addEventListener('click', () => viewSession(s.sessionId));
+  return item;
+}
+
+// Unreachable sessions (project directory no longer resolves) get a much
+// simpler row — nothing here is actionable, there's no cwd to resume into,
+// so no click handler, no rename, no archive/delete.
+function buildUnreachableItem(s) {
+  const item = document.createElement('div');
+  item.className = 'session-item session-unreachable';
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'session-title';
+  titleEl.textContent = s.firstPrompt || '(untitled)';
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'session-meta';
+  const parts = [formatSessionWhen(s.lastModified), s.projectLabel];
+  if (s.lastKnownHostPath) parts.push(`last at ${s.lastKnownHostPath}`);
+  metaEl.textContent = parts.filter(Boolean).join(' · ');
+  if (s.lastKnownHostPath) {
+    metaEl.title = `Relaunch the script from ${s.lastKnownHostPath} (or wherever it's since moved to) to reach this session again.`;
+  }
+
+  item.appendChild(titleEl);
+  item.appendChild(metaEl);
+  return item;
+}
+
+function renderUnreachableFooter(data) {
+  if (settings.unreachableMode === 'hidden') return;
+
+  if (settings.unreachableMode === 'count') {
+    if (!data.unreachableCount) return;
+    const note = document.createElement('div');
+    note.className = 'unreachable-note';
+    const plural = data.unreachableCount === 1 ? '' : 's';
+    note.textContent = `${data.unreachableCount} session${plural} unreachable — the project ${plural ? 'directories' : 'directory'} ${plural ? "aren't" : "isn't"} currently reachable from this workspace.`;
+    sessionsList.appendChild(note);
+    return;
+  }
+
+  // 'shown' — itemized, but only if the fetch actually asked for it
+  // (see refreshSessionsList) — falls back to the count if not.
+  const list = data.unreachableSessions;
+  if (!list) {
+    renderUnreachableFooterAsCount(data);
+    return;
+  }
+  if (list.length === 0) return;
+  const header = document.createElement('div');
+  header.className = 'session-group-header';
+  header.textContent = `Unreachable (${list.length})`;
+  sessionsList.appendChild(header);
+  for (const s of list) {
+    sessionsList.appendChild(buildUnreachableItem(s));
+  }
+}
+
+// Fallback for the 'shown' setting when unreachableSessions wasn't fetched
+// yet (e.g. the setting just changed and refreshSessionsList hasn't
+// round-tripped again) — degrade to the cheap count rather than show
+// nothing at all.
+function renderUnreachableFooterAsCount(data) {
+  if (!data.unreachableCount) return;
+  const note = document.createElement('div');
+  note.className = 'unreachable-note';
+  note.textContent = `${data.unreachableCount} session(s) unreachable.`;
+  sessionsList.appendChild(note);
+}
+
 function renderSessionsList() {
   const data = lastSessionsResult;
   if (!data) return;
@@ -1718,67 +2093,44 @@ function renderSessionsList() {
   const sessions = (data.sessions || []).filter((s) => (s.tag === 'archived') === wantArchived);
 
   sessionsList.innerHTML = '';
+
   if (sessions.length === 0) {
     sessionsList.innerHTML = `<div class="palette-empty">${wantArchived ? 'No archived sessions.' : 'No sessions yet.'}</div>`;
-    return;
-  }
-
-  for (const s of sessions) {
-    const isCurrent = s.sessionId === data.currentSessionId;
-    const item = document.createElement('div');
-    item.className = 'session-item' + (isCurrent ? ' current' : '');
-    const title = s.customTitle || s.summary || s.firstPrompt || '(untitled)';
-
-    const titleEl = document.createElement('div');
-    titleEl.className = 'session-title';
-    titleEl.textContent = title;
-    titleEl.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      startRenameEdit(titleEl, s);
-    });
-
-    const metaEl = document.createElement('div');
-    metaEl.className = 'session-meta';
-    metaEl.textContent = formatSessionWhen(s.lastModified);
-
-    const actions = document.createElement('div');
-    actions.className = 'session-actions';
-
-    if (wantArchived) {
-      const unarchiveBtn = document.createElement('button');
-      unarchiveBtn.className = 'session-action-btn';
-      unarchiveBtn.textContent = 'Unarchive';
-      unarchiveBtn.addEventListener('click', (e) => { e.stopPropagation(); unarchiveSession(s.sessionId); });
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.className = 'session-action-btn session-delete-btn';
-      deleteBtn.textContent = 'Delete';
-      deleteBtn.disabled = isCurrent;
-      deleteBtn.title = isCurrent ? 'Switch away from this session first' : '';
-      deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteSessionFromUi(s.sessionId, title); });
-
-      actions.appendChild(unarchiveBtn);
-      actions.appendChild(deleteBtn);
-    } else {
-      const archiveBtn = document.createElement('button');
-      archiveBtn.className = 'session-action-btn';
-      archiveBtn.textContent = 'Archive';
-      archiveBtn.addEventListener('click', (e) => { e.stopPropagation(); archiveSession(s.sessionId); });
-      actions.appendChild(archiveBtn);
+  } else if (settings.sessionsLayout === 'grouped') {
+    const groups = new Map(); // projectLabel -> sessions[]
+    for (const s of sessions) {
+      const label = s.projectLabel || '(root)';
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(s);
     }
-
-    item.appendChild(titleEl);
-    item.appendChild(metaEl);
-    item.appendChild(actions);
-    item.addEventListener('click', () => switchSession(s.sessionId));
-    sessionsList.appendChild(item);
+    // Each group ordered internally by recency (already true — sessions
+    // arrives pre-sorted); groups themselves ordered by their own most
+    // recent session, so the busiest-lately project floats to the top.
+    const sortedGroups = [...groups.entries()].sort((a, b) =>
+      Math.max(...b[1].map((s) => s.lastModified || 0)) - Math.max(...a[1].map((s) => s.lastModified || 0)));
+    for (const [label, groupSessions] of sortedGroups) {
+      const header = document.createElement('div');
+      header.className = 'session-group-header';
+      header.textContent = `${label} (${groupSessions.length})`;
+      sessionsList.appendChild(header);
+      for (const s of groupSessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+    }
+  } else {
+    for (const s of sessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
   }
+
+  if (!wantArchived) renderUnreachableFooter(data);
 }
 
 async function refreshSessionsList() {
   if (!driverBase) return;
   try {
-    const res = await fetch(`${driverBase}/sessions`);
+    // Itemized unreachable-session detail means the driver has to read raw
+    // transcript files directly (no cheap SDK path for a dir that no
+    // longer resolves) — only ask for it when the setting actually needs
+    // it; 'hidden'/'count' are happy with the cheap, always-included count.
+    const qs = settings.unreachableMode === 'shown' ? '?includeUnreachable=1' : '';
+    const res = await fetch(`${driverBase}/sessions${qs}`);
     lastSessionsResult = await res.json();
     renderSessionsList();
   } catch (e) {
@@ -1798,29 +2150,42 @@ async function openSessionsPanel() {
   await refreshSessionsList();
 }
 
-async function switchSession(sessionId) {
-  if (!driverBase || turnInFlight) return;
-  sessionsPanel.classList.remove('open');
-  try {
-    await fetch(`${driverBase}/switch-session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
-    });
-    // Rendering happens via the 'reset' SSE event this triggers, not here.
-  } catch (e) {
-    console.error('Failed to switch session:', e);
-  }
-}
+// Note: there's no more switchSession() here that POSTs to the driver —
+// viewSession() (defined up near connect()) is purely client-side now and
+// is what every call site below uses. Switching (or starting a new chat)
+// no longer needs to check turnInFlight at all: viewing is just an SSE
+// subscription, completely decoupled from execution, so leaving a
+// session's turn running in the background while you look at something
+// else is exactly the point.
 
 async function archiveSession(sessionId) {
-  if (!driverBase || turnInFlight) return;
+  if (!driverBase) return;
+  const wasCurrent = sessionId === currentSessionId;
   try {
     await fetch(`${driverBase}/archive-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId }),
     });
+    // Archiving doesn't disable resume, so this tab COULD keep viewing an
+    // archived session just fine — but if it's the one you're currently
+    // looking at, moving to something else automatically (rather than
+    // leaving you parked on a session that just vanished from the active
+    // list) mirrors what the driver itself used to do server-side before
+    // multi-session support removed its single notion of "the" session.
+    if (wasCurrent) {
+      try {
+        const res = await fetch(`${driverBase}/sessions`);
+        const data = await res.json();
+        const nextActive = (data.sessions || [])
+          .filter((s) => s.sessionId !== sessionId && s.tag !== 'archived')
+          .sort((a, b) => b.lastModified - a.lastModified)[0];
+        viewSession(nextActive ? nextActive.sessionId : crypto.randomUUID());
+      } catch (e) {
+        console.error('Failed to pick a session to move to after archiving:', e);
+        viewSession(crypto.randomUUID());
+      }
+    }
     await refreshSessionsList();
   } catch (e) {
     console.error('Failed to archive session:', e);
@@ -1869,15 +2234,78 @@ for (const tab of sessionsTabs) {
 }
 
 sessionsBtn.addEventListener('click', openSessionsPanel);
-newChatBtn.addEventListener('click', async () => {
-  if (!driverBase || turnInFlight) return;
+// ── New-chat project picker ─────────────────────────────────────────────────
+const newChatPicker = document.getElementById('new-chat-picker');
+
+function dismissNewChatPicker() {
+  newChatPicker.classList.remove('show');
+  newChatPicker.innerHTML = '';
+}
+
+// No server round-trip needed to actually *create* anything here — a "new
+// chat" is just a client-minted id nobody has used before; driver.mjs
+// figures out it's brand new (vs. an existing session it just hasn't
+// touched yet) the same way either way, the first time a prompt actually
+// arrives for it. The cwd (if not the default root) rides along as
+// pendingCwdForNewSession and gets attached to that first prompt.
+function startNewChatInProject(cwd) {
+  const id = crypto.randomUUID();
+  pendingCwdForNewSession = cwd ? { sessionId: id, cwd } : null;
+  dismissNewChatPicker();
   sessionsPanel.classList.remove('open');
+  viewSession(id);
+}
+
+async function openNewChatPicker() {
+  if (newChatPicker.classList.contains('show')) {
+    dismissNewChatPicker();
+    return;
+  }
+  if (!driverBase) return;
+  newChatPicker.innerHTML = '<div class="palette-empty">Loading…</div>';
+  newChatPicker.classList.add('show');
   try {
-    await fetch(`${driverBase}/new-session`, { method: 'POST' });
+    const res = await fetch(`${driverBase}/projects`);
+    const data = await res.json();
+    // Best-effort only — if the current session isn't in the cached list
+    // yet (e.g. panel never opened this tab load), nothing gets marked
+    // "current" here, which is purely cosmetic, not a correctness issue.
+    const currentCwd = lastSessionsResult?.sessions?.find((s) => s.sessionId === currentSessionId)?.cwd;
+
+    newChatPicker.innerHTML = '';
+    for (const p of data.projects || []) {
+      const item = document.createElement('div');
+      const isCurrent = p.cwd === currentCwd;
+      item.className = 'new-chat-project-item' + (isCurrent ? ' current' : '');
+      item.textContent = isCurrent ? `${p.label} (current)` : p.label;
+      item.addEventListener('click', () => startNewChatInProject(p.cwd === data.root ? undefined : p.cwd));
+      newChatPicker.appendChild(item);
+    }
+
+    const customRow = document.createElement('div');
+    customRow.className = 'new-chat-custom-row';
+    const input = document.createElement('input');
+    input.placeholder = 'Or type a subdirectory path…';
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim());
+    });
+    customRow.appendChild(input);
+    newChatPicker.appendChild(customRow);
   } catch (e) {
-    console.error('Failed to start new session:', e);
+    newChatPicker.innerHTML = '<div class="palette-empty">Failed to load projects.</div>';
+    console.error('Failed to load /projects:', e);
+  }
+}
+
+newChatBtn.addEventListener('click', openNewChatPicker);
+document.addEventListener('click', (e) => {
+  if (newChatPicker.classList.contains('show') &&
+      !newChatPicker.contains(e.target) && e.target !== newChatBtn) {
+    dismissNewChatPicker();
   }
 });
+
 document.addEventListener('click', (e) => {
   if (sessionsPanel.classList.contains('open') &&
       !sessionsPanel.contains(e.target) && e.target !== sessionsBtn) {

@@ -82,6 +82,35 @@ def broadcast_to(session_id: str, event: str, data: str):
             s["clients"].remove(q)
 
 
+# ── Cross-session "something changed" notifications ─────────────────────────
+# The sessions panel wants near-instant badge updates not just for whatever
+# session a tab happens to be viewing (that already gets pokes over the
+# per-session channel above), but for *any* session — including ones this
+# tab has no live connection to at all, since each /events stream is scoped
+# to one session by design. This is a separate, global, log-free broadcast
+# list (not nested under any one session's state) that any tab subscribes to
+# only while its sessions panel is open, receiving a lightweight ping
+# whenever a turn starts/ends or a permission/question appears or resolves
+# in *any* session. The client doesn't need to know which session or what
+# changed — the payload is carried mostly for future use, not because the
+# client acts on it today — it just triggers a refetch of the full list
+# either way.
+meta_clients: list[Queue] = []
+
+
+def broadcast_meta(session_id: str, kind: str):
+    payload = f"event: change\ndata: {json.dumps({'sessionId': session_id, 'kind': kind})}\n\n"
+    dead = []
+    with sessions_lock:
+        for q in meta_clients:
+            try:
+                q.put_nowait(payload)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            meta_clients.remove(q)
+
+
 def _emit(session_id: str, event: str, entry: dict):
     # Upsert by id rather than blind-append: driver.mjs can broadcast an
     # updated version of a message it already sent (e.g. a permission bubble
@@ -171,8 +200,15 @@ class Handler(BaseHTTPRequestHandler):
         session_id = (qs.get("session") or [None])[0]
 
         if path == "/":
+            # This page changes across deploys of a locally-edited file, not
+            # a versioned release — without an explicit no-store, a refresh
+            # can still serve a stale cached copy in some browsers (there
+            # was never any cache-control header on this route at all
+            # before), which would silently make a real, already-deployed
+            # fix look like it isn't working.
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(VIEWER_HTML.read_bytes())
 
@@ -219,6 +255,37 @@ class Handler(BaseHTTPRequestHandler):
                 with sessions_lock:
                     if q in s["clients"]:
                         s["clients"].remove(q)
+
+        elif path == "/events-meta":
+            # No session param, no history replay — this is a live-only
+            # "something changed somewhere, go refetch /sessions" channel,
+            # not a per-session message log. A tab only holds this open
+            # while its sessions panel is actually open.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_cors()
+            self.end_headers()
+
+            q: Queue = Queue()
+            with sessions_lock:
+                meta_clients.append(q)
+
+            try:
+                while True:
+                    try:
+                        chunk = q.get(timeout=15)
+                        self.wfile.write(chunk.encode())
+                        self.wfile.flush()
+                    except Empty:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                with sessions_lock:
+                    if q in meta_clients:
+                        meta_clients.remove(q)
 
         elif path == "/history":
             log = _get_session(session_id)["log"] if session_id else []
@@ -267,12 +334,19 @@ class Handler(BaseHTTPRequestHandler):
             msg_id = payload.get("id") or f"{role}-{uuid.uuid4()}"
             _emit(session_id, "message", {"type": "message", "role": role,
                                            "text": text, "id": msg_id, "ts": payload.get("ts")})
+            # A permission/question card just appeared or got resolved (the
+            # same role, rebroadcast with resolved:true) — either way, the
+            # sessions-panel badge for this session may have just changed.
+            if role == "permission":
+                broadcast_meta(session_id, "permission")
 
         # Ephemeral UI-state signals (turn_start/turn_end/stream_delta/...) —
         # broadcast only, deliberately not appended to any log: these are
         # point-in-time signals, not something that makes sense to replay.
         elif path == "/status" and session_id:
             broadcast_to(session_id, "status", json.dumps(payload))
+            if payload.get("type") in ("turn_start", "turn_end"):
+                broadcast_meta(session_id, payload["type"])
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

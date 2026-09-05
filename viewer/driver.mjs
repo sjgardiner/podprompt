@@ -329,11 +329,22 @@ let knownCommands = { slash_commands: [], terminal_slash_commands: [], skills: [
 // decision waiting on the user (the sessions-panel badge).
 const pendingApprovals = new Map(); // id -> { resolve, sessionId, kind, toolName, toolInput }
 
-function sessionNeedsPermission(sessionId) {
+// Returns which *kind* of decision (if any) is waiting on the user for this
+// session — 'permission' (a tool call) or 'question' (AskUserQuestion) —
+// rather than a flat boolean, so the sessions panel can badge them
+// distinctly instead of showing the same "permission" indicator for a
+// question that isn't a permission at all. If a session somehow has more
+// than one pending entry at once, 'question' wins (AskUserQuestion pauses
+// the whole turn on an answer either way, so there's no meaningful
+// "more urgent" ordering here — this just picks one deterministically).
+function pendingKindForSession(sessionId) {
+  let kind = null;
   for (const p of pendingApprovals.values()) {
-    if (p.sessionId === sessionId) return true;
+    if (p.sessionId !== sessionId) continue;
+    if (p.kind === "question") return "question";
+    kind = p.kind;
   }
-  return false;
+  return kind;
 }
 
 function nowIso() {
@@ -772,6 +783,30 @@ async function runTurn(sessionId, promptText) {
   } finally {
     if (state.abortController === abortController) state.abortController = null;
     state.turnInFlight = false;
+    // Any permission/question this turn asked but never got an answer for
+    // (the turn ended — aborted, or the underlying query() threw — before
+    // /permission-response was ever called for it) would otherwise orphan
+    // in pendingApprovals forever: nothing else ever deletes an entry
+    // except that one handler, so the session's badge would stay lit
+    // indefinitely with no way to tell a genuinely-live request apart from
+    // an abandoned one. Found via TRUMPET, an old test session whose
+    // "waiting on an answer" badge stayed lit long after nothing was
+    // running for it — the actual root cause turned out to be this leak,
+    // not any client-side rendering bug (which was verified correct
+    // multiple times over). Broadcasting a resolved:true rebroadcast (same
+    // shape /permission-response itself sends) rather than a silent
+    // delete, so any permission/question card still shown live in a
+    // browser (Allow/Deny buttons that would otherwise just 404 if
+    // clicked) updates to reflect that it expired, instead of sitting
+    // there looking actionable forever.
+    for (const [id, pending] of pendingApprovals) {
+      if (pending.sessionId !== sessionId) continue;
+      pendingApprovals.delete(id);
+      broadcast(sessionId, "permission", JSON.stringify({
+        kind: pending.kind, toolName: pending.toolName, toolInput: pending.toolInput,
+        resolved: true, resolvedText: "This request expired (the turn ended without an answer).",
+      }), id);
+    }
     broadcastStatus(sessionId, { type: "turn_end" });
   }
 }
@@ -876,7 +911,7 @@ const server = createServer(async (req, res) => {
             projectLabel: projectLabelFor(cwd),
             unreachable: false,
             inFlight: !!sessions.get(s.sessionId)?.turnInFlight,
-            needsPermission: sessionNeedsPermission(s.sessionId),
+            pendingKind: pendingKindForSession(s.sessionId),
           }));
         } catch (e) {
           console.error(`[driver] listSessions failed for ${cwd}:`, e.message);

@@ -310,10 +310,38 @@
   .session-title {
     font-size: 13px;
     color: var(--text);
-    white-space: nowrap;
+    padding-right: 60px; /* room for hover actions */
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0; /* required for the text child's overflow/ellipsis to work inside a flex parent */
+  }
+  /* The truncatable part of the title lives in its own flex child now —
+     .session-title itself used to carry white-space:nowrap/overflow:hidden/
+     text-overflow:ellipsis directly, with the badge appended as a plain
+     trailing text-node sibling. That meant a long enough title (anything
+     that actually needed the ellipsis) clipped the badge right along with
+     the truncated text, since both were just inline content in the same
+     nowrap box — a short title like "TRUMPET" happened to never trigger
+     it. Isolating truncation to this span and giving the badge
+     flex-shrink:0 below means the badge always renders regardless of
+     title length or which side it's placed on (see badgePosition
+     setting). */
+  .session-title-text {
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-right: 60px; /* room for hover actions */
+    white-space: nowrap;
+    min-width: 0;
+    /* flex-grow: 0 (not 1) is deliberate: growing to fill the row would be
+       visually invisible in "before" placement (nothing marks the box's
+       edge), but in "after" placement it drags the badge all the way to
+       the far edge even for a short title like "TRUMPET" that never
+       needed the space — looking detached from its own title. flex-
+       shrink: 1 (via the "auto" below) still lets a long title shrink
+       down to the available width and truncate exactly as before; it
+       just no longer expands past its own content when it doesn't need
+       to. */
+    flex: 0 1 auto;
   }
   .session-title-input {
     font-size: 13px;
@@ -328,19 +356,25 @@
   .session-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
   /* Cross-session awareness: visible without switching to that session.
-     needsPermission (a decision is waiting on you) takes visual priority
-     over a plain inFlight dot (still just running) — it's more actionable. */
+     A pending decision (permission or question) takes visual priority over
+     a plain inFlight dot (still just running) — it's more actionable, and
+     the two decision kinds get distinct colors/tooltips rather than one
+     generic "permission" badge for both, since a question isn't actually a
+     permission at all. */
   .session-badge {
     display: inline-block;
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    margin-left: 6px;
-    vertical-align: middle;
+    flex-shrink: 0; /* never let the title text's overflow squeeze this out */
     background: var(--green);
   }
   .session-badge.needs-permission {
     background: var(--accent);
+    animation: badge-pulse 1.4s ease-in-out infinite;
+  }
+  .session-badge.needs-question {
+    background: var(--purple);
     animation: badge-pulse 1.4s ease-in-out infinite;
   }
   @keyframes badge-pulse { 50% { opacity: .35; } }
@@ -875,6 +909,14 @@
         </select>
       </label>
     </div>
+    <div class="settings-row">
+      <label>Status badge position
+        <select id="badge-position">
+          <option value="after" selected>After title</option>
+          <option value="before">Before title</option>
+        </select>
+      </label>
+    </div>
 
     <div class="settings-group-title">Timestamps</div>
     <div class="settings-row">
@@ -1374,6 +1416,11 @@ function connect() {
       entry.el.classList.remove('streaming');
       renderBody(entry);
       scrollBottom();
+      // A permission/question badge can appear or clear on this same
+      // message (the initial ask, or its resolution rebroadcast) — poke
+      // the panel the same way turn_start/turn_end does, rather than
+      // leaving it to the next poll tick.
+      if (role === 'permission') pokeSessionsListIfOpen();
     } else if (entry.liveStreamed) {
       // Already typed out live via stream_delta — this is just the
       // authoritative final text for the same bubble, not new content to
@@ -1407,8 +1454,8 @@ function connect() {
   // even if this tab reconnects mid-turn or another tab started it.
   es.addEventListener('status', e => {
     const s = JSON.parse(e.data);
-    if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); }
-    if (s.type === 'turn_end') { setTurnInFlight(false); setTurnIndicator(null); }
+    if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen(); }
+    if (s.type === 'turn_end') { setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen(); }
 
     // Live thinking-token estimate during the redacted-thinking phase, when
     // no actual thinking text streams yet (see SDKThinkingTokensMessage).
@@ -1483,7 +1530,7 @@ const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
   fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
   tsFormat: 'time', hour24: false, showTz: false,
-  sessionsLayout: 'flat', unreachableMode: 'count',
+  sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
 };
 
 function loadSettings() {
@@ -1527,6 +1574,7 @@ const themeToggle    = document.getElementById('theme-toggle');
 const toolsToggle    = document.getElementById('tools-toggle');
 const sessionsLayoutSelect = document.getElementById('sessions-layout');
 const unreachableModeSelect = document.getElementById('unreachable-mode');
+const badgePositionSelect = document.getElementById('badge-position');
 const tsFormat       = document.getElementById('ts-format');
 const ts24h          = document.getElementById('ts-24h');
 const tsTz           = document.getElementById('ts-tz');
@@ -1548,6 +1596,7 @@ themeToggle.checked = settings.theme === 'light';
 toolsToggle.checked = settings.showTools;
 sessionsLayoutSelect.value = settings.sessionsLayout;
 unreachableModeSelect.value = settings.unreachableMode;
+badgePositionSelect.value = settings.badgePosition;
 tsFormat.value = settings.tsFormat;
 ts24h.checked = settings.hour24;
 tsTz.checked = settings.showTz;
@@ -1635,6 +1684,12 @@ unreachableModeSelect.addEventListener('change', () => {
   } else {
     renderSessionsList();
   }
+});
+
+badgePositionSelect.addEventListener('change', () => {
+  settings.badgePosition = badgePositionSelect.value;
+  saveSettings();
+  renderSessionsList();
 });
 
 tsFormat.addEventListener('change', () => {
@@ -1947,18 +2002,32 @@ function buildSessionItem(s, wantArchived) {
 
   const titleEl = document.createElement('div');
   titleEl.className = 'session-title';
-  titleEl.textContent = title;
-  if (s.needsPermission) {
-    const badge = document.createElement('span');
+
+  const titleTextEl = document.createElement('span');
+  titleTextEl.className = 'session-title-text';
+  titleTextEl.textContent = title;
+
+  // Built once, then placed on whichever side of the (separately
+  // truncatable) title text the badgePosition setting asks for — see the
+  // .session-title-text CSS comment for why the badge needs to be a
+  // sibling of the truncated text rather than trailing content inside it.
+  let badge = null;
+  if (s.pendingKind === 'question') {
+    badge = document.createElement('span');
+    badge.className = 'session-badge needs-question';
+    badge.title = 'Waiting on an answer';
+  } else if (s.pendingKind === 'permission') {
+    badge = document.createElement('span');
     badge.className = 'session-badge needs-permission';
     badge.title = 'Waiting on a permission decision';
-    titleEl.appendChild(badge);
   } else if (s.inFlight) {
-    const badge = document.createElement('span');
+    badge = document.createElement('span');
     badge.className = 'session-badge';
     badge.title = 'A turn is running';
-    titleEl.appendChild(badge);
   }
+  if (badge && settings.badgePosition === 'before') titleEl.appendChild(badge);
+  titleEl.appendChild(titleTextEl);
+  if (badge && settings.badgePosition !== 'before') titleEl.appendChild(badge);
   titleEl.addEventListener('dblclick', (e) => {
     e.stopPropagation();
     startRenameEdit(titleEl, s);
@@ -2028,7 +2097,10 @@ function buildUnreachableItem(s) {
 
   const titleEl = document.createElement('div');
   titleEl.className = 'session-title';
-  titleEl.textContent = s.firstPrompt || '(untitled)';
+  const titleTextEl = document.createElement('span');
+  titleTextEl.className = 'session-title-text';
+  titleTextEl.textContent = s.firstPrompt || '(untitled)';
+  titleEl.appendChild(titleTextEl);
 
   const metaEl = document.createElement('div');
   metaEl.className = 'session-meta';
@@ -2092,6 +2164,11 @@ function renderSessionsList() {
   const wantArchived = sessionsView === 'archived';
   const sessions = (data.sessions || []).filter((s) => (s.tag === 'archived') === wantArchived);
 
+  // This rebuilds the whole list from scratch every time, including on
+  // each periodic poll tick (see startSessionsPoll) — without this, sitting
+  // on a long scrolled-down list while the panel polls in the background
+  // would silently yank you back to the top every 4 seconds.
+  const scrollTop = sessionsList.scrollTop;
   sessionsList.innerHTML = '';
 
   if (sessions.length === 0) {
@@ -2120,34 +2197,124 @@ function renderSessionsList() {
   }
 
   if (!wantArchived) renderUnreachableFooter(data);
+  sessionsList.scrollTop = scrollTop;
 }
 
-async function refreshSessionsList() {
+// `full: false` is the periodic poll tick (see startSessionsPoll) — it
+// skips ?includeUnreachable=1 even under the 'shown' setting, since
+// itemized unreachable detail needs the driver to read raw transcript
+// files directly and doesn't change moment to moment the way turn/
+// permission status does; the last full fetch's copy is reused instead of
+// re-deriving it on every tick.
+// Both the poll timer and pokeSessionsListIfOpen() call this independently
+// now, so overlapping requests are routine, not a rare edge case — and
+// fetch() gives no ordering guarantee: a slower, earlier-issued request
+// (e.g. a poll tick that started just before a turn began) can resolve
+// *after* a faster, later one (a poke firing right on turn_start), and
+// without this guard its stale response would silently overwrite the
+// fresher one merely by arriving last. A monotonic sequence number, with
+// only the response matching the most-recently-issued request applied,
+// fixes that regardless of resolution order. This would disproportionately
+// hit a session whose state is actively toggling (the one you're mid-
+// conversation with) while never visibly affecting a frozen one — which
+// fits "the current session's badge doesn't show, but a stuck idle one
+// does" exactly.
+let sessionsFetchSeq = 0;
+async function refreshSessionsList({ full = true } = {}) {
   if (!driverBase) return;
+  const seq = ++sessionsFetchSeq;
   try {
-    // Itemized unreachable-session detail means the driver has to read raw
-    // transcript files directly (no cheap SDK path for a dir that no
-    // longer resolves) — only ask for it when the setting actually needs
-    // it; 'hidden'/'count' are happy with the cheap, always-included count.
-    const qs = settings.unreachableMode === 'shown' ? '?includeUnreachable=1' : '';
+    const qs = (full && settings.unreachableMode === 'shown') ? '?includeUnreachable=1' : '';
     const res = await fetch(`${driverBase}/sessions${qs}`);
-    lastSessionsResult = await res.json();
+    const data = await res.json();
+    if (seq !== sessionsFetchSeq) return; // a newer request has since been issued — this one's stale, drop it
+    if (!full && lastSessionsResult?.unreachableSessions) {
+      data.unreachableSessions = lastSessionsResult.unreachableSessions;
+    }
+    lastSessionsResult = data;
     renderSessionsList();
   } catch (e) {
+    if (seq !== sessionsFetchSeq) return;
     sessionsList.innerHTML = '<div class="palette-empty">Failed to load sessions.</div>';
     console.error('Failed to load /sessions:', e);
   }
 }
 
+// Lets the currently-viewed session's own already-instant SSE signals
+// (turn_start/turn_end, a permission or question appearing or resolving)
+// also refresh the sessions panel right away, instead of waiting for the
+// next poll tick — called from the 'status' and 'message' handlers in
+// connect(). This is the case a poll interval alone can't make feel
+// instant, since this tab already knows about it the moment it happens; a
+// *different* session's turn ending is still bounded by the poll interval
+// below, since this tab has no live signal for that at all (each SSE
+// stream is scoped to one session by design).
+function pokeSessionsListIfOpen() {
+  if (sessionsPanel.classList.contains('open')) {
+    refreshSessionsList({ full: false });
+  }
+}
+
+// pokeSessionsListIfOpen() only covers the session THIS tab already has a
+// live SSE connection to (whatever it's currently viewing) — a *different*
+// session's turn starting/ending has no signal to piggyback on at all,
+// since each /events stream is scoped to one session by design. This
+// separate, global /events-meta channel (server.py's meta_clients, not
+// nested under any one session) fills that gap: any tab with the sessions
+// panel open subscribes to it and gets a lightweight ping whenever *any*
+// session's turn or permission/question state changes, regardless of
+// whether this tab is looking at that session at all.
+let metaEventSource = null;
+function startMetaSubscription() {
+  stopMetaSubscription();
+  metaEventSource = new EventSource('/events-meta');
+  metaEventSource.addEventListener('change', () => {
+    // Self-closing on the next event rather than tracked against every
+    // place that can close the panel, same rationale as the poll timer
+    // below — simpler than pairing a stop call with each close path, at
+    // the cost of one open-but-idle connection until the next change
+    // happens anywhere (already the same tradeoff the main per-session
+    // /events connections make, which also stay open indefinitely once
+    // a tab connects).
+    if (!sessionsPanel.classList.contains('open')) {
+      stopMetaSubscription();
+      return;
+    }
+    refreshSessionsList({ full: false });
+  });
+}
+function stopMetaSubscription() {
+  if (metaEventSource) { metaEventSource.close(); metaEventSource = null; }
+}
+
+// Now purely a safety net (the meta subscription above is the real-time
+// path) — covers a dropped/buffered SSE connection that hasn't been
+// noticed yet, so it can stay slow; no longer the primary mechanism, hence
+// the long interval.
+let sessionsPollTimer = null;
+function startSessionsPoll() {
+  clearInterval(sessionsPollTimer);
+  sessionsPollTimer = setInterval(() => {
+    if (!sessionsPanel.classList.contains('open')) {
+      clearInterval(sessionsPollTimer);
+      return;
+    }
+    refreshSessionsList({ full: false });
+  }, 20000);
+}
+
 async function openSessionsPanel() {
   if (sessionsPanel.classList.contains('open')) {
     sessionsPanel.classList.remove('open');
+    stopMetaSubscription();
     return;
   }
   if (!driverBase) return;
   sessionsList.innerHTML = '<div class="palette-empty">Loading…</div>';
   sessionsPanel.classList.add('open');
   await refreshSessionsList();
+  startMetaSubscription();
+  startSessionsPoll();
 }
 
 // Note: there's no more switchSession() here that POSTs to the driver —

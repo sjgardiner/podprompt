@@ -459,6 +459,9 @@
         <span class="file-pill"><span class="dot"></span>claude-docker-setup.html <em style="font-style:normal;opacity:.5">(this file)</em></span>
         <span class="file-pill"><span class="dot"></span>viewer/server.py</span>
         <span class="file-pill"><span class="dot"></span>viewer/viewer.html</span>
+        <span class="file-pill"><span class="dot"></span>viewer/driver.mjs</span>
+        <span class="file-pill"><span class="dot"></span>viewer/start-viewer.sh</span>
+        <span class="file-pill"><span class="dot"></span>viewer/package.json</span>
       </div>
     </div>
 
@@ -584,14 +587,18 @@ chmod 600 ~/.claude-docker.env</pre>
     <section id="step-5">
       <h2><span class="step-num">5</span> Install the viewer <em style="font-weight:400;font-size:.85rem;color:var(--text-muted)">(optional)</em></h2>
       <p>
-        The viewer renders Claude's responses as rich text — markdown, KaTeX
-        math, and syntax-highlighted code — in a browser tab while you continue
-        typing in the terminal. It runs inside the container and is exposed on
-        a host port.
+        The viewer is a full browser-based interface for Claude Code, not just
+        a read-only mirror of the terminal. A small bidirectional driver
+        (built on the Claude Agent SDK) runs inside the container and drives
+        Claude directly — <code>--viewer</code> does not launch a terminal UI
+        at all. You type prompts in the browser's own input box, approve or
+        deny tool permissions there, and watch responses render live:
+        streamed in token-by-token, thinking shown as its own bubble,
+        syntax-highlighted diffs for file edits, and full markdown/KaTeX math.
       </p>
       <p>
-        Copy <code>viewer/server.py</code>, <code>viewer/viewer.html</code>,
-        and <code>viewer/start-viewer.sh</code> into your config directory:
+        Copy the whole <code>viewer/</code> directory into your config
+        directory and install its one dependency (the Agent SDK):
       </p>
       <div class="code-block">
         <div class="code-block-header">
@@ -599,23 +606,35 @@ chmod 600 ~/.claude-docker.env</pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
         <pre>mkdir -p ~/.claude-docker/viewer
-cp viewer/server.py ~/.claude-docker/viewer/
-cp viewer/viewer.html ~/.claude-docker/viewer/
-cp viewer/start-viewer.sh ~/.claude-docker/viewer/</pre>
+cp -r viewer/. ~/.claude-docker/viewer/
+(cd ~/.claude-docker/viewer && npm install)</pre>
       </div>
       <p>
-        That's all — no rebuild required. The run script bind-mounts
+        That's all — no image rebuild required. The run script bind-mounts
         <code>~/.claude-docker/</code> into the container, so the viewer files
-        are available immediately at <code>/home/claude/.claude/viewer/</code>.
+        (and the <code>node_modules</code> the SDK needs) are available
+        immediately at <code>/home/claude/.claude/viewer/</code>.
       </p>
       <div class="callout info">
         <div class="callout-label">How it works</div>
         <p>
-          Claude runs exactly as normal in the terminal. The viewer server
-          tails the session's JSONL transcript directly — no hooks, no
-          <code>settings.json</code> changes — and emits a message for each
-          user prompt, each assistant response, and a compact line per tool
-          call as they're written.
+          <code>driver.mjs</code> drives Claude through the Agent SDK's
+          <code>query()</code> — one call per turn, threaded together via
+          <code>resume</code> — and is the sole source of everything the
+          browser shows: your prompts, Claude's text and thinking, tool calls,
+          and permission requests. <code>server.py</code> is a plain broadcast
+          relay that fans those messages out to connected browser tabs over
+          Server-Sent Events and replays history for tabs that join late.
+        </p>
+      </div>
+      <div class="callout warn">
+        <div class="callout-label">Re-copy after editing</div>
+        <p>
+          If you ever modify the viewer files yourself, re-copy the directory
+          into <code>~/.claude-docker/viewer/</code> and restart the container
+          — editing your repo checkout alone has no effect on an
+          already-running container, and neither Node nor the container's
+          shell entrypoint hot-reloads.
         </p>
       </div>
     </section>
@@ -695,7 +714,7 @@ Small model: openai/gpt-oss-120b</pre>
 # LiteLLM — interactive model picker runs automatically
 ./run-claude-docker.sh --litellm
 
-# Any provider + rendered browser viewer
+# Any provider + browser viewer (no terminal UI is attached in this mode)
 ./run-claude-docker.sh --viewer
 ./run-claude-docker.sh --litellm --viewer
 
@@ -762,18 +781,26 @@ Small model: openai/gpt-oss-120b</pre>
         <tbody>
           <tr>
             <td>--viewer</td>
-            <td>Start the browser viewer before launching. Renders Claude's
-            responses as markdown, math, and syntax-highlighted code at
-            <code>http://localhost:VIEWER_PORT</code> by tailing the session's
-            JSONL transcript directly — no hooks involved. Requires
-            <code>viewer/server.py</code>, <code>viewer/viewer.html</code>,
-            and <code>viewer/start-viewer.sh</code> to be installed in
-            <code>~/.claude-docker/viewer/</code>.</td>
+            <td>Start the bidirectional browser viewer instead of the
+            terminal UI. Opens <code>http://localhost:VIEWER_PORT</code>
+            with Claude's responses rendered as markdown/math/
+            syntax-highlighted code and streamed live as they're generated.
+            The browser's own input box drives Claude directly through a
+            small Agent-SDK-based driver — no terminal session is attached
+            at all. Requires <code>viewer/</code> to be installed (with
+            dependencies) in <code>~/.claude-docker/viewer/</code> — see
+            <a href="#step-5">step 5</a>.</td>
           </tr>
           <tr>
             <td>--viewer-port PORT</td>
-            <td>Host port for the viewer server. Default: <code>7843</code>.
-            Only meaningful with <code>--viewer</code>.</td>
+            <td>Host port for the viewer's browser page and SSE feed.
+            Default: <code>7843</code>. Only meaningful with <code>--viewer</code>.</td>
+          </tr>
+          <tr>
+            <td>--viewer-driver-port PORT</td>
+            <td>Host port for the bidirectional driver, which accepts
+            prompts and permission responses from the browser. Default:
+            <code>7844</code>. Only meaningful with <code>--viewer</code>.</td>
           </tr>
           <tr>
             <td>--help, -h</td>
@@ -902,44 +929,82 @@ Small model: openai/gpt-oss-120b</pre>
     <section id="viewer">
       <h2>Viewer</h2>
       <p>
-        The viewer renders Claude's responses as rich text in a browser tab
-        while you type in the terminal normally. It is an optional add-on —
-        the run script works without it.
+        The viewer is a full browser-based interface for Claude Code — not a
+        read-only mirror of a terminal session. It's an optional add-on (the
+        run script works fine without it), but when enabled with
+        <code>--viewer</code>, the browser <em>is</em> the interface: no
+        terminal UI is launched at all.
       </p>
 
       <h3>How it works</h3>
       <p>
-        Claude runs exactly as normal in the terminal. The viewer server,
-        running inside the container, tails the session's <code>*.jsonl</code>
-        transcript directly and polls for new lines — no hooks, no
-        <code>settings.json</code> changes. It emits a message for each real
-        user prompt, each assistant text block, and a compact one-line summary
-        for each tool call, as they're written.
-      </p>
-      <p>
-        Because it reads complete transcript entries rather than streaming raw
-        model output, messages appear as whole chunks rather than
-        character-by-character — the browser UI plays them back with a brief
-        word-by-word reveal so it still feels live.
+        Two processes run inside the container. <code>driver.mjs</code> is a
+        small bidirectional driver built on the Claude Agent SDK — it drives
+        Claude through the SDK's <code>query()</code> (one call per turn,
+        threaded together via <code>resume</code>), and is the sole source of
+        everything the browser shows: your prompts, Claude's text and
+        thinking, tool calls, and permission requests. <code>server.py</code>
+        is a plain broadcast relay: it fans driver.mjs's messages out to
+        every connected browser tab over Server-Sent Events, and replays
+        history to tabs that join or reconnect later. Neither process uses
+        hooks or touches <code>settings.json</code>.
       </p>
 
+      <h3>What you get</h3>
+      <ul style="list-style:none;max-width:var(--prose-width);margin:.75rem 0 1rem;">
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Live streaming</strong> — text and thinking render token-by-token as Claude generates them, not a replay of a finished message.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Thinking, shown separately</strong> — when the model thinks, it renders as its own distinct bubble rather than being hidden or folded into the response.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Real diffs for file edits</strong> — <code>Edit</code>/<code>Write</code> tool calls render an actual line diff, not a truncated one-line summary.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Tool-progress status</strong> — a status line above the input box shows "Thinking…" and ticks while long-running tool calls are in flight, similar to the terminal UI's own status line.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Permission &amp; question cards</strong> — tool-approval prompts and <code>AskUserQuestion</code> requests render as interactive cards with Allow/Deny buttons or answer choices, right in the browser.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Sessions panel</strong> — switch conversations, start a new chat, archive/unarchive, rename, or delete sessions, all from the ☰ button.
+        </li>
+        <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Command palette</strong> — the <code>/</code> button lists slash commands available in the current session.
+        </li>
+        <li style="padding:.4rem 0;font-size:.875rem;color:var(--text-muted)">
+          <strong style="color:var(--text)">Settings panel</strong> — font size, content width, label size, status-line text size, light/dark theme, show/hide tool calls, and timestamp format, all persisted locally in the browser.
+        </li>
+      </ul>
+
       <h3>Installation</h3>
-      <p>Copy the viewer files into your config directory once:</p>
-      <div class="code-block">
-        <div class="code-block-header">
-          <span class="code-block-label">bash</span>
-          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        </div>
-        <pre>mkdir -p ~/.claude-docker/viewer
-cp viewer/server.py ~/.claude-docker/viewer/
-cp viewer/viewer.html ~/.claude-docker/viewer/
-cp viewer/start-viewer.sh ~/.claude-docker/viewer/</pre>
-      </div>
       <p>
-        No Docker rebuild needed. The files are available inside the container
-        at <code>/home/claude/.claude/viewer/</code> via the existing config
-        dir bind mount.
+        See <a href="#step-5">step 5</a> — copy the whole <code>viewer/</code>
+        directory into <code>~/.claude-docker/viewer/</code> and run
+        <code>npm install</code> there once, for the Agent SDK dependency.
+        No Docker image rebuild is needed either way.
       </p>
+
+      <h3>Sessions and the terminal UI</h3>
+      <p>
+        Because no terminal is attached, each <code>--viewer</code> launch
+        generates a fresh, empty session by default. To continue an existing
+        conversation, open the sessions panel (☰) in the browser and switch
+        to it — this reloads that session's full history into the page.
+      </p>
+      <div class="callout warn">
+        <div class="callout-label">Pinning a session at launch doesn't work yet</div>
+        <p>
+          Passing <code>--session-id</code>, <code>--resume</code>/<code>-r</code>,
+          <code>--continue</code>/<code>-c</code>, or <code>--fork-session</code>
+          alongside <code>--viewer</code> starts the browser page but leaves it
+          with no way to submit a prompt — the bidirectional driver isn't wired
+          up for a session it didn't generate itself, and there's no terminal
+          fallback to fall back to anymore. Use the sessions panel to switch
+          sessions from within the browser instead of pinning one at launch.
+        </p>
+      </div>
     </section>
 
     <!-- ── Reference: state ── -->

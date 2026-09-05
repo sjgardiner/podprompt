@@ -451,7 +451,9 @@
     display: flex;
     flex-direction: column;
     gap: 20px;
-    scroll-behavior: smooth;
+    /* scroll-behavior is set from JS (applySettings) per the "Auto-scroll
+       animation" setting, not hardcoded here — see the autoscroll-anim
+       select and the pinnedToBottom/autoScrolling logic near scrollBottom(). */
   }
   #feed::-webkit-scrollbar { width: 6px; }
   #feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -890,6 +892,14 @@
     <div class="settings-row">
       <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
     </div>
+    <div class="settings-row">
+      <label>Auto-scroll animation
+        <select id="autoscroll-anim">
+          <option value="smooth" selected>Smooth</option>
+          <option value="instant">Instant</option>
+        </select>
+      </label>
+    </div>
 
     <div class="settings-group-title">Sessions</div>
     <div class="settings-row">
@@ -1326,27 +1336,78 @@ function revealText(entry, fullText) {
 // Autoscroll-lock: only force-scroll on new content if the user was already
 // pinned to the bottom. If they've scrolled up to reread something, show a
 // pill instead of yanking them back down on every reveal tick.
+//
+// This has to stay correct under BOTH `scroll-behavior: smooth` (an
+// animated, multi-frame scroll, ~300-500ms) and `scroll-behavior: auto`
+// (an instant jump) — see the "Auto-scroll animation" setting. The naive
+// version of this (recompute pinnedToBottom on every 'scroll' event) only
+// works for the instant case. Under 'smooth', a programmatic scroll-to-
+// bottom fires 'scroll' events for its intermediate, not-yet-at-bottom
+// frames too. If new content arrives mid-animation — e.g. a permission
+// bubble landing right after a multi-row tool bubble — one of those
+// intermediate frames can get sampled as "the user scrolled away", flipping
+// pinnedToBottom to false and abandoning the in-flight scroll short of the
+// real bottom. That's the "auto-scroll gets stuck partway" bug, and it also
+// explains the pill showing up even when you're basically already at the
+// bottom — same false reading.
+//
+// Fix: ignore 'scroll' events that we caused ourselves (tracked via
+// `autoScrolling`), and only trust 'scroll' events that happen outside that
+// window as real user intent. This doesn't depend on sampling scroll
+// position mid-flight at all, so it's agnostic to which scroll-behavior is
+// active — smooth or instant, the logic is identical.
 const newPill = document.getElementById('new-pill');
 let pinnedToBottom = true;
+let autoScrolling = false;
+let autoScrollSettleTimer = null;
 
 function isNearBottom() {
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
 }
 
 feed.addEventListener('scroll', () => {
+  if (autoScrolling) return; // our own scroll-to-bottom in flight, not user intent
   pinnedToBottom = isNearBottom();
   if (pinnedToBottom) newPill.classList.remove('show');
 });
 
-newPill.addEventListener('click', () => {
-  feed.scrollTop = feed.scrollHeight;
+// Fires once our own auto-scroll has actually settled: via the modern
+// 'scrollend' event where supported, and always via a debounced fallback
+// timer for browsers that don't support it (e.g. Safari < 17.4) or that
+// skip firing it for a no-op scroll. Either way, this is the one place
+// that re-derives the real pinned state once we're done driving the scroll
+// ourselves — not mid-flight.
+function onAutoScrollSettled() {
+  autoScrolling = false;
+  clearTimeout(autoScrollSettleTimer);
+  pinnedToBottom = isNearBottom();
+  if (pinnedToBottom) newPill.classList.remove('show');
+}
+if ('onscrollend' in window) {
+  feed.addEventListener('scrollend', onAutoScrollSettled);
+}
+
+function performAutoScroll() {
+  autoScrolling = true;
   pinnedToBottom = true;
+  feed.scrollTop = feed.scrollHeight;
+  // Debounced fallback in case 'scrollend' isn't supported or doesn't fire.
+  // 500ms comfortably covers a 'smooth' animation's duration. Repeated
+  // calls (e.g. per-token stream deltas, or a fast run of reveal ticks)
+  // keep pushing this out, which is intended — we only want to settle once
+  // new content actually stops arriving, not after the first tick.
+  clearTimeout(autoScrollSettleTimer);
+  autoScrollSettleTimer = setTimeout(onAutoScrollSettled, 500);
+}
+
+newPill.addEventListener('click', () => {
+  performAutoScroll();
   newPill.classList.remove('show');
 });
 
 function scrollBottom() {
   if (pinnedToBottom) {
-    feed.scrollTop = feed.scrollHeight;
+    performAutoScroll();
   } else {
     newPill.classList.add('show');
   }
@@ -1529,6 +1590,7 @@ window.addEventListener('popstate', () => {
 const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
   fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
+  autoScrollAnim: 'smooth',
   tsFormat: 'time', hour24: false, showTz: false,
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
 };
@@ -1552,6 +1614,9 @@ function applySettings() {
   document.documentElement.style.setProperty('--status-font-size', settings.statusFontSize + 'px');
   document.documentElement.setAttribute('data-theme', settings.theme === 'light' ? 'light' : 'dark');
   feed.classList.toggle('hide-tools', !settings.showTools);
+  // Purely cosmetic — the pinnedToBottom/autoScrolling logic around
+  // scrollBottom() is correct either way, see the comment there.
+  feed.style.scrollBehavior = settings.autoScrollAnim === 'instant' ? 'auto' : 'smooth';
   const tsHidden = settings.tsFormat === 'hidden';
   ts24hRow.classList.toggle('disabled', tsHidden);
   tsTzRow.classList.toggle('disabled', tsHidden);
@@ -1572,6 +1637,7 @@ const statusSlider   = document.getElementById('status-size-slider');
 const statusVal      = document.getElementById('status-size-val');
 const themeToggle    = document.getElementById('theme-toggle');
 const toolsToggle    = document.getElementById('tools-toggle');
+const autoScrollAnimSelect = document.getElementById('autoscroll-anim');
 const sessionsLayoutSelect = document.getElementById('sessions-layout');
 const unreachableModeSelect = document.getElementById('unreachable-mode');
 const badgePositionSelect = document.getElementById('badge-position');
@@ -1594,6 +1660,7 @@ statusSlider.value = settings.statusFontSize;
 statusVal.textContent = settings.statusFontSize + 'px';
 themeToggle.checked = settings.theme === 'light';
 toolsToggle.checked = settings.showTools;
+autoScrollAnimSelect.value = settings.autoScrollAnim;
 sessionsLayoutSelect.value = settings.sessionsLayout;
 unreachableModeSelect.value = settings.unreachableMode;
 badgePositionSelect.value = settings.badgePosition;
@@ -1660,6 +1727,12 @@ themeToggle.addEventListener('change', () => {
 
 toolsToggle.addEventListener('change', () => {
   settings.showTools = toolsToggle.checked;
+  applySettings();
+  saveSettings();
+});
+
+autoScrollAnimSelect.addEventListener('change', () => {
+  settings.autoScrollAnim = autoScrollAnimSelect.value;
   applySettings();
   saveSettings();
 });

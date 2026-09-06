@@ -1680,7 +1680,8 @@ let es;
 let reconnectTimer;
 
 function connect() {
-  es = new EventSource('/events?session=' + encodeURIComponent(currentSessionId));
+  es = new EventSource('/events?session=' + encodeURIComponent(currentSessionId) +
+    (backendForCurrentSession() ? '&backend=' + encodeURIComponent(backendForCurrentSession()) : ''));
 
   es.onopen = () => {
     setStatus('live', 'live');
@@ -2145,6 +2146,17 @@ let pendingCwdForNewSession = null;
 // reads body.cwd, only for a session it's never seen a prompt for yet.
 let pendingBackendForNewSession = null;
 
+// Backend routing learned from the sessions panel: every backend stamps its
+// listSessions entries with a `backend` marker (see driver.mjs /sessions),
+// and this map mirrors it so session-keyed calls (/models, /modes, history
+// seeding, archive/delete, and prompts for resumed sessions) can name their
+// backend even when driver.mjs has no SessionState for them yet. Rebuilt on
+// every /sessions tick; unknown ids fall back to the driver's CLI default.
+const sessionBackends = new Map(); // sessionId -> backend id
+function backendForCurrentSession() {
+  return sessionBackends.get(currentSessionId) || undefined;
+}
+
 const promptInput  = document.getElementById('prompt-input');
 const sendBtn       = document.getElementById('send-btn');
 const stopBtn       = document.getElementById('stop-btn');
@@ -2212,7 +2224,7 @@ async function resyncTurnStatus() {
 async function loadModes() {
   if (!driverBase || modesResolved) return;
   try {
-    const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}`);
+    const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
     const data = await res.json();
     if (!data) {
       // Definitive: this backend has no mode/agent concept at all — never
@@ -2247,7 +2259,7 @@ modeSelect.addEventListener('change', async () => {
     await fetch(`${driverBase}/set-mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId, mode: modeSelect.value }),
+      body: JSON.stringify({ sessionId: currentSessionId, mode: modeSelect.value, backend: backendForCurrentSession() }),
     });
   } catch (e) {
     console.error('Failed to set mode:', e);
@@ -2257,7 +2269,7 @@ modeSelect.addEventListener('change', async () => {
 async function loadModels() {
   if (!driverBase || modelsResolved) return;
   try {
-    const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}`);
+    const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
     const data = await res.json();
     if (!data) {
       // Definitive: no model concept for this backend — never going to
@@ -2292,7 +2304,7 @@ modelSelect.addEventListener('change', async () => {
     await fetch(`${driverBase}/set-model`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId, model: modelSelect.value }),
+      body: JSON.stringify({ sessionId: currentSessionId, model: modelSelect.value, backend: backendForCurrentSession() }),
     });
   } catch (e) {
     console.error('Failed to set model:', e);
@@ -2364,7 +2376,7 @@ async function submitPrompt() {
   pendingCwdForNewSession = null;
   const backendForThisPrompt = pendingBackendForNewSession && pendingBackendForNewSession.sessionId === currentSessionId
     ? pendingBackendForNewSession.backend
-    : undefined;
+    : backendForCurrentSession();
   pendingBackendForNewSession = null;
   try {
     const body = { sessionId: currentSessionId, text };
@@ -2517,7 +2529,7 @@ function startRenameEdit(titleEl, session) {
         await fetch(`${driverBase}/rename-session`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: session.sessionId, title: newTitle }),
+          body: JSON.stringify({ sessionId: session.sessionId, title: newTitle, backend: sessionBackends.get(session.sessionId) }),
         });
       } catch (e) {
         console.error('Failed to rename session:', e);
@@ -2777,6 +2789,10 @@ async function refreshSessionsList({ full = true } = {}) {
       data.unreachableSessions = lastSessionsResult.unreachableSessions;
     }
     lastSessionsResult = data;
+    sessionBackends.clear();
+    for (const s of data.sessions || []) {
+      if (s.backend) sessionBackends.set(s.sessionId, s.backend);
+    }
     renderSessionsList();
   } catch (e) {
     if (seq !== sessionsFetchSeq) return;
@@ -2877,7 +2893,7 @@ async function archiveSession(sessionId) {
     await fetch(`${driverBase}/archive-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, backend: sessionBackends.get(sessionId) }),
     });
     // Archiving doesn't disable resume, so this tab COULD keep viewing an
     // archived session just fine — but if it's the one you're currently
@@ -2915,7 +2931,7 @@ async function unarchiveSession(sessionId) {
     await fetch(`${driverBase}/unarchive-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, backend: sessionBackends.get(sessionId) }),
     });
     await refreshSessionsList();
   } catch (e) {
@@ -2930,7 +2946,7 @@ async function deleteSessionFromUi(sessionId, title) {
     const res = await fetch(`${driverBase}/delete-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, backend: sessionBackends.get(sessionId) }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

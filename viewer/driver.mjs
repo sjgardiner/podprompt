@@ -238,15 +238,44 @@ const backendSessionsFailing = new Set();
 // the life of the session.
 const sessions = new Map(); // sessionId -> SessionState
 
+// Pre-prompt picker changes for sessions that have no driver state yet (the
+// "new chat" case, or a session this process hasn't touched this run). A
+// real SessionState must never be created just to remember a model/mode
+// choice — state creation pins cwd and backend (see /prompt), which we
+// don't want to do from a mere /set-model or /set-mode. Instead the choice
+// is parked here and merged into the state the first time something that
+// genuinely needs state (a prompt) creates it; seeded entries are consumed
+// and removed at that moment, so an abandoned pick can never leak into a
+// later session with the same id.
+const preSeeds = new Map(); // sessionId -> { model?, mode? }
+
 function getSessionState(sessionId, explicitCwd, explicitBackendId) {
   let s = sessions.get(sessionId);
   if (!s) {
     const backend = getBackend(explicitBackendId || args.backend);
     const cwd = explicitCwd || backend.cwdForSession(sessionId, null);
     s = { bootstrapped: false, turnInFlight: false, abortController: null, cwd, backend };
+    const pre = preSeeds.get(sessionId);
+    if (pre) {
+      if (pre.model) s.model = pre.model;
+      if (pre.mode) s.mode = pre.mode;
+      preSeeds.delete(sessionId);
+    }
     sessions.set(sessionId, s);
   }
   return s;
+}
+
+// Backend resolution for routes that must NOT create session state (pure
+// reads like /modes & /models, and session-management calls): the pinned
+// state backend wins once a session has been touched this run, otherwise an
+// explicit backend from the caller (the viewer relays what it learned from
+// /sessions), otherwise the CLI default. Crucially this never creates a
+// SessionState, so a resumed session can't get its cwd/backend pinned by a
+// mere /models or /session-history call.
+function backendFor(sessionId, explicitBackendId) {
+  const state = sessionId ? sessions.get(sessionId) : null;
+  return state?.backend || getBackend(explicitBackendId || args.backend);
 }
 
 // ── Drive one turn (backend-agnostic wrapper) ───────────────────────────
@@ -339,7 +368,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     const state = sessions.get(sessionId);
-    const backend = state?.backend || getBackend(args.backend);
+    const backend = backendFor(sessionId, url.searchParams.get("backend"));
     const history = await backend.getSessionHistory(sessionId, state?.cwd);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(history));
@@ -439,14 +468,14 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/modes") {
     const sessionId = url.searchParams.get("sessionId");
     const state = sessionId ? sessions.get(sessionId) : null;
-    const backend = state?.backend || getBackend(args.backend);
+    const backend = backendFor(sessionId, url.searchParams.get("backend"));
     if (typeof backend.listModes !== "function") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end("null"); // no mode concept for this backend (e.g. Claude Code)
       return;
     }
     const modes = await backend.listModes(sessionId);
-    if (modes && state && !("current" in modes)) modes.current = state.mode || null;
+    if (modes && state) modes.current = state.mode || modes.current || null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(modes));
     return;
@@ -462,40 +491,44 @@ const server = createServer(async (req, res) => {
       return;
     }
     const state = sessions.get(body.sessionId);
-    if (!state) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end('{"error":"unknown session"}');
-      return;
-    }
-    if (typeof state.backend.setMode !== "function") {
+    const backend = backendFor(body.sessionId, body.backend);
+    if (typeof backend.setMode !== "function") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end('{"error":"this backend has no mode concept"}');
       return;
     }
-    try {
-      await state.backend.setMode(body.sessionId, body.mode);
+    if (state) {
+      // Best-effort: the backend call is an optimization (opencode applies
+      // mode via the per-message `agent` field anyway), so it must never
+      // fail the request or drop the recorded choice.
+      try {
+        await backend.setMode(body.sessionId, body.mode);
+      } catch (e) {
+        console.error("[driver] set-mode backend call failed (ignoring):", e.message);
+      }
       state.mode = body.mode;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
-    } catch (e) {
-      console.error("[driver] set-mode failed:", e.message);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end('{"error":"failed to set mode"}');
+    } else {
+      // No state yet (pre-prompt "new chat") — park the choice; it merges
+      // into state the first time a prompt creates it.
+      const pre = preSeeds.get(body.sessionId) || {};
+      preSeeds.set(body.sessionId, { ...pre, mode: body.mode });
     }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
     return;
   }
 
   if (req.method === "GET" && path === "/models") {
     const sessionId = url.searchParams.get("sessionId");
     const state = sessionId ? sessions.get(sessionId) : null;
-    const backend = state?.backend || getBackend(args.backend);
+    const backend = backendFor(sessionId, url.searchParams.get("backend"));
     if (typeof backend.listModels !== "function") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end("null"); // no model concept for this backend
       return;
     }
     const models = await backend.listModels(sessionId);
-    if (models && state && !("current" in models)) models.current = state.model || null;
+    if (models && state) models.current = state.model || models.current || null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(models));
     return;
@@ -511,26 +544,29 @@ const server = createServer(async (req, res) => {
       return;
     }
     const state = sessions.get(body.sessionId);
-    if (!state) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end('{"error":"unknown session"}');
-      return;
-    }
-    if (typeof state.backend.setModel !== "function") {
+    const backend = backendFor(body.sessionId, body.backend);
+    if (typeof backend.setModel !== "function") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end('{"error":"this backend has no model concept"}');
       return;
     }
-    try {
-      await state.backend.setModel(body.sessionId, body.model);
+    if (state) {
+      // Both backends treat setModel as a no-op (the model travels on the
+      // per-message body instead), so there's nothing to fail here; the
+      // choice is recorded regardless.
+      try {
+        await backend.setModel(body.sessionId, body.model);
+      } catch (e) {
+        console.error("[driver] set-model backend call failed (ignoring):", e.message);
+      }
       state.model = body.model;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
-    } catch (e) {
-      console.error("[driver] set-model failed:", e.message);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end('{"error":"failed to set model"}');
+    } else {
+      // Pre-prompt "new chat": park the choice for when state is created.
+      const pre = preSeeds.get(body.sessionId) || {};
+      preSeeds.set(body.sessionId, { ...pre, model: body.model });
     }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
     return;
   }
 
@@ -583,7 +619,7 @@ const server = createServer(async (req, res) => {
     // panel that refreshes its list.
     try {
       const state = sessions.get(targetId);
-      const backend = state?.backend || getBackend(args.backend);
+      const backend = backendFor(targetId, body.backend);
       await backend.archiveSession(targetId, state?.cwd);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');
@@ -606,7 +642,7 @@ const server = createServer(async (req, res) => {
     }
     try {
       const state = sessions.get(body.sessionId);
-      const backend = state?.backend || getBackend(args.backend);
+      const backend = backendFor(body.sessionId, body.backend);
       await backend.unarchiveSession(body.sessionId, state?.cwd);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');
@@ -634,7 +670,7 @@ const server = createServer(async (req, res) => {
     }
     try {
       const state = sessions.get(body.sessionId);
-      const backend = state?.backend || getBackend(args.backend);
+      const backend = backendFor(body.sessionId, body.backend);
       await backend.deleteSession(body.sessionId, state?.cwd);
       sessions.delete(body.sessionId);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -658,7 +694,7 @@ const server = createServer(async (req, res) => {
     }
     try {
       const state = sessions.get(body.sessionId);
-      const backend = state?.backend || getBackend(args.backend);
+      const backend = backendFor(body.sessionId, body.backend);
       await backend.renameSession(body.sessionId, body.title, state?.cwd);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');

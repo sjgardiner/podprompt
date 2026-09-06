@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  existsSync, readdirSync, readFileSync, writeFileSync, realpathSync, statSync,
+  existsSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync,
 } from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
@@ -218,7 +218,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     }
     data[sessionId] = { hostPath, cwd, lastSeen: new Date().toISOString() };
     try {
-      writeFileSync(SESSION_HOSTS_FILE, JSON.stringify(data));
+      // Temp file + atomic rename so a crash mid-write can't leave a torn
+      // JSON that throws on the next read.
+      writeFileSync(`${SESSION_HOSTS_FILE}.tmp`, JSON.stringify(data));
+      renameSync(`${SESSION_HOSTS_FILE}.tmp`, SESSION_HOSTS_FILE);
     } catch (e) {
       console.error("[claude-code] failed to write session-hosts file:", e.message);
     }

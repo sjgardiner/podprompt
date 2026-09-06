@@ -94,6 +94,19 @@ UTILITY OPTIONS:
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
 
+  --deploy-viewer Copy this repo's viewer/ directory (server.py, viewer.html,
+                  start-viewer.sh, driver.mjs, backends/, package.json,
+                  package-lock.json) into ~/.local/share/podprompt/viewer/
+                  and refresh its node_modules there when the dependency
+                  manifests have changed (which npm reconciles incrementally
+                  against the lockfile; no reinstall is triggered if they
+                  haven't). This is
+                  the supported way to deploy the viewer — run it after
+                  pulling updated viewer code, then start with --viewer
+                  (which restarts the container and serves the fresh files).
+                  Only the app payload is copied; node_modules, bytecode
+                  caches, and scratch/notes are never carried over.
+
   --viewer        Start PodPrompt, the browser-based viewer/driver UI,
                   instead of launching an interactive terminal session. Opens
                   a rendered view of the agent's responses (markdown, math,
@@ -283,19 +296,43 @@ PODPROMPT_STATE_DIR="$HOME/.local/state/podprompt"
 # ── Port cleanup ──────────────────────────────────────────────────────────────
 free_host_port() {
     local port="$1"
-    local pid
+    local pid cmd
     pid=$(lsof -ti tcp:"$port" 2>/dev/null)
-    if [ -n "$pid" ]; then
-        echo "[viewer] Freeing host port $port (PID $pid)..."
-        kill "$pid" 2>/dev/null
-        # Wait up to 2s for it to die
-        local i=0
-        while kill -0 "$pid" 2>/dev/null && [ $i -lt 10 ]; do
-            sleep 0.2
-            i=$((i+1))
-        done
-        kill -9 "$pid" 2>/dev/null || true
+    [ -n "$pid" ] || return 0
+
+    # Only ever reap a PID we can positively identify as this project's — a
+    # leftover docker-proxy for the podprompt container, or a stale
+    # server.py/driver.mjs/start-viewer.sh. A port that's happened to collide
+    # with some unrelated service must NOT be killed out from under it: abort
+    # with a clear message instead.
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+
+    local ours=0
+    if [[ "$cmd" == *docker-proxy* ]] \
+       && command -v docker >/dev/null 2>&1 \
+       && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx podprompt; then
+        ours=1   # stale proxy from a previous podprompt container
+    elif [[ "$cmd" == *podprompt* || "$cmd" == *server.py* \
+            || "$cmd" == *start-viewer.sh* || "$cmd" == *driver.mjs* ]]; then
+        ours=1   # our own viewer/driver process
     fi
+
+    if [ "$ours" != 1 ]; then
+        echo "[viewer] Port $port is in use by an unrecognized process (PID $pid): $cmd" >&2
+        echo "[viewer] Refusing to kill it. Free the port yourself, or use --viewer-port/--viewer-driver-port to avoid the collision." >&2
+        return 1
+    fi
+
+    echo "[viewer] Reaping stale process on port $port (PID $pid)..."
+    kill "$pid" 2>/dev/null
+    # Wait up to 2s for it to die
+    local i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 10 ]; do
+        sleep 0.2
+        i=$((i+1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    return 0
 }
 
 cleanup() {
@@ -355,6 +392,83 @@ fetch_litellm_models() {
 list_models() {
     echo "Models available on $LITELLM_URL:"
     fetch_litellm_models | jq -r '.data[].id' | sort
+}
+
+deploy_viewer() {
+    # The supported way to get the viewer deployed: copy this repo's viewer/
+    # app into PodPrompt's own data directory and (re)install its one
+    # dependency, so the mounted ~/.local/share/podprompt/viewer is always a
+    # fresh mirror of this checkout rather than whatever a hand-copied
+    # deploy last put there. Run it after pulling updated viewer code; then
+    # start with --viewer, which restarts the container around the new files.
+    # Deliberately copies only the canonical app payload — node_modules,
+    # __pycache__, and scratch/notes never migrate, so a re-deploy can't
+    # resurrect stale state.
+    local src_dir target_dir
+    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/viewer"
+    target_dir="${PODPROMPT_DATA_DIR}/viewer"
+
+    if [ ! -d "$src_dir" ]; then
+        echo "Error: no viewer/ directory next to this script ($src_dir)." >&2
+        echo "Run this from your podprompt checkout (the directory containing podprompt.sh and viewer/)." >&2
+        exit 1
+    fi
+
+    local required=(server.py viewer.html start-viewer.sh driver.mjs package.json package-lock.json backends)
+    local missing=()
+    local f
+    for f in "${required[@]}"; do
+        [ -e "$src_dir/$f" ] || missing+=("$f")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "Error: this repo's viewer/ is missing required files:" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        exit 1
+    fi
+
+    mkdir -p "$target_dir"
+
+    # npm install already reconciles node_modules against the shipped
+    # package-lock.json: it installs what's missing, upgrades what drifted,
+    # and prunes what's extraneous. So we only invoke it when node_modules is
+    # absent/incomplete, or when the dependency manifests are changing in
+    # THIS deploy — which we must detect against the target's pre-copy state,
+    # since we overwrite the manifests with the source's a moment later. A
+    # deploy that only touched app code (viewer.html, driver.mjs, ...) never
+    # pays for a reinstall, and a stale hand-copy of the lockfile tree is
+    # caught by the missing .package-lock.json marker rather than trusted
+    # sight-unseen.
+    local needs_npm_install=false
+    if [ ! -d "$target_dir/node_modules" ] \
+       || [ ! -f "$target_dir/node_modules/.package-lock.json" ]; then
+        needs_npm_install=true
+    elif ! cmp -s "$src_dir/package.json" "$target_dir/package.json" \
+      || ! cmp -s "$src_dir/package-lock.json" "$target_dir/package-lock.json"; then
+        needs_npm_install=true
+    fi
+
+    for f in "${required[@]}"; do
+        cp -r "$src_dir/$f" "$target_dir/"
+    done
+    chmod +x "$target_dir/start-viewer.sh"
+
+    if [ "$needs_npm_install" = true ]; then
+        if ! (cd "$target_dir" && npm install); then
+            echo "Error: npm install failed in $target_dir." >&2
+            exit 1
+        fi
+    else
+        echo "Dependencies already up to date in $target_dir (skipping npm install)."
+    fi
+
+    if grep -q '<title>PodPrompt</title>' "$target_dir/viewer.html"; then
+        echo "Viewer deployed to $target_dir."
+        echo "Start it with --viewer (container restart happens automatically); hard-refresh the browser tab if you were already connected."
+    else
+        echo "Viewer deployed to $target_dir." >&2
+        echo "Warning: deployed viewer.html title is not 'PodPrompt' — source checkout may be out of date." >&2
+        exit 1
+    fi
 }
 
 pick_model() {
@@ -493,6 +607,10 @@ while [ $# -gt 0 ]; do
             ;;
         --list-models)
             list_models
+            exit 0
+            ;;
+        --deploy-viewer)
+            deploy_viewer
             exit 0
             ;;
         --direct)
@@ -650,19 +768,19 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     for f in server.py viewer.html start-viewer.sh driver.mjs package.json; do
         if [ ! -f "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
             echo "Error: $PODPROMPT_DATA_DIR/viewer/$f not found."
-            echo "Copy the whole viewer/ directory into $PODPROMPT_DATA_DIR/viewer/ first, then run 'npm install' there."
+            echo "Run './podprompt.sh --deploy-viewer' from this repo to install/update the viewer there."
             exit 1
         fi
     done
     if [ ! -d "$PODPROMPT_DATA_DIR/viewer/node_modules" ]; then
         echo "Error: $PODPROMPT_DATA_DIR/viewer/node_modules not found."
-        echo "Run 'npm install' in $PODPROMPT_DATA_DIR/viewer/ first (needed for driver.mjs's Agent SDK dependency)."
+        echo "Run './podprompt.sh --deploy-viewer' from this repo (it reinstalls node_modules for driver.mjs's Agent SDK dependency)."
         exit 1
     fi
 
     VIEWER_PORT_FLAGS=(-p "127.0.0.1:${VIEWER_PORT}:${VIEWER_PORT}" -p "127.0.0.1:${VIEWER_DRIVER_PORT}:${VIEWER_DRIVER_PORT}")
-    free_host_port "$VIEWER_PORT"
-    free_host_port "$VIEWER_DRIVER_PORT"
+    free_host_port "$VIEWER_PORT" || exit 1
+    free_host_port "$VIEWER_DRIVER_PORT" || exit 1
 
     # server.py is a plain broadcast relay; driver.mjs (Agent SDK-based) is
     # what actually drives either backend and is what the browser will talk

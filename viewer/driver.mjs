@@ -59,7 +59,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
@@ -531,8 +531,11 @@ function persistModelPick(sessionId, model) {
     // missing or corrupt — start fresh rather than fail the request over this
   }
   data[sessionId] = model;
+  // Write via a temp file + atomic rename so a crash mid-write can't tear
+  // the JSON and leave a corrupt bookkeeping file for the next startup.
   try {
-    writeFileSync(MODEL_PICKS_FILE, JSON.stringify(data));
+    writeFileSync(`${MODEL_PICKS_FILE}.tmp`, JSON.stringify(data));
+    renameSync(`${MODEL_PICKS_FILE}.tmp`, MODEL_PICKS_FILE);
   } catch (e) {
     console.error("[driver] failed to write model-picks file:", e.message);
   }

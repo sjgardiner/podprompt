@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Claude Docker — Setup Guide</title>
+<title>PodPrompt — Setup Guide</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -416,7 +416,7 @@
   <!-- ── Sidebar nav ── -->
   <nav class="sidebar" aria-label="Page navigation">
     <div class="sidebar-brand">
-      <div class="product">claude-docker</div>
+      <div class="product">podprompt</div>
       <div class="tagline">Setup &amp; reference guide</div>
     </div>
     <div class="nav-group">
@@ -445,23 +445,35 @@
   <main>
 
     <div class="page-header">
-      <h1>Claude Docker — Setup Guide</h1>
+      <h1>PodPrompt — Setup Guide</h1>
       <p class="subtitle">
-        Run Claude Code inside a Docker sandbox with your working directory
-        mounted in and your credentials kept safely outside version control.
-        Supports claude.ai subscription (OAuth), direct Anthropic API access,
-        and a LiteLLM proxy.
+        Run Claude Code or OpenCode inside a Docker sandbox with your working
+        directory mounted in and your credentials kept safely outside version
+        control. Claude Code supports claude.ai subscription (OAuth), direct
+        Anthropic API access, and a LiteLLM proxy.
       </p>
       <div class="files-strip" id="files">
         <span class="file-pill"><span class="dot"></span>Dockerfile</span>
-        <span class="file-pill"><span class="dot"></span>run-claude-docker.sh</span>
-        <span class="file-pill"><span class="dot"></span>claude-docker.env.template</span>
-        <span class="file-pill"><span class="dot"></span>claude-docker-setup.html <em style="font-style:normal;opacity:.5">(this file)</em></span>
+        <span class="file-pill"><span class="dot"></span>podprompt.sh</span>
+        <span class="file-pill"><span class="dot"></span>podprompt.env.template</span>
+        <span class="file-pill"><span class="dot"></span>podprompt-setup.html <em style="font-style:normal;opacity:.5">(this file)</em></span>
         <span class="file-pill"><span class="dot"></span>viewer/server.py</span>
         <span class="file-pill"><span class="dot"></span>viewer/viewer.html</span>
         <span class="file-pill"><span class="dot"></span>viewer/driver.mjs</span>
         <span class="file-pill"><span class="dot"></span>viewer/start-viewer.sh</span>
         <span class="file-pill"><span class="dot"></span>viewer/package.json</span>
+      </div>
+      <div class="callout info">
+        <div class="callout-label">Scope of this guide</div>
+        <p>
+          This guide covers the Claude Code provider/authentication flow in
+          detail (subscription OAuth, direct API, LiteLLM). PodPrompt also
+          supports an OpenCode backend (<code>--backend opencode</code> /
+          <code>--viewer-backend opencode</code>), configured entirely through
+          OpenCode's own standard config, auth, and data directories — see
+          <code>podprompt.sh</code>'s own comments for the current mount
+          details until this guide is expanded to cover it fully.
+        </p>
       </div>
     </div>
 
@@ -469,9 +481,9 @@
     <section id="step-1">
       <h2><span class="step-num">1</span> Get the files</h2>
       <p>
-        Place <code>Dockerfile</code>, <code>run-claude-docker.sh</code>, and
-        <code>claude-docker.env.template</code> together in a stable location —
-        a dotfiles repo or a dedicated directory like <code>~/bin/claude-docker/</code>
+        Place <code>Dockerfile</code>, <code>podprompt.sh</code>, and
+        <code>podprompt.env.template</code> together in a stable location —
+        a dotfiles repo or a dedicated directory like <code>~/bin/podprompt/</code>
         works well. The run script and Dockerfile are the only things you need
         to invoke day-to-day.
       </p>
@@ -494,11 +506,11 @@
           <span class="code-block-label">bash</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>cp claude-docker.env.template ~/.claude-docker.env
-chmod 600 ~/.claude-docker.env</pre>
+        <pre>cp podprompt.env.template ~/.podprompt.env
+chmod 600 ~/.podprompt.env</pre>
       </div>
       <p>
-        Open <code>~/.claude-docker.env</code> in an editor and fill in your values:
+        Open <code>~/.podprompt.env</code> in an editor and fill in your values:
       </p>
       <ul class="env-list">
         <li>
@@ -529,7 +541,7 @@ chmod 600 ~/.claude-docker.env</pre>
           <span class="code-block-label">~/.zshrc or ~/.bashrc</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>source ~/.claude-docker.env</pre>
+        <pre>source ~/.podprompt.env</pre>
       </div>
       <div class="code-block">
         <div class="code-block-header">
@@ -548,7 +560,7 @@ chmod 600 ~/.claude-docker.env</pre>
           <span class="code-block-label">bash</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>chmod +x run-claude-docker.sh</pre>
+        <pre>chmod +x podprompt.sh</pre>
       </div>
     </section>
 
@@ -563,7 +575,7 @@ chmod 600 ~/.claude-docker.env</pre>
           <span class="code-block-label">bash</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>docker build -t claude-sandbox .</pre>
+        <pre>docker build -t podprompt .</pre>
       </div>
       <p>
         This installs Claude Code into the image. The build only needs to be
@@ -575,7 +587,7 @@ chmod 600 ~/.claude-docker.env</pre>
         <p>The first time you run the container in default (<code>--direct</code>)
         mode, Claude Code will walk you through a browser-based OAuth login with
         your claude.ai account. Follow the prompts in the terminal. Your credentials
-        are saved into <code>~/.claude-docker/</code> and reused on all subsequent
+        are saved into <code>~/.claude/</code> and reused on all subsequent
         runs — you will not be prompted again unless the credentials expire.</p>
         <p>If you use <code>--direct-api</code> instead, no interactive login is
         needed — Claude Code authenticates using your <code>ANTHROPIC_API_KEY</code>
@@ -597,23 +609,28 @@ chmod 600 ~/.claude-docker.env</pre>
         syntax-highlighted diffs for file edits, and full markdown/KaTeX math.
       </p>
       <p>
-        Copy the whole <code>viewer/</code> directory into your config
-        directory and install its one dependency (the Agent SDK):
+        Copy the whole <code>viewer/</code> directory into PodPrompt's own
+        data directory and install its one dependency (the Agent SDK):
       </p>
       <div class="code-block">
         <div class="code-block-header">
           <span class="code-block-label">bash</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>mkdir -p ~/.claude-docker/viewer
-cp -r viewer/. ~/.claude-docker/viewer/
-(cd ~/.claude-docker/viewer && npm install)</pre>
+        <pre>mkdir -p ~/.local/share/podprompt/viewer
+cp -r viewer/. ~/.local/share/podprompt/viewer/
+(cd ~/.local/share/podprompt/viewer && npm install)</pre>
       </div>
       <p>
         That's all — no image rebuild required. The run script bind-mounts
-        <code>~/.claude-docker/</code> into the container, so the viewer files
-        (and the <code>node_modules</code> the SDK needs) are available
-        immediately at <code>/home/claude/.claude/viewer/</code>.
+        <code>~/.local/share/podprompt/viewer</code> into the container, so
+        the viewer files (and the <code>node_modules</code> the SDK needs)
+        are available immediately at
+        <code>/home/agent/.local/share/podprompt/viewer/</code>. This is
+        PodPrompt's own directory, kept separate from <code>~/.claude/</code>
+        (Claude Code's own, standard config directory — see
+        <a href="#state">Persistent state</a>) and from OpenCode's own
+        standard config directories.
       </p>
       <div class="callout info">
         <div class="callout-label">How it works</div>
@@ -631,8 +648,8 @@ cp -r viewer/. ~/.claude-docker/viewer/
         <div class="callout-label">Re-copy after editing</div>
         <p>
           If you ever modify the viewer files yourself, re-copy the directory
-          into <code>~/.claude-docker/viewer/</code> and restart the container
-          — editing your repo checkout alone has no effect on an
+          into <code>~/.local/share/podprompt/viewer/</code> and restart the
+          container — editing your repo checkout alone has no effect on an
           already-running container, and neither Node nor the container's
           shell entrypoint hot-reloads.
         </p>
@@ -706,26 +723,26 @@ Small model: openai/gpt-oss-120b</pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
         <pre># claude.ai subscription (OAuth), terminal UI — default
-./run-claude-docker.sh
+./podprompt.sh
 
 # Anthropic API key billing instead of subscription
-./run-claude-docker.sh --direct-api
+./podprompt.sh --direct-api
 
 # LiteLLM — interactive model picker runs automatically
-./run-claude-docker.sh --litellm
+./podprompt.sh --litellm
 
 # Any provider + browser viewer (no terminal UI is attached in this mode)
-./run-claude-docker.sh --viewer
-./run-claude-docker.sh --litellm --viewer
+./podprompt.sh --viewer
+./podprompt.sh --litellm --viewer
 
 # Viewer on a non-default port
-./run-claude-docker.sh --viewer --viewer-port 7844
+./podprompt.sh --viewer --viewer-port 7844
 
 # List available LiteLLM models without launching
-./run-claude-docker.sh --list-models
+./podprompt.sh --list-models
 
 # Pass a flag through to claude (see Pass-through options below)
-./run-claude-docker.sh --dangerously-skip-permissions</pre>
+./podprompt.sh --dangerously-skip-permissions</pre>
       </div>
       <p>
         Run from whichever directory you want Claude to work in — it is mounted
@@ -745,7 +762,7 @@ Small model: openai/gpt-oss-120b</pre>
             <td>(default) / --direct</td>
             <td>Authenticate via your claude.ai subscription (OAuth). No API key
             required. On first run you will be prompted to log in via a browser;
-            credentials persist in <code>~/.claude-docker/</code> for subsequent
+            credentials persist in <code>~/.claude/</code> for subsequent
             runs. Usage is billed to your Claude subscription, not an API account.</td>
           </tr>
           <tr>
@@ -788,7 +805,7 @@ Small model: openai/gpt-oss-120b</pre>
             The browser's own input box drives Claude directly through a
             small Agent-SDK-based driver — no terminal session is attached
             at all. Requires <code>viewer/</code> to be installed (with
-            dependencies) in <code>~/.claude-docker/viewer/</code> — see
+            dependencies) in <code>~/.local/share/podprompt/viewer/</code> — see
             <a href="#step-5">step 5</a>.</td>
           </tr>
           <tr>
@@ -841,7 +858,7 @@ Small model: openai/gpt-oss-120b</pre>
     <section id="env-vars">
       <h2>Environment variables</h2>
       <p>
-        All variables should be set via <code>~/.claude-docker.env</code>
+        All variables should be set via <code>~/.podprompt.env</code>
         (sourced in your shell startup file) rather than hardcoded in the script.
         The script validates that the required variables for the chosen provider
         are present before attempting to start.
@@ -877,7 +894,7 @@ Small model: openai/gpt-oss-120b</pre>
         Authenticates using your claude.ai account via an OAuth browser flow.
         No API key is required. On first run, Claude Code will print a URL and
         wait for you to log in; after that, the credentials stored in
-        <code>~/.claude-docker/</code> are reused automatically. Usage is billed
+        <code>~/.claude/</code> are reused automatically. Usage is billed
         to your Claude subscription (Pro, Team, or Enterprise) rather than to a
         per-token API account.
       </p>
@@ -981,7 +998,7 @@ Small model: openai/gpt-oss-120b</pre>
       <h3>Installation</h3>
       <p>
         See <a href="#step-5">step 5</a> — copy the whole <code>viewer/</code>
-        directory into <code>~/.claude-docker/viewer/</code> and run
+        directory into <code>~/.local/share/podprompt/viewer/</code> and run
         <code>npm install</code> there once, for the Agent SDK dependency.
         No Docker image rebuild is needed either way.
       </p>
@@ -1011,9 +1028,14 @@ Small model: openai/gpt-oss-120b</pre>
     <section id="state">
       <h2>Persistent state</h2>
       <p>
-        <code>~/.claude-docker/</code> on your host is bind-mounted into the
-        container as <code>/home/claude/.claude</code>. This single directory
-        holds everything Claude Code needs to persist between sessions:
+        <code>~/.claude/</code> on your host — the same, standard config
+        directory a native Claude Code CLI install uses — is bind-mounted
+        into the container as <code>/home/agent/.claude</code>. Credentials,
+        settings, and session history created inside PodPrompt are therefore
+        visible to (and shared with) any native Claude Code install on the
+        same machine, and vice versa; PodPrompt doesn't fork off its own
+        separate copy of this state. This single directory holds everything
+        Claude Code needs to persist between sessions:
       </p>
       <ul style="list-style:none;max-width:var(--prose-width);margin:.75rem 0 1rem;">
         <li style="padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.875rem;color:var(--text-muted)">
@@ -1064,7 +1086,7 @@ Small model: openai/gpt-oss-120b</pre>
           that recent Claude Code versions send, returning an opaque HTTP 400.
           If you encounter this, ask your administrator to update LiteLLM, or
           add <code>CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1</code> to your
-          <code>~/.claude-docker.env</code> as a workaround.
+          <code>~/.podprompt.env</code> as a workaround.
         </p>
       </div>
     </section>

@@ -21,15 +21,16 @@
 # driver.mjs is the only thing that talks to it, and they share this
 # container's network namespace.
 #
-# No XDG_*_HOME overrides needed here: run-claude-docker.sh bind-mounts this
-# host's own ~/.config/opencode, ~/.local/share/opencode,
-# ~/.local/state/opencode, and ~/.cache/opencode directly onto opencode's
-# own real default paths inside the container (see `opencode debug paths`),
-# so credentials/config/sessions created via `opencode auth login` (either
-# through that serve instance, or through `./run-claude-docker.sh --backend
-# opencode`'s own TUI, which gets the identical mounts) persist across
-# container restarts in their own standard host locations — independent of
-# Claude Code's own ~/.claude-docker/, not nested inside it.
+# No XDG_*_HOME overrides needed here: podprompt.sh bind-mounts this host's
+# own ~/.config/opencode, ~/.local/share/opencode, ~/.local/state/opencode,
+# and ~/.cache/opencode directly onto opencode's own real default paths
+# inside the container (see `opencode debug paths`), so credentials/config/
+# sessions created via `opencode auth login` (either through that serve
+# instance, or through `./podprompt.sh --backend opencode`'s own TUI, which
+# gets the identical mounts) persist across container restarts in their own
+# standard host locations — independent of Claude Code's own ~/.claude and
+# of PodPrompt's own ~/.local/{share,state}/podprompt, not nested inside
+# either.
 #
 # A cold `opencode serve` takes ~4-8s to start serving a full response (its
 # HTTP server binds sooner; the model-picker-relevant /config/providers
@@ -40,8 +41,15 @@
 # already treats a backend failing to respond as an expected, self-healing,
 # log-once condition (see driver.mjs's backendSessionsFailing) rather than a
 # fatal error.
+#
+# Paths below are deliberately $HOME-relative, not hardcoded to a specific
+# username's home directory — this exact script used to hardcode
+# /home/claude/... literally, which silently broke when the container's OS
+# user was later renamed. $HOME is set explicitly by podprompt.sh regardless
+# of which user the image defines, so this stays correct across that kind of
+# rename with no edit needed here.
 
-python3 /home/claude/.claude/viewer/server.py --port "${VIEWER_PORT:-7843}" --driver-port "${VIEWER_DRIVER_PORT:-7844}" &
+python3 "$HOME/.local/share/podprompt/viewer/server.py" --port "${VIEWER_PORT:-7843}" --driver-port "${VIEWER_DRIVER_PORT:-7844}" &
 
 # driver.mjs no longer takes a pinned session id at all: it creates
 # per-session state lazily the first time a prompt actually arrives for a
@@ -50,10 +58,10 @@ python3 /home/claude/.claude/viewer/server.py --port "${VIEWER_PORT:-7843}" --dr
 # pre-seed here, unlike the single-session driver this replaced. That also
 # means any --session-id/--resume/--continue/--fork-session/-r/-c passed
 # through to this script (from pinning the CONTAINER's own launch, e.g.
-# `./run-claude-docker.sh --viewer --resume <id>`) is simply irrelevant now
-# — those flags only ever meant anything to the TUI process this script
-# used to also launch, which doesn't exist in viewer mode at all anymore.
-node /home/claude/.claude/viewer/driver.mjs \
+# `./podprompt.sh --viewer --resume <id>`) is simply irrelevant now — those
+# flags only ever meant anything to the TUI process this script used to
+# also launch, which doesn't exist in viewer mode at all anymore.
+node "$HOME/.local/share/podprompt/viewer/driver.mjs" \
     --port "${VIEWER_DRIVER_PORT:-7844}" \
     --viewer-port "${VIEWER_PORT:-7843}" \
     --cwd "$(pwd)" \

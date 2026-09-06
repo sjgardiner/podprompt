@@ -1,20 +1,21 @@
 #!/bin/bash
-# Source ~/.claude-docker.env (or export the required variables in your shell)
+# Source ~/.podprompt.env (or export the required variables in your shell)
 # before running. Run with --help for full usage information.
 
 usage() {
     cat <<'USAGE'
-Usage: run-claude-docker.sh [OPTIONS] [CLAUDE_ARGS...]
+Usage: podprompt.sh [OPTIONS] [PASSTHROUGH_ARGS...]
 
-Launches Claude Code inside a Docker sandbox, mounting your current directory
-as the workspace and your ~/.claude-docker config directory for persistent
-auth and settings.
+Launches a coding agent (Claude Code or OpenCode) inside a Docker sandbox,
+mounting your current directory as the workspace, your real ~/.claude for
+persistent Claude Code auth/settings, and PodPrompt's own state/data
+directories for the viewer app and its bookkeeping.
 
 PROVIDER OPTIONS (mutually exclusive; --direct is the default):
 
   (default)       Authenticate via your claude.ai subscription (OAuth). No API
   --direct        key required. On first run you will be walked through a browser-
-                  based OAuth flow; credentials are saved into ~/.claude-docker/
+                  based OAuth flow; credentials are saved into ~/.claude/
                   and reused on subsequent runs. Usage is billed to your Claude
                   subscription (Pro / Team / Enterprise), not to an API account.
 
@@ -57,7 +58,7 @@ the default):
                   or just use `--backend opencode`'s own TUI once — its
                   first-run login flow persists to this host's own standard
                   config/data directories, e.g. ~/.config/opencode/,
-                  independent of ~/.claude-docker/ — see PERSISTENT STATE
+                  independent of ~/.claude/ — see PERSISTENT STATE
                   below).
 
                   --litellm IS meaningful with --backend opencode, though —
@@ -93,22 +94,22 @@ UTILITY OPTIONS:
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
 
-  --viewer        Start the claude-viewer browser UI instead of launching an
-                  interactive terminal session. Opens a rendered view of
-                  Claude's responses (markdown, math, syntax-highlighted code)
-                  at http://localhost:VIEWER_PORT, with a bidirectional driver
-                  (built on the Claude Agent SDK) so the browser drives
-                  prompts directly — no terminal UI is attached at all.
-                  Requires the viewer/ directory (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, backends/, package.json +
-                  installed node_modules) to be copied into
-                  ~/.claude-docker/viewer/ first. Both the claude-code and
-                  opencode backends are always available to pick per-session
-                  from the browser's "+ New chat" picker regardless of
-                  --viewer-backend's default — this also starts a headless
-                  `opencode serve` instance inside the container for you (see
-                  --viewer-backend below), so nothing needs to be started by
-                  hand first.
+  --viewer        Start PodPrompt, the browser-based viewer/driver UI,
+                  instead of launching an interactive terminal session. Opens
+                  a rendered view of the agent's responses (markdown, math,
+                  syntax-highlighted code) at http://localhost:VIEWER_PORT,
+                  with a bidirectional driver (built on the Claude Agent SDK)
+                  so the browser drives prompts directly — no terminal UI is
+                  attached at all. Requires the viewer/ directory (server.py,
+                  viewer.html, start-viewer.sh, driver.mjs, backends/,
+                  package.json + installed node_modules) to be copied into
+                  ~/.local/share/podprompt/viewer/ first. Both the
+                  claude-code and opencode backends are always available to
+                  pick per-session from the browser's "+ New chat" picker
+                  regardless of --viewer-backend's default — this also
+                  starts a headless `opencode serve` instance inside the
+                  container for you (see --viewer-backend below), so nothing
+                  needs to be started by hand first.
 
   --viewer-port PORT
                   Port for the viewer server (browser page + SSE feed).
@@ -162,12 +163,12 @@ PASS-THROUGH ARGUMENTS:
   Pass-through args are forwarded after all recognised flags have been consumed,
   so you can freely mix them:
 
-    ./run-claude-docker.sh --litellm --dangerously-skip-permissions
-    ./run-claude-docker.sh --backend opencode --continue
+    ./podprompt.sh --litellm --dangerously-skip-permissions
+    ./podprompt.sh --backend opencode --continue
 
 ENVIRONMENT VARIABLES:
 
-  Keep these in ~/.claude-docker.env (chmod 600) rather than hardcoding them
+  Keep these in ~/.podprompt.env (chmod 600) rather than hardcoding them
   in this script.
 
     ANTHROPIC_API_KEY      API key for --direct-api mode only. Not needed for
@@ -180,80 +181,103 @@ ENVIRONMENT VARIABLES:
 
 PERSISTENT STATE:
 
-  ~/.claude-docker/ is bind-mounted into the container as /home/claude/.claude.
-  This directory holds your Claude Code OAuth credentials, settings.json,
-  session history, and per-project trust decisions.
+  ~/.claude (your real, standard Claude Code config directory — the same one
+  a native, non-Docker `claude` install would use) is bind-mounted into the
+  container as /home/agent/.claude. This directory holds your Claude Code
+  OAuth credentials, settings.json, session history, and per-project trust
+  decisions — shared with any native install on this host, not a
+  container-only copy.
 
-  OpenCode gets its own separate, standard set of mounts instead of being
-  nested inside ~/.claude-docker/ — each of the host's own
-  ~/.config/opencode/, ~/.local/share/opencode/, ~/.local/state/opencode/,
-  and ~/.cache/opencode/ is bind-mounted straight onto the identical default
-  path inside the container (no XDG_*_HOME redirection needed — that's
-  already where a plain `opencode` looks; see `opencode debug paths`). A
-  login done via `--backend opencode`'s TUI is what --viewer's headless
-  `opencode serve` then uses too, and vice versa, since both get the same
-  four mounts. These directories are created by Docker on first use if they
-  don't already exist on the host.
+  OpenCode gets its own separate, standard set of mounts instead — each of
+  the host's own ~/.config/opencode/, ~/.local/share/opencode/,
+  ~/.local/state/opencode/, and ~/.cache/opencode/ is bind-mounted straight
+  onto the identical default path inside the container (no XDG_*_HOME
+  redirection needed — that's already where a plain `opencode` looks; see
+  `opencode debug paths`). A login done via `--backend opencode`'s TUI is
+  what --viewer's headless `opencode serve` then uses too, and vice versa,
+  since both get the same four mounts.
 
-  Whichever bucket state lands in, all of it persists across container
+  PodPrompt's own state — the deployed viewer app (server.py, viewer.html,
+  driver.mjs, etc.) and its bookkeeping files (viewer-session-hosts.json,
+  viewer-model-picks.json) — lives in its own XDG-style directories,
+  independent of both of the above, so neither Claude Code's nor OpenCode's
+  own config directory gets polluted with PodPrompt-internal files:
+  ~/.local/share/podprompt/viewer/ (the deployed app, --viewer only) and
+  ~/.local/state/podprompt/ (bookkeeping). ~/.config/podprompt/ is reserved
+  for future use; nothing reads it yet.
+
+  All of the above directories are created by Docker on first use if they
+  don't already exist on the host, and all of it persists across container
   restarts. Back it up if it matters to you.
 
 EXAMPLES:
 
   # First-time setup: build the image
-  docker build -t claude-sandbox .
+  docker build -t podprompt .
 
   # Normal interactive session (subscription OAuth, default)
-  ./run-claude-docker.sh
+  ./podprompt.sh
 
   # API-key billing instead of subscription
-  ./run-claude-docker.sh --direct-api
+  ./podprompt.sh --direct-api
 
   # LiteLLM — interactive model picker runs automatically
-  ./run-claude-docker.sh --litellm
+  ./podprompt.sh --litellm
 
   # List available LiteLLM models without launching
-  ./run-claude-docker.sh --list-models
+  ./podprompt.sh --list-models
 
   # Any mode + rendered browser viewer (markdown, math, syntax highlighting)
-  ./run-claude-docker.sh --viewer
-  ./run-claude-docker.sh --litellm --viewer
-  ./run-claude-docker.sh --viewer --viewer-port 7900
+  ./podprompt.sh --viewer
+  ./podprompt.sh --litellm --viewer
+  ./podprompt.sh --viewer --viewer-port 7900
 
   # OpenCode's own terminal UI instead of Claude Code's
-  ./run-claude-docker.sh --backend opencode
+  ./podprompt.sh --backend opencode
 
   # OpenCode against your LiteLLM instance (LITELLM_URL/LITELLM_API_KEY
   # passed through for opencode.jsonc's own custom-provider config)
-  ./run-claude-docker.sh --backend opencode --litellm
+  ./podprompt.sh --backend opencode --litellm
 
   # Viewer defaulting new chats to the OpenCode backend (either backend is
   # still pickable per-session from the browser's "+ New chat" picker)
-  ./run-claude-docker.sh --viewer --backend opencode
+  ./podprompt.sh --viewer --backend opencode
 
   # Pass a flag through to claude
-  ./run-claude-docker.sh --dangerously-skip-permissions
+  ./podprompt.sh --dangerously-skip-permissions
 USAGE
 }
 
 # --- Credentials & config -----------------------------------------------
-# All of these can come from ~/.claude-docker.env instead of being set here.
+# All of these can come from ~/.podprompt.env instead of being set here.
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 LITELLM_URL="${LITELLM_URL:-<MY-LITELLM-URL>}"
 LITELLM_API_KEY="${LITELLM_API_KEY:-}"
 
 VIEWER_PORT=7843
 VIEWER_DRIVER_PORT=7844
-CONFIG_DIR="$HOME/.claude-docker"
+# Claude Code's own real, standard config directory — the same one a native,
+# non-Docker `claude` install already uses (~/.claude, plus the .claude.json
+# CLAUDE_CONFIG_DIR consolidates into it below), not a PodPrompt-branded copy.
+CONFIG_DIR="$HOME/.claude"
 # OpenCode's own config/data/state/cache — real, standard host locations
 # (matching what a native, non-Docker opencode install already uses; see
-# `opencode debug paths`), not nested inside CONFIG_DIR. Kept separate so
+# `opencode debug paths`), independent of CONFIG_DIR. Kept separate so
 # OpenCode's state doesn't get bundled with Claude Code's, and so it can be
 # inspected/backed up on its own terms.
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_DATA_DIR="$HOME/.local/share/opencode"
 OPENCODE_STATE_DIR="$HOME/.local/state/opencode"
 OPENCODE_CACHE_DIR="$HOME/.cache/opencode"
+# PodPrompt's own state — XDG-style, same shape as OpenCode's block above,
+# and independent of both backends' own directories so PodPrompt's internal
+# bookkeeping (viewer-session-hosts.json, viewer-model-picks.json) never
+# ends up inside the real ~/.claude a native install also uses.
+# PODPROMPT_DATA_DIR/viewer holds the deployed viewer app itself (server.py,
+# viewer.html, driver.mjs, ...) — see --viewer's usage note above for what
+# needs to be copied there before --viewer works.
+PODPROMPT_DATA_DIR="$HOME/.local/share/podprompt"
+PODPROMPT_STATE_DIR="$HOME/.local/state/podprompt"
 # ------------------------------------------------------------------------
 
 # ── Port cleanup ──────────────────────────────────────────────────────────────
@@ -460,7 +484,7 @@ BACKEND="claude-code"
 VIEWER_ENABLED=0
 VIEWER_BACKEND=""   # empty = "not explicitly set"; resolved to $BACKEND below
 OPENCODE_PORT=7845
-CLAUDE_ARGS=()
+PASSTHROUGH_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --help|-h)
@@ -513,7 +537,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         *)
-            CLAUDE_ARGS+=("$1")
+            PASSTHROUGH_ARGS+=("$1")
             shift
             ;;
     esac
@@ -544,9 +568,9 @@ VIEWER_BACKEND="${VIEWER_BACKEND:-$BACKEND}"
 if [ "$VIEWER_ENABLED" != 1 ] && [ "$BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
    && [ "$PROVIDER" = "direct-api" ]; then
     echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --backend opencode." >&2
-    echo "OpenCode manages its own provider auth — run './run-claude-docker.sh --backend opencode' and use its" >&2
+    echo "OpenCode manages its own provider auth — run './podprompt.sh --backend opencode' and use its" >&2
     echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
-    echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude-docker/." >&2
+    echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude/." >&2
     exit 1
 fi
 
@@ -604,7 +628,7 @@ elif [ "$PROVIDER" = "direct-api" ]; then
 else
     # Default: OAuth via claude.ai subscription.
     # No token injected — Claude Code reads OAuth credentials from the
-    # mounted ~/.claude-docker/ directory. On first run it will prompt for login.
+    # mounted ~/.claude directory. On first run it will prompt for login.
     EFFECTIVE_BASE_URL=""
     EFFECTIVE_TOKEN=""
     EFFECTIVE_MODEL=""
@@ -612,27 +636,27 @@ else
     echo "Using claude.ai subscription (OAuth)."
 fi
 
-docker rm -f claude-sandbox 2>/dev/null
+docker rm -f podprompt 2>/dev/null
 
 # Saves OAuth credentials, settings, session history, and per-project trust.
 # CLAUDE_CONFIG_DIR makes Claude Code write .claude.json into this same
 # directory instead of splitting it out to $HOME/.claude.json.
-CONNECT_CONFIG="${CONFIG_DIR}:/home/claude/.claude:z"
+CONNECT_CONFIG="${CONFIG_DIR}:/home/agent/.claude:z"
 
 # ── Viewer setup ──────────────────────────────────────────────────────────────
 VIEWER_PORT_FLAGS=()
 
 if [ "$VIEWER_ENABLED" = 1 ]; then
     for f in server.py viewer.html start-viewer.sh driver.mjs package.json; do
-        if [ ! -f "$CONFIG_DIR/viewer/$f" ]; then
-            echo "Error: $CONFIG_DIR/viewer/$f not found."
-            echo "Copy the whole viewer/ directory into $CONFIG_DIR/viewer/ first, then run 'npm install' there."
+        if [ ! -f "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
+            echo "Error: $PODPROMPT_DATA_DIR/viewer/$f not found."
+            echo "Copy the whole viewer/ directory into $PODPROMPT_DATA_DIR/viewer/ first, then run 'npm install' there."
             exit 1
         fi
     done
-    if [ ! -d "$CONFIG_DIR/viewer/node_modules" ]; then
-        echo "Error: $CONFIG_DIR/viewer/node_modules not found."
-        echo "Run 'npm install' in $CONFIG_DIR/viewer/ first (needed for driver.mjs's Agent SDK dependency)."
+    if [ ! -d "$PODPROMPT_DATA_DIR/viewer/node_modules" ]; then
+        echo "Error: $PODPROMPT_DATA_DIR/viewer/node_modules not found."
+        echo "Run 'npm install' in $PODPROMPT_DATA_DIR/viewer/ first (needed for driver.mjs's Agent SDK dependency)."
         exit 1
     fi
 
@@ -661,12 +685,12 @@ fi
 ENTRYPOINT_FLAG=()   # empty = use image default (Node, which runs claude/opencode fine)
 
 if [ "$VIEWER_ENABLED" = 1 ]; then
-    ENTRYPOINT_FLAG=(--entrypoint /home/claude/.claude/viewer/start-viewer.sh)
-    RUN_CMD=("${CLAUDE_ARGS[@]}")
+    ENTRYPOINT_FLAG=(--entrypoint /home/agent/.local/share/podprompt/viewer/start-viewer.sh)
+    RUN_CMD=("${PASSTHROUGH_ARGS[@]}")
 elif [ "$BACKEND" = "opencode" ]; then
-    RUN_CMD=(opencode "${CLAUDE_ARGS[@]}")
+    RUN_CMD=(opencode "${PASSTHROUGH_ARGS[@]}")
 else
-    RUN_CMD=(claude "${CLAUDE_ARGS[@]}")
+    RUN_CMD=(claude "${PASSTHROUGH_ARGS[@]}")
 fi
 
 # OpenCode's own credentials/config/sessions (see `opencode debug paths`)
@@ -682,10 +706,21 @@ fi
 OPENCODE_MOUNT_FLAGS=()
 if [ "$VIEWER_ENABLED" = 1 ] || [ "$BACKEND" = "opencode" ]; then
     OPENCODE_MOUNT_FLAGS+=(
-        -v "${OPENCODE_CONFIG_DIR}:/home/claude/.config/opencode:z"
-        -v "${OPENCODE_DATA_DIR}:/home/claude/.local/share/opencode:z"
-        -v "${OPENCODE_STATE_DIR}:/home/claude/.local/state/opencode:z"
-        -v "${OPENCODE_CACHE_DIR}:/home/claude/.cache/opencode:z"
+        -v "${OPENCODE_CONFIG_DIR}:/home/agent/.config/opencode:z"
+        -v "${OPENCODE_DATA_DIR}:/home/agent/.local/share/opencode:z"
+        -v "${OPENCODE_STATE_DIR}:/home/agent/.local/state/opencode:z"
+        -v "${OPENCODE_CACHE_DIR}:/home/agent/.cache/opencode:z"
+    )
+fi
+
+# PodPrompt's own state (deployed viewer app + its bookkeeping files) — only
+# relevant when --viewer is actually running; a plain terminal session (either
+# backend) never touches either of these, so skip the mounts otherwise.
+PODPROMPT_MOUNT_FLAGS=()
+if [ "$VIEWER_ENABLED" = 1 ]; then
+    PODPROMPT_MOUNT_FLAGS+=(
+        -v "${PODPROMPT_DATA_DIR}/viewer:/home/agent/.local/share/podprompt/viewer:z"
+        -v "${PODPROMPT_STATE_DIR}:/home/agent/.local/state/podprompt:z"
     )
 fi
 
@@ -737,14 +772,14 @@ if [ "$PROVIDER" = "litellm" ]; then
 fi
 
 docker run -it --rm \
-  --name claude-sandbox \
+  --name podprompt \
   --platform linux/amd64 \
   --user "$(id -u):$(id -g)" \
   --security-opt label=disable \
   --init \
   "${ENTRYPOINT_FLAG[@]}" \
-  -e HOME=/home/claude \
-  -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
+  -e HOME=/home/agent \
+  -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
   -e VIEWER_PORT="$VIEWER_PORT" \
   -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
   -e VIEWER_BACKEND="$VIEWER_BACKEND" \
@@ -759,5 +794,6 @@ docker run -it --rm \
   --workdir /workspace \
   -v "${CONNECT_CONFIG}" \
   "${OPENCODE_MOUNT_FLAGS[@]}" \
-  claude-sandbox \
+  "${PODPROMPT_MOUNT_FLAGS[@]}" \
+  podprompt \
   "${RUN_CMD[@]}"

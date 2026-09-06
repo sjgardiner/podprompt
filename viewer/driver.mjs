@@ -51,6 +51,9 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import nodePath from "node:path";
+import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
@@ -345,6 +348,17 @@ function ensureOpencodeRunning() {
   return restartPromise;
 }
 
+// True once the child process exists and hasn't exited — NOT the same as
+// "accepting HTTP connections yet" (a cold start binds the port only after
+// ~4-8s; see start-viewer.sh). That gap is intentional: during a cold start
+// this reports "up" and /models falls through to the normal empty-cache
+// retry path (backend genuinely reachable, just not populated yet), while
+// the gap between a crash and the backoff-guarded respawn — where this
+// reports false — is the one /models surfaces as "server_unreachable".
+function isOpencodeUp() {
+  return !!(opencodeChild && opencodeChild.exitCode === null);
+}
+
 function startOpencodeLivenessPoll() {
   if (livenessTimer) return;
   livenessTimer = setInterval(async () => {
@@ -455,6 +469,58 @@ const sessions = new Map(); // sessionId -> SessionState
 // and removed at that moment, so an abandoned pick can never leak into a
 // later session with the same id.
 const preSeeds = new Map(); // sessionId -> { model?, mode? }
+
+// Explicit /set-model picks, persisted to disk so they survive a driver.mjs
+// restart — in-memory `state.model`/`preSeeds` alone do not, and a session's
+// own transcript can't always answer "which alias did the user actually
+// pick" on its own: Claude Code's resolved `message.model` is genuinely
+// ambiguous whenever two aliases currently resolve to the same underlying
+// model (e.g. `default` and `sonnet`, if the account's current default
+// happens to be Sonnet) — see backends/claude-code.mjs's
+// aliasForResolvedModel(), which has to guess in exactly that case and
+// deliberately (and sometimes wrongly) prefers `default`. An explicit user
+// pick should never be silently reinterpreted as "the default" (or vice
+// versa) just because a driver restart happened to land in between. Loaded
+// once at startup into `preSeeds` below (same mechanism, and same "consumed
+// on first real prompt" lifetime, as an ordinary pre-prompt pick — this is
+// just a restart-safe way of arriving at one); every /set-model call updates
+// this file in addition to whatever in-memory state it already updates.
+// Applies to both backends uniformly, even though only Claude Code has the
+// alias-ambiguity problem above — OpenCode's own composite providerID/
+// modelID ids aren't ambiguous, but an explicit pick made just before a
+// restart, with no turn run yet to record it, is exactly the same kind of
+// fact this exists to not lose regardless of backend.
+const MODEL_PICKS_FILE = nodePath.join(
+  process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude"),
+  "viewer-model-picks.json"
+);
+
+function loadPersistedModelPicks() {
+  try {
+    return JSON.parse(readFileSync(MODEL_PICKS_FILE, "utf8"));
+  } catch {
+    return {}; // missing or corrupt — start fresh rather than fail startup over this
+  }
+}
+
+function persistModelPick(sessionId, model) {
+  let data = {};
+  try {
+    data = JSON.parse(readFileSync(MODEL_PICKS_FILE, "utf8"));
+  } catch {
+    // missing or corrupt — start fresh rather than fail the request over this
+  }
+  data[sessionId] = model;
+  try {
+    writeFileSync(MODEL_PICKS_FILE, JSON.stringify(data));
+  } catch (e) {
+    console.error("[driver] failed to write model-picks file:", e.message);
+  }
+}
+
+for (const [seedSessionId, seedModel] of Object.entries(loadPersistedModelPicks())) {
+  preSeeds.set(seedSessionId, { ...(preSeeds.get(seedSessionId) || {}), model: seedModel });
+}
 
 function getSessionState(sessionId, explicitCwd, explicitBackendId) {
   let s = sessions.get(sessionId);
@@ -700,14 +766,25 @@ const server = createServer(async (req, res) => {
       // A backend error must never kill the process: the async handler's
       // rejection would otherwise surface as an unhandled rejection and node
       // exits, which is exactly what leaves the whole viewer "unusable" when
-      // /modes races `opencode serve`'s ~1s cold-start window. viewer.html
+      // /modes races `opencode serve`'s ~4-8s cold-start window. viewer.html
       // swallow-errors this response and retries on the next status event.
       console.error("[driver] /modes backend call failed:", e.message);
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end('{"error":"backend failed to list modes"}');
       return;
     }
-    if (modes && state) modes.current = state.mode || modes.current || null;
+    if (modes) {
+      // Prefer a real in-run choice over the backend-derived value — but a
+      // choice made while this session has no `state` yet (viewing a resumed
+      // session that hasn't had a prompt run through THIS driver process) was
+      // parked in preSeeds by /set-mode instead (see getSessionState()/
+      // /set-mode), not on `state`, since `state` doesn't exist to hold it
+      // yet. Check both, or a pick made in that exact window (silently)
+      // reverts on the next poll once state.mode turns out to never have
+      // been set.
+      const pendingMode = state?.mode || preSeeds.get(sessionId)?.mode || null;
+      modes.current = pendingMode || modes.current || null;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(modes));
     return;
@@ -759,18 +836,62 @@ const server = createServer(async (req, res) => {
       res.end("null"); // no model concept for this backend
       return;
     }
+    // OpenCode specifically: its serve process can be down for real between a
+    // crash/wedge and driver.mjs's backoff-guarded restart (see the
+    // process-ownership block above) — surface that distinctly from "backend
+    // reachable, model cache just not populated yet" so viewer.html can block
+    // the textarea with an honest "can't send right now" state instead of
+    // showing an empty/hidden picker that looks identical to ordinary
+    // cold-start warm-up.
+    if (backend === backends.opencode && !isOpencodeUp()) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, reason: "server_unreachable" }));
+      return;
+    }
     let models;
     try {
       models = await backend.listModels(sessionId);
     } catch (e) {
       // Same resilience rationale as /modes above: no backend can take the
-      // driver down with an unhandled rejection.
+      // driver down with an unhandled rejection. Neither backend's
+      // listModels is expected to actually throw (both swallow their own
+      // fetch/query failures internally and report an empty cache instead),
+      // but report it the same way as a known-down server if one somehow
+      // does, rather than a raw error blob the frontend can't parse.
       console.error("[driver] /models backend call failed:", e.message);
-      res.writeHead(502, { "Content-Type": "application/json" });
-      res.end('{"error":"backend failed to list models"}');
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, reason: "server_unreachable" }));
       return;
     }
-    if (models && state) models.current = state.model || models.current || null;
+    if (models) {
+      // An explicit in-run picker choice always wins over the derived value.
+      // Check preSeeds as well as state.model: a pick made while viewing a
+      // resumed session that hasn't had a prompt run through THIS driver
+      // process yet (exactly the "model unavailable" scenario this exists
+      // for) has no `state` to land on — /set-model parks it in preSeeds
+      // instead (see getSessionState()/ /set-model) — and without this
+      // fallback that pick would silently revert to the old unconfirmed
+      // value on the very next poll, flipping back to "unavailable" and
+      // re-disabling the textarea underneath whatever the user was
+      // mid-typing.
+      const pendingModel = state?.model || preSeeds.get(sessionId)?.model || null;
+      if (pendingModel) {
+        models.current = pendingModel;
+        // NOT unconditionally true: the picker only offers currently-
+        // confirmed options at the moment of picking, but "confirmed then"
+        // doesn't mean "confirmed now" — right after a driver restart,
+        // `available` can genuinely still be empty (knownModels/provider-list
+        // warm-up hasn't finished yet), and reporting confirmed=true in that
+        // window would wrongly skip past viewer.html's "Model unavailable,
+        // please wait" state straight to its emptier "nothing known yet, hide
+        // the picker" one instead — actively hiding the one piece of
+        // information (which specific model this session is pinned to) that
+        // state exists to surface. Recompute for real against whatever
+        // `available` actually is right now.
+        models.currentConfirmed = (models.available || []).some((m) => m.id === pendingModel);
+      }
+    }
+    if (models) models.ok = true;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(models));
     return;
@@ -807,6 +928,11 @@ const server = createServer(async (req, res) => {
       const pre = preSeeds.get(body.sessionId) || {};
       preSeeds.set(body.sessionId, { ...pre, model: body.model });
     }
+    // Persist regardless of the state/preSeeds branch above, so this choice
+    // is still known after a driver.mjs restart (see loadPersistedModelPicks/
+    // persistModelPick's comment by preSeeds' declaration) — not just for the
+    // rest of this process's life.
+    persistModelPick(body.sessionId, body.model);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end('{"ok":true}');
     return;

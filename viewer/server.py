@@ -53,7 +53,7 @@ from urllib.parse import parse_qs, urlparse
 VIEWER_HTML = Path(__file__).parent / "viewer.html"
 
 # ── Per-session shared state ────────────────────────────────────────────────────
-# sessionId -> {"log": [...], "seeded": bool, "clients": [Queue, ...]}
+# sessionId -> {"log": [...], "seeded": bool, "seeding": bool, "clients": [Queue, ...]}
 sessions: dict[str, dict] = {}
 sessions_lock = threading.Lock()
 DRIVER_PORT: int | None = None
@@ -63,7 +63,7 @@ def _get_session(session_id: str) -> dict:
     with sessions_lock:
         s = sessions.get(session_id)
         if s is None:
-            s = {"log": [], "seeded": False, "clients": []}
+            s = {"log": [], "seeded": False, "seeding": False, "clients": []}
             sessions[session_id] = s
         return s
 
@@ -136,40 +136,80 @@ def _emit(session_id: str, event: str, entry: dict):
 
 def _fetch_session_history(session_id: str, backend: str | None = None) -> list:
     """Ask driver.mjs to convert this session's persisted transcript into
-    our {role, text, id, ts} shape. A couple of quick retries guard against
-    the narrow startup race where a browser tab connects before driver.mjs
-    has finished binding its port (server.py is started first by
-    start-viewer.sh) — not against any steady-state failure, which just
-    falls back to an empty history (same as a brand-new session). The
-    optional backend is the one the viewing tab learned for this session
-    (its /sessions `backend` marker); relayed so a session this driver run
-    hasn't touched yet still gets its history from the backend that owns it
-    rather than the CLI default."""
+    our {role, text, id, ts} shape. The optional backend is the one the
+    viewing tab learned for this session (its /sessions `backend` marker);
+    relayed so a session this driver run hasn't touched yet still gets its
+    history from the backend that owns it rather than the CLI default.
+
+    A few escalating retries absorb the startup race where a browser tab
+    connects before driver.mjs and the opencode serve have finished
+    warming up (server.py is started first by start-viewer.sh). On
+    persistent failure this RAISES rather than returning []: a swallowed
+    empty list was indistinguishable from a genuinely empty session, so
+    _ensure_seeded would lock the session in a state where its (real,
+    large) history was never shown again."""
     url = f"http://127.0.0.1:{DRIVER_PORT}/session-history?sessionId={urllib.parse.quote(session_id)}"
     if backend:
         url += f"&backend={urllib.parse.quote(backend)}"
-    for attempt in range(3):
+    last_exc = None
+    for delay in (0.0, 0.4, 1.0):
         try:
             with urllib.request.urlopen(url, timeout=15) as resp:
                 return json.loads(resp.read())
-        except Exception:
-            if attempt < 2:
-                time.sleep(0.3)
-    return []
+        except Exception as e:
+            last_exc = e
+            if delay:
+                time.sleep(delay)
+    raise last_exc
 
 
 def _ensure_seeded(session_id: str, backend: str | None = None):
-    # Claims the "seeded" flag BEFORE the network call (under the lock) so
-    # concurrent connects for the same session don't both fetch; the actual
-    # fetch and log-splice happen outside the lock so a slow driver call
-    # doesn't block unrelated sessions.
+    # One fetch per connect, guarded by a per-session "seeding" in-progress
+    # flag so concurrent tabs don't both fetch (a double fetch would
+    # double-splice the history). The splice and the "seeded" flag are set
+    # together under the lock ONLY on a successful fetch.
+    #
+    # Crucially, a failed fetch must NOT permanently mark the session as
+    # seeded: before this fix the flag was claimed up front and an empty
+    # result during the startup window (server.py boots before driver.mjs /
+    # the opencode serve are ready) locked in a permanently blank transcript
+    # for a session that in fact had full history — while live messages
+    # still streamed in fine, since those don't depend on the seeded log.
+    #
+    # Note on locking: sessions_lock is a plain threading.Lock (not
+    # reentrant), so every acquisition here is a standalone `with` block —
+    # never nested — and _get_session is never called while holding it.
     s = _get_session(session_id)
     with sessions_lock:
-        if s["seeded"]:
-            return
-        s["seeded"] = True
+        seeded = s["seeded"]
+        seeding = s["seeding"]
+    if seeded:
+        return
+    if seeding:
+        # Another connect is mid-fetch; wait briefly for it to land so this
+        # connect's replay isn't taken from an unseeded log, then skip
+        # without fetching again.
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            with sessions_lock:
+                if not s["seeding"]:
+                    break
+            time.sleep(0.1)
+        return
+    with sessions_lock:
+        if s["seeded"] or s["seeding"]:
+            return  # lost a claim race after the read above
+        s["seeding"] = True
 
-    history = _fetch_session_history(session_id, backend)
+    try:
+        history = _fetch_session_history(session_id, backend)
+    except Exception as e:
+        with sessions_lock:
+            s["seeding"] = False
+        print(f"failed to seed history for {session_id}, retrying on next connect: {e}",
+              flush=True)
+        return
+
     entries = []
     for h in history:
         role = h.get("role", "assistant")
@@ -182,6 +222,8 @@ def _ensure_seeded(session_id: str, backend: str | None = None):
         # Prepend: historical entries always logically precede anything
         # that could have arrived live while this fetch was in flight.
         s["log"] = entries + s["log"]
+        s["seeding"] = False
+        s["seeded"] = True
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────

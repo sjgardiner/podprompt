@@ -369,7 +369,19 @@ const server = createServer(async (req, res) => {
     }
     const state = sessions.get(sessionId);
     const backend = backendFor(sessionId, url.searchParams.get("backend"));
-    const history = await backend.getSessionHistory(sessionId, state?.cwd);
+    let history;
+    try {
+      history = await backend.getSessionHistory(sessionId, state?.cwd);
+    } catch (e) {
+      // /modes and /models already fail with 502 rather than killing the
+      // driver; history must behave the same so server.py's _fetch_session_history
+      // sees a clean failure and can leave the session unseeded for the next
+      // connect (an empty 200 here would permanently blank a real session).
+      console.error("[driver] /session-history failed:", e.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(history));
     return;

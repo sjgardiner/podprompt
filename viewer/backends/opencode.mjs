@@ -707,16 +707,25 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
 
     async getSessionHistory(sessionId) {
       if (!clientToReal.has(sessionId) && !sessionId.startsWith("ses_")) return [];
-      try {
-        const raw = await api(`/session/${knownRealId(sessionId)}/message`);
-        return convertSessionMessages(raw || []);
-      } catch (e) {
-        // No silent blanking: an empty transcript looks identical to a
-        // brand-new session to the browser. Log it so a real backend failure
-        // is distinguishable from legitimately having no history yet.
-        console.error(`[opencode] failed to fetch history for session ${sessionId}:`, e.message);
-        return [];
+      const target = knownRealId(sessionId);
+      let lastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const raw = await api(`/session/${target}/message`);
+          return convertSessionMessages(raw || []);
+        } catch (e) {
+          // Same cold-start budget as the provider fetch: a tab can connect
+          // while the opencode serve is still binding its port, and a failed
+          // history fetch must not look like a genuinely empty session.
+          lastErr = e;
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 750));
+        }
       }
+      // No silent blanking: an empty transcript looks identical to a
+      // brand-new session to the browser. Log it so a real backend failure
+      // is distinguishable from legitimately having no history yet.
+      console.error(`[opencode] failed to fetch history for session ${sessionId}:`, lastErr.message);
+      throw lastErr;
     },
 
     async archiveSession(sessionId) {

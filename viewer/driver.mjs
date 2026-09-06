@@ -50,6 +50,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
+import { spawn } from "node:child_process";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
@@ -230,10 +231,10 @@ function expirePendingApprovals(sessionId) {
 const backendHooks = { cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval };
 const backends = {
   "claude-code": createClaudeCodeBackend(backendHooks),
-  // start-viewer.sh always launches a headless `opencode serve` on this
-  // same port regardless of which backend is the default (see its own
-  // comments) — baseUrl just needs to agree with whatever port that was
-  // actually started on.
+  // driver.mjs itself spawns and supervises a headless `opencode serve`
+  // (see the process-ownership block after this map) regardless of which
+  // backend is the default — baseUrl here just needs to agree with the port
+  // that child is started on (--opencode-port).
   "opencode": createOpenCodeBackend({ ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
 };
 
@@ -244,22 +245,175 @@ function getBackend(id) {
   return backends["claude-code"];
 }
 
+// ── opencode serve process ownership + crash recovery ────────────────────
+// driver.mjs owns the `opencode serve` child both backends talk to. This
+// responsibility used to live in start-viewer.sh (an independent background
+// job with nobody supervising it), so if `opencode serve` crashed or wedged,
+// nothing ever brought it back and every opencode session's model picker /
+// history / turns just went dead until the container restarted.
+//
+// Self-healing, three pieces:
+//   1. ensureOpencodeRunning() spawns the child, single-flight guarded so two
+//      near-simultaneous callers can't both spawn a competing process on the
+//      same port (JS's single-threaded execution means a synchronous guard
+//      before any await closes that cross-tab/cross-session race without any
+//      file lock — ownership lives in exactly this one process).
+//   2. Two independent death detectors, because neither alone is sufficient:
+//      (a) child.on("exit") for an actual crash (event-driven, immediate) and
+//      (b) a periodic liveness poll against a cheap endpoint to catch a
+//      *wedged-but-still-running* process, which never emits "exit" at all.
+//   3. Capped exponential backoff on repeated restart failures (2s -> 4s ->
+//      8s -> ... -> 60s ceiling), retried indefinitely — so this self-heals
+//      whenever the underlying issue clears, without tight-crash-looping if
+//      `opencode serve` is fundamentally broken (bad config, port taken).
+//
+// All genuine session state (realToClient/clientToReal id maps, in-flight
+// turns) lives in this process's memory or in opencode's on-disk store —
+// never inside the serve child — so a child restart needs no reconciliation
+// beyond bringing the process back; a pre-existing session's history and id
+// mapping are untouched by it. The backend's own shared SSE connection
+// (ensureSse() in backends/opencode.mjs) already reconnects every 1s
+// indefinitely when the stream dies — this block just makes sure there is
+// actually something alive for that retry loop to reconnect *to*.
+const OPENCODE_BACKOFF_BASE_MS = 2000;
+const OPENCODE_BACKOFF_CEILING_MS = 60000;
+const OPENCODE_LIVENESS_INTERVAL_MS = 20000;
+const OPENCODE_LIVENESS_TIMEOUT_MS = 5000;
+
+let opencodeChild = null;         // ChildProcess | null
+let restartPromise = null;        // in-flight ensure/recover op (single-flight lock)
+let restartAttempts = 0;          // consecutive start/restart failures, for backoff
+let livenessTimer = null;
+
+function nextRestartDelayMs() {
+  if (restartAttempts <= 0) return 0;
+  return Math.min(OPENCODE_BACKOFF_BASE_MS * 2 ** (restartAttempts - 1), OPENCODE_BACKOFF_CEILING_MS);
+}
+
+function spawnOpencode() {
+  const args_ = ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodePort)];
+  console.log(`[driver] spawning opencode serve on port ${args.opencodePort}`);
+  const child = spawn("opencode", args_, { stdio: ["ignore", "pipe", "pipe"] });
+  opencodeChild = child;
+  let stderrTail = [];
+  child.stderr.on("data", (d) => {
+    for (const line of d.toString().split("\n")) {
+      const t = line.trim();
+      if (t) {
+        stderrTail.push(t);
+        if (stderrTail.length > 20) stderrTail.shift();
+      }
+    }
+  });
+  child.stdout.on("data", () => {});
+  child.on("error", (err) => {
+    // Spawn-level failure (binary missing, EACCES, ...) — 'exit' may not fire.
+    console.error(`[driver] failed to spawn opencode serve: ${err.message}`);
+    if (opencodeChild === child) opencodeChild = null;
+    restartAttempts++;
+    ensureOpencodeRunning();
+  });
+  child.on("exit", (code, signal) => {
+    if (opencodeChild === child) opencodeChild = null;
+    restartAttempts++;
+    if (code === 0 || signal) {
+      console.log(`[driver] opencode serve stopped (code=${code} signal=${signal}); scheduling restart`);
+    } else {
+      console.error(
+        `[driver] opencode serve exited unexpectedly (code=${code} signal=${signal}); scheduling restart` +
+        (stderrTail.length ? `\n--- last opencode serve stderr lines ---\n${stderrTail.slice(-15).join("\n")}\n---` : "")
+      );
+    }
+    ensureOpencodeRunning();
+  });
+  return child;
+}
+
+function ensureOpencodeRunning() {
+  const child = opencodeChild;
+  if (child && child.exitCode === null) return child;
+  if (restartPromise) return restartPromise;
+  restartPromise = (async () => {
+    const delay = nextRestartDelayMs();
+    if (delay > 0) {
+      console.log(`[driver] opencode serve restart in ${delay}ms (attempt ${restartAttempts})`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    restartPromise = null;
+    return spawnOpencode();
+  })();
+  return restartPromise;
+}
+
+function startOpencodeLivenessPoll() {
+  if (livenessTimer) return;
+  livenessTimer = setInterval(async () => {
+    const child = opencodeChild;
+    if (!child || child.exitCode !== null) {
+      ensureOpencodeRunning();
+      return;
+    }
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), OPENCODE_LIVENESS_TIMEOUT_MS);
+      const res = await fetch(`http://127.0.0.1:${args.opencodePort}/doc`, { method: "HEAD", signal: ctl.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        // Healthy — reset the backoff so a later crash restarts fast again.
+        restartAttempts = 0;
+        return;
+      }
+      throw new Error(`status ${res.status}`);
+    } catch (e) {
+      // Wedged-but-still-running: no "exit" event will ever fire for it. Kill
+      // it hard — the exit handler then schedules the (single-flight)
+      // restart with backoff. Log before killing so the tail is attributable.
+      console.error(`[driver] opencode liveness probe failed (${e.message}) — killing wedged serve to trigger restart`);
+      try {
+        child.kill("SIGKILL");
+      } catch (killErr) {
+        if (opencodeChild === child) opencodeChild = null;
+        ensureOpencodeRunning();
+      }
+    }
+  }, OPENCODE_LIVENESS_INTERVAL_MS);
+}
+
+// Clean up the child on the way out so nothing is orphaned by a driver exit.
+process.on("exit", () => {
+  if (opencodeChild && opencodeChild.exitCode === null) {
+    try {
+      opencodeChild.kill("SIGTERM");
+    } catch { /* already dead */ }
+  }
+});
+
+// Ensure the opencode serve child is up before firing warm-up fetches at it,
+// then start the liveness poll that catches a wedged-but-running process.
+// Spawning is sync and fire-and-forget here — the child may take several
+// seconds to accept connections on a cold start, but every fetch below
+// retries until it does.
+ensureOpencodeRunning();
+startOpencodeLivenessPoll();
+
 // Eagerly warm each backend's model/command cache right now, rather than
-// waiting for the first browser-triggered call. For claude-code this
-// accomplishes nothing (knownModels/knownCommands can only ever be filled in
-// as a side effect of a real turn completing somewhere — an architectural
-// limitation, not a caching one — so calling these now just returns the same
-// empty defaults a moment sooner) but it's a harmless no-op: both methods
-// are synchronous, side-effect-free reads of existing module state. For
-// opencode it's a real improvement: GET /config/providers and GET /command
-// need no session/turn to exist, only a reachable `opencode serve`, so
-// firing them now means a session that never sends a single message can
-// still see a populated model/command picker. Safe to fire before
-// `opencode serve` has finished its ~1s cold start because both fetch
-// functions now retry-on-failure (they clear their own "started" guard in
-// the catch block) rather than permanently caching a transient connection
-// failure — see fetchProviderListInBackground/fetchKnownCommandsInBackground
-// in backends/opencode.mjs.
+// waiting for the first browser-triggered call. For claude-code, listModels()
+// now runs its own throwaway-query warm-up (see
+// backends/claude-code.mjs's ensureModelsWarmed) so the model list is ready
+// before any real turn has run; getKnownCommands() is still a no-op until a
+// turn's system/init message, which is a known CLI limitation documented in
+// that file. For opencode it's a real improvement: GET /config/providers and
+// GET /command need no session/turn to exist, only a reachable `opencode
+// serve`, so firing them now means a session that never sends a single
+// message can still see a populated model/command picker. Safe to fire
+// before `opencode serve` has come up (which, note, takes ~4-8s on a cold
+// start, not the "~1 second" the old comments claimed — the litellm plugin's
+// live provider discovery gates /config/providers, see
+// backends/opencode.mjs) because both fetch functions now retry-on-failure
+// (they clear their own "started" guard in the catch block) rather than
+// permanently caching a transient connection failure — see
+// fetchProviderListInBackground/fetchKnownCommandsInBackground in
+// backends/opencode.mjs.
 for (const backend of Object.values(backends)) {
   if (typeof backend.getKnownCommands === "function") backend.getKnownCommands();
   if (typeof backend.listModels === "function") backend.listModels();
@@ -269,14 +423,14 @@ for (const backend of Object.values(backends)) {
 // loop below (the sessions panel refetches every few seconds) logs a
 // transition — "started failing" / "recovered" — exactly once each, instead
 // of the same "fetch failed" line once per poll forever. Both backends are
-// expected to be reachable in a normal deployment (start-viewer.sh starts
-// `opencode serve` itself now), so a *sustained* failure here usually means
-// something genuinely worth looking at — a manual/non-standard launch that
-// skipped starting `opencode serve`, or it crashing after startup — not a
-// permanently-expected condition to just ignore; a brief failure right at
-// container startup (before `opencode serve` finishes its ~1s cold start)
-// is the one benign case and is exactly what the log-once-on-transition
-// behavior below is for.
+// expected to be reachable in a normal deployment (driver.mjs supervises its
+// own `opencode serve` child now — see the process-ownership block above), so
+// a *sustained* failure here usually means something genuinely worth looking
+// at — a manual/non-standard launch that skipped the supervision, or the
+// child crash-looping on bad config — not a permanently-expected condition to
+// just ignore; a brief failure right at container startup (before the freshly
+// spawned `opencode serve` finishes its ~4-8s cold start) is the one benign
+// case and is exactly what the log-once-on-transition behavior below is for.
 const backendSessionsFailing = new Set();
 
 // ── Per-session state ────────────────────────────────────────────────────

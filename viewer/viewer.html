@@ -794,8 +794,6 @@
   }
   @keyframes fadein { from { opacity: 0; transform: translateY(6px); } }
 
-  #feed.hide-tools .msg.tool { display: none; }
-
   .msg-label {
     font-size: var(--label-font-size);
     font-weight: 600;
@@ -911,7 +909,13 @@
     background: var(--user-bg);
     border-color: var(--user-border);
   }
+  /* tool blocks: same three gear-menu modes as thinking blocks above, via
+     the same class mechanism:
+       hide     -> .hidden-tool          (not rendered at all)
+       collapse -> no .expanded, body hidden until the header is clicked
+       show     -> .expanded, body visible, diffs capped and scrollable */
   .msg.tool .msg-body {
+    display: none;
     padding: 8px 14px;
     font-size: .88em;
     color: var(--muted);
@@ -921,6 +925,16 @@
        own newlines (e.g. a multi-line one-off summary) visible. */
     white-space: pre-wrap;
   }
+  .msg.tool.expanded .msg-body { display: block; }
+  .msg.tool.hidden-tool { display: none; }
+  .msg.tool .msg-tool-toggle {
+    cursor: pointer;
+    user-select: none;
+  }
+  .msg.tool .msg-tool-toggle::before { content: '▸ '; }
+  .msg.tool.expanded .msg-tool-toggle::before { content: '▾ '; }
+  .msg.tool .msg-tool-toggle:hover { text-decoration: underline; }
+  .msg.tool .msg-label .ts { margin-left: auto; }
   .msg.tool .msg-body p { margin: 0; } /* dead now marked.parse() no longer runs here; harmless if a stray <p> ever appears */
 
   /* streaming cursor */
@@ -1114,9 +1128,6 @@
           <div class="settings-row">
             <label><span>Light theme</span> <input type="checkbox" id="theme-toggle"></label>
           </div>
-          <div class="settings-row">
-            <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
-          </div>
           <div class="settings-row select-row">
             <label><span>Auto-scroll animation</span>
               <select id="autoscroll-anim">
@@ -1130,6 +1141,15 @@
               <select id="thinking-mode">
                 <option value="collapse" selected>Collapsed (click to open)</option>
                 <option value="show">Show (streamed, scrollable)</option>
+                <option value="hide">Hide</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Tool calls</span>
+              <select id="tool-mode">
+                <option value="collapse">Collapsed (click to open)</option>
+                <option value="show" selected>Show (scrollable)</option>
                 <option value="hide">Hide</option>
               </select>
             </label>
@@ -1372,6 +1392,16 @@ let modesRetryCount = 0;
 let modelsRetryTimer = null;
 let modesRetryTimer = null;
 
+// Monotonic fetch sequence counters + session-identity capture for
+// loadModels()/loadModes(), mirroring refreshSessionsList()'s sessionsFetchSeq
+// staleness guard below. Without these, a /models or /modes response for the
+// *previous* session could land after a session switch and overwrite the
+// picker for whatever session is now being viewed — including flipping the
+// one-shot modelsResolved/modesResolved flag for the wrong session, which
+// would then block every subsequent fetch until the next full switch.
+let modelsFetchSeq = 0;
+let modesFetchSeq = 0;
+
 function schedulePickerRetry(kind) {
   if (kind === 'models') {
     if (modelsRetryTimer || modelsResolved || modelsRetryCount >= PICKER_MAX_RETRIES) return;
@@ -1406,6 +1436,10 @@ function resetBackendControlsDisplay() {
   clearTimeout(modesRetryTimer); modesRetryTimer = null;
   modelsRetryCount = 0;
   modesRetryCount = 0;
+  // Invalidate any in-flight loadModels()/loadModes() for the session we're
+  // leaving, so a stale response can't apply itself to the next session.
+  modelsFetchSeq++;
+  modesFetchSeq++;
 }
 
 function setTurnIndicator(text) {
@@ -1566,6 +1600,24 @@ function getOrCreate(id, role) {
     return msgs[id];
   }
 
+  if (role === 'tool') {
+    // Tool bubbles follow the same three display modes as thinking blocks
+    // (see settings.tools): hidden, collapsed with the header as the toggle,
+    // or always-expanded. Content still renders via renderToolBody() so the
+    // Edit/MultiEdit/Write diff fences keep their hljs highlighting.
+    wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="ts"></span></span></div>
+                      <div class="msg-body"></div>`;
+    wrap.querySelector('.msg-tool-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
+    feed.appendChild(wrap);
+    msgs[id] = {
+      el: wrap.querySelector('.msg-body'),
+      tsEl: wrap.querySelector('.ts'),
+      rawText: '', ts: null, role, revealTimer: null, permId: id, wrap,
+    };
+    applyToolsVisibility(msgs[id]);
+    return msgs[id];
+  }
+
   wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
                     <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
                     ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
@@ -1598,6 +1650,20 @@ function applyThinkingMode() {
   for (const id of feedOrder) {
     const en = msgs[id];
     if (en && en.role === 'thinking') applyThinkingVisibility(en);
+  }
+}
+
+function applyToolsVisibility(entry) {
+  if (!entry || !entry.wrap || entry.role !== 'tool') return;
+  entry.wrap.classList.toggle('hidden-tool', settings.tools === 'hide');
+  if (settings.tools === 'show') entry.wrap.classList.add('expanded');
+  else entry.wrap.classList.remove('expanded');
+}
+
+function applyToolsMode() {
+  for (const id of feedOrder) {
+    const en = msgs[id];
+    if (en && en.role === 'tool') applyToolsVisibility(en);
   }
 }
 
@@ -2223,7 +2289,7 @@ window.addEventListener('popstate', () => {
 // ── Settings panel ──────────────────────────────────────────────────────────
 const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
-  fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
+  fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', tools: 'show',
   autoScrollAnim: 'smooth',
   tsFormat:'time', hour24:false, showTz:false, thinking:'collapse',
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
@@ -2232,7 +2298,14 @@ const SETTINGS_DEFAULTS = {
 
 function loadSettings() {
   try {
-    return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
+    const s = Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
+    // Migrate the old boolean toolbar setting to the new three-mode picker.
+    if (s.showTools != null && s.tools == null) {
+      s.tools = s.showTools ? 'show' : 'hide';
+      delete s.showTools;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    }
+    return s;
   } catch (e) {
     return Object.assign({}, SETTINGS_DEFAULTS);
   }
@@ -2248,7 +2321,6 @@ function applySettings() {
   document.documentElement.style.setProperty('--label-font-size', settings.labelFontSize + 'px');
   document.documentElement.style.setProperty('--status-font-size', settings.statusFontSize + 'px');
   document.documentElement.setAttribute('data-theme', settings.theme === 'light' ? 'light' : 'dark');
-  feed.classList.toggle('hide-tools', !settings.showTools);
   // Purely cosmetic — the pinnedToBottom/autoScrolling logic around
   // scrollBottom() is correct either way, see the comment there.
   feed.style.scrollBehavior = settings.autoScrollAnim === 'instant' ? 'auto' : 'smooth';
@@ -2260,6 +2332,7 @@ function applySettings() {
   refreshTimestamps();
   renderPlanUsage();
   applyThinkingMode();
+  applyToolsMode();
 }
 
 const settings = loadSettings();
@@ -2273,7 +2346,7 @@ const labelVal       = document.getElementById('label-size-val');
 const statusSlider   = document.getElementById('status-size-slider');
 const statusVal      = document.getElementById('status-size-val');
 const themeToggle    = document.getElementById('theme-toggle');
-const toolsToggle    = document.getElementById('tools-toggle');
+const toolModeSelect = document.getElementById('tool-mode');
 const autoScrollAnimSelect = document.getElementById('autoscroll-anim');
 const thinkingModeSelect   = document.getElementById('thinking-mode');
 const sessionsLayoutSelect = document.getElementById('sessions-layout');
@@ -2298,7 +2371,7 @@ labelVal.textContent = settings.labelFontSize + 'px';
 statusSlider.value = settings.statusFontSize;
 statusVal.textContent = settings.statusFontSize + 'px';
 themeToggle.checked = settings.theme === 'light';
-toolsToggle.checked = settings.showTools;
+toolModeSelect.value = settings.tools;
 autoScrollAnimSelect.value = settings.autoScrollAnim;
 thinkingModeSelect.value = settings.thinking;
 sessionsLayoutSelect.value = settings.sessionsLayout;
@@ -2366,10 +2439,10 @@ themeToggle.addEventListener('change', () => {
   saveSettings();
 });
 
-toolsToggle.addEventListener('change', () => {
-  settings.showTools = toolsToggle.checked;
-  applySettings();
+toolModeSelect.addEventListener('change', () => {
+  settings.tools = toolModeSelect.value;
   saveSettings();
+  applyToolsMode();
 });
 
 autoScrollAnimSelect.addEventListener('change', () => {
@@ -2568,9 +2641,15 @@ async function resyncTurnStatus() {
 // different backend entirely.
 async function loadModes() {
   if (!driverBase || modesResolved) return;
+  const seq = ++modesFetchSeq;
+  const targetSessionId = currentSessionId;
   try {
     const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
     const data = await res.json();
+    // Drop stale responses: a newer call has started, or the viewed session
+    // changed while this was in flight. Never apply a foreign/stale result
+    // to the currently-viewed session's picker.
+    if (seq !== modesFetchSeq || targetSessionId !== currentSessionId) return;
     if (!data) {
       // Definitive: this backend has no mode/agent concept at all — never
       // going to change mid-session, stop asking.
@@ -2615,9 +2694,16 @@ modeSelect.addEventListener('change', async () => {
 
 async function loadModels() {
   if (!driverBase || modelsResolved) return;
+  const seq = ++modelsFetchSeq;
+  const targetSessionId = currentSessionId;
   try {
     const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
     const data = await res.json();
+    // Drop stale responses: a newer call has started, or the viewed session
+    // changed while this was in flight. Never apply a foreign/stale result
+    // to the currently-viewed session's picker, and never let a stale
+    // response flip modelsResolved for the wrong session.
+    if (seq !== modelsFetchSeq || targetSessionId !== currentSessionId) return;
     if (!data) {
       // Definitive: no model concept for this backend — never going to
       // change mid-session, stop asking.

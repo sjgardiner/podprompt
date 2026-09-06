@@ -277,12 +277,116 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // for the same reason knownCommands is — the model lineup doesn't vary per
   // session, only which one a given session has selected (state.model).
   let knownModels = [];
+  // Single-flight warm-up promise for knownModels. Unlike the old setup (the
+  // only writer was supportedModels().then(...) inside a real turn's system/
+  // init handling), this fills the cache up front via a throwaway Query that
+  // never yields a real user prompt — reading initializationResult().models
+  // directly. No real turn ever runs, so it works at driver.mjs startup (the
+  // startup loop's unawaited backend.listModels() call above triggers this)
+  // before any session has sent a prompt. Verified empirically: resolves in
+  // ~270ms, then interrupt() tears the subprocess down cleanly with no orphan
+  // process and no phantom transcript (settling only via the control channel
+  // means Claude Code never persists a transcript for a turn that never ran).
+  let modelsWarmPromise = null;
+  function ensureModelsWarmed() {
+    if (knownModels.length > 0) return Promise.resolve();
+    if (modelsWarmPromise) return modelsWarmPromise;
+    modelsWarmPromise = (async () => {
+      const neverPrompt = (async function* () {
+        await new Promise(() => {});
+      })();
+      const q = query({
+        prompt: neverPrompt,
+        options: { cwd: cwdRoot, permissionMode: "default" },
+      });
+      try {
+        const init = await q.initializationResult();
+        knownModels = init?.models || [];
+      } finally {
+        try {
+          await q.interrupt();
+        } catch (e) {
+          console.error("[claude-code] model warm-up interrupt failed:", e.message);
+        }
+      }
+    })().catch((e) => {
+      // Don't permanently poison the cache on one bad attempt: reset the
+      // single-flight promise so the next call retries from scratch instead
+      // of leaving knownModels [] forever.
+      modelsWarmPromise = null;
+      console.error("[claude-code] model list warm-up failed:", e.message);
+    });
+    return modelsWarmPromise;
+  }
   // Rate-limits (not disables) the console.error for usage_EXPERIMENTAL_...()
   // failures — see the "system"/"init" handling in consume() below, which
   // calls it fresh every turn regardless of whether a past attempt failed,
   // so one transient failure can't permanently hide the plan-usage bar for
   // the rest of this process's life.
   let loggedUsageApiUnavailable = false;
+
+  // ── Per-session "which model did this session actually use" ─────────────
+  // listModels(sessionId) derives the picker's pre-selected value from the
+  // session's own transcript (the last assistant entry's resolved
+  // `message.model`), reverse-mapped to a picker alias via knownModels'
+  // `resolvedModel` field, rather than falling back to a global default.
+  // Claude Code genuinely restores a session's last-used model on resume, but
+  // that restoration is only observable live through the system/init message
+  // — which doesn't arrive until a real turn runs in resume mode — so the
+  // on-disk transcript is the only cheap, turn-free source. Values are cached
+  // per session and dropped whenever that session completes a turn, since
+  // only a real turn can change the answer. (getSessionMessages() on even a
+  // multi-MB transcript resolves in ~70ms here — the 9MB session in this
+  // environment included — so a fresh look on a cache miss is not meaningfully
+  // expensive; the cache just avoids re-reading it on every /models poll.)
+  const derivedModelCache = new Map(); // sessionId -> resolved model id (string) | null
+
+  // Last assistant entry backward until one carries a usable string
+  // `message.model`. Subagent/internal entries can interleave, and some
+  // entries carry a non-string placeholder, so scan rather than assume the
+  // final entry.
+  function lastAssistantModel(rawMessages) {
+    for (let i = (rawMessages || []).length - 1; i >= 0; i--) {
+      const entry = rawMessages[i];
+      if (entry?.type !== "assistant") continue;
+      const m = entry.message?.model;
+      if (typeof m === "string" && m.length > 0) return m;
+    }
+    return null;
+  }
+
+  // Reverse-map a resolved model id (e.g. "claude-haiku-4-5-20251001") back to
+  // the picker alias (`haiku`). Ambiguity is real, not hypothetical: `default`
+  // and `sonnet` both resolve to the same underlying model, so on a tie we
+  // deliberately prefer `default`. If no alias resolves (e.g. a removed/renamed
+  // model, or a model only reachable through a gateway this process isn't
+  // talking to), fall back to the raw resolved id — listModels() then reports
+  // it as not present in `available`, which is exactly what the frontend needs
+  // to render its "model unavailable" state.
+  function aliasForResolvedModel(resolved) {
+    if (typeof resolved !== "string" || !resolved) return null;
+    const matches = knownModels.filter((m) => m.resolvedModel === resolved);
+    if (!matches.length) return resolved;
+    const preferred = matches.find((m) => m.value === "default");
+    if (preferred) return preferred.value;
+    return matches[0].value;
+  }
+
+  async function derivedCurrentForSession(sessionId, fallbackCwd) {
+    if (derivedModelCache.has(sessionId)) return derivedModelCache.get(sessionId);
+    let resolved = null;
+    try {
+      const raw = await getSessionMessages(sessionId, { dir: cwdForSession(sessionId, fallbackCwd) });
+      resolved = lastAssistantModel(raw);
+    } catch (e) {
+      // Session not reachable / no transcript — no derivation possible; same
+      // treatment as "no session-specific model known": leave current unset so
+      // the caller falls back to its default behavior.
+      console.error(`[claude-code] failed to derive model for session ${sessionId}:`, e.message);
+    }
+    derivedModelCache.set(sessionId, resolved);
+    return resolved;
+  }
 
   function summarizeToolInput(toolInput) {
     if (typeof toolInput !== "object" || toolInput === null) {
@@ -297,11 +401,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       }
     }
     if (text === null) text = JSON.stringify(toolInput);
-    return text.length <= 200 ? text : text.slice(0, 200) + "…";
-  }
-
-  function truncate(text, max) {
-    return text.length <= max ? text : text.slice(0, max) + "\n… (truncated)";
+    // Full text, never truncated — the viewer caps bubble *display* (scrollable
+    // 400px body) and lets the user hide/collapse tool bubbles entirely, so
+    // there's no reason to clip the content out of reach.
+    return text;
   }
 
   // Plain-JS line diff (LCS-based) so Edit/Write tool calls can render a real
@@ -342,20 +445,22 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   }
 
   // Richer tool summary for Edit/MultiEdit/Write, showing an actual diff
-  // instead of the one-line truncated preview summarizeToolInput() gives every
-  // other tool. Falls through to summarizeToolInput() for anything else.
+  // instead of the plain one-liner summarizeToolInput() gives every other
+  // tool. Falls through to summarizeToolInput() for anything else. Diff
+  // content is full (never truncated) — the viewer caps the bubble's height
+  // and lets the user hide/collapse it, so clipping costs the user nothing.
   function formatToolSummary(toolName, toolInput) {
     if (toolName === "Edit" && typeof toolInput?.old_string === "string" && typeof toolInput?.new_string === "string") {
       const diff = diffLines(toolInput.old_string, toolInput.new_string);
-      return `\`Edit\` ${toolInput.file_path || ""}\n\`\`\`diff\n${truncate(diff, 4000)}\n\`\`\``;
+      return `\`Edit\` ${toolInput.file_path || ""}\n\`\`\`diff\n${diff}\n\`\`\``;
     }
     if (toolName === "MultiEdit" && Array.isArray(toolInput?.edits)) {
       const parts = toolInput.edits.map((e, idx) =>
         `--- edit ${idx + 1} ---\n${diffLines(e.old_string || "", e.new_string || "")}`);
-      return `\`MultiEdit\` ${toolInput.file_path || ""}\n\`\`\`diff\n${truncate(parts.join("\n"), 4000)}\n\`\`\``;
+      return `\`MultiEdit\` ${toolInput.file_path || ""}\n\`\`\`diff\n${parts.join("\n")}\n\`\`\``;
     }
     if (toolName === "Write" && typeof toolInput?.content === "string") {
-      return `\`Write\` ${toolInput.file_path || ""}\n\`\`\`\n${truncate(toolInput.content, 4000)}\n\`\`\``;
+      return `\`Write\` ${toolInput.file_path || ""}\n\`\`\`\n${toolInput.content}\n\`\`\``;
     }
     return `\`${toolName}\` ${summarizeToolInput(toolInput)}`;
   }
@@ -369,7 +474,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // ts: null (formatTs() in viewer.html already renders that as blank, not an
   // error). Another: unlike the live path, this doesn't distinguish a
   // task-notification "user" entry as its own "agent" role — a minor fidelity
-  // loss versus the live broadcast path, not a functional gap.
+  // loss versus the live broadcast path, not a functional gap. Unlike the
+  // live stream, the full diff text of Edit/MultiEdit/Write tool bubbles
+  // here is rebuilt independently from the SDK's stored tool_use input, so
+  // history shows the same content the broadcast did.
   function extractTextFromContent(content) {
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
@@ -409,6 +517,17 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         const content = entry.message?.content;
 
         if (entry.type === "assistant") {
+          // Thinking blocks first (each its own bubble, matching the live
+          // stream's per-block broadcast). Without this the browser's
+          // in-memory log would re-seed tool/assistant text but silently
+          // drop every reasoning block on a fresh server.py connect — the
+          // source of thinking bubbles vanishing across a container restart.
+          let thinkIdx = 0;
+          for (const b of (Array.isArray(content) ? content : [])) {
+            if (b?.type === "thinking" && b?.thinking) {
+              out.push({ role: "thinking", text: b.thinking, id: `${entry.uuid}-thinking-${thinkIdx++}`, ts: null });
+            }
+          }
           const text = extractTextFromContent(content);
           if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null });
           for (const tu of toolUsesFromContent(content)) {
@@ -805,6 +924,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     } finally {
       if (state.abortController === abortController) state.abortController = null;
       state.turnInFlight = false;
+      // A completed turn may have run on a different model (state.model) than
+      // the session's previous one — drop the cached derivation so the next
+      // listModels() re-reads the transcript's new last assistant entry.
+      derivedModelCache.delete(sessionId);
       broadcastStatus(sessionId, { type: "turn_end" });
     }
   }
@@ -936,7 +1059,13 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // by runTurn's baseOpts on the *next* turn this session runs. setModel
     // itself is therefore a no-op; it exists only so /set-model's backend
     // contract check (`typeof backend.setModel === "function"`) passes.
-    listModels() {
+    async listModels(sessionId) {
+      // Warm the model list first (single-flight; the throwaway-query warm-up
+      // in ensureModelsWarmed() fills knownModels at startup, before any real
+      // turn has run — see the comment block by its declaration above). The
+      // startup loop and every /models request share the same single-flight
+      // promise, so concurrent early calls don't spawn competing queries.
+      await ensureModelsWarmed();
       // ModelInfo.resolvedModel is NOT the reliable "is this a genuine
       // first-party model" signal it looks like — verified by hand that
       // Claude Code echoes `value` straight back as `resolvedModel` for
@@ -968,15 +1097,27 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           console.error("[claude-code] failed to read settings.json for model-picker filtering:", e.message);
         }
       }
-      return {
-        available: knownModels
-          .filter((m) => usingGateway || !customValues.has(m.value))
-          .map((m) => ({
-            id: m.value,
-            label: m.displayName,
-            description: m.description,
-          })),
-      };
+      const available = knownModels
+        .filter((m) => usingGateway || !customValues.has(m.value))
+        .map((m) => ({
+          id: m.value,
+          label: m.displayName,
+          description: m.description,
+        }));
+      // Derive this session's own last-used model (see the comment block by
+      // derivedModelCache) and reverse-map it to a picker alias. This is the
+      // session-specific `current` that replaces the old global-default
+      // fallback; driver.mjs's own state.model override still wins on top of
+      // this (see its /models route), so an explicit in-run picker choice
+      // always takes precedence. currentConfirmed tells the frontend whether
+      // the derived value is actually selectable right now — false means "this
+      // session's model isn't in the currently-known lineup", the signal for
+      // its "model unavailable" state.
+      const derivedResolved = sessionId ? await derivedCurrentForSession(sessionId, null) : null;
+      const derivedAlias = aliasForResolvedModel(derivedResolved);
+      const current = derivedAlias || null;
+      const currentConfirmed = !!current && available.some((m) => m.id === current);
+      return { available, current, currentConfirmed };
     },
 
     async setModel() {},

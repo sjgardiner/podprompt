@@ -788,7 +788,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null });
           for (const p of parts) {
             if (p?.type === "tool" && (p?.state?.status === "completed" || p?.state?.status === "error")) {
-              out.push({ role: "tool", text: summarizeToolPart(p), id: p?.id || info.id, ts: null });
+              // Same timestamp source as its sibling assistant/thinking
+              // bubbles — without it a tool bubble re-seeded from history
+              // (post container restart) rendered with no timestamp while
+              // every other role carried one.
+              out.push({ role: "tool", text: summarizeToolPart(p), id: p?.id || info.id, ts: info.time?.created || null });
             }
           }
         }

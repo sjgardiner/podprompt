@@ -136,6 +136,53 @@
   #status-dot.live  { background: var(--green); }
   #status-dot.error { background: #f87171; }
 
+  /* ── Context-usage bar (both backends) + plan/spend indicator ───────── */
+  /* Hidden until the first context_usage/plan_usage/spend status arrives
+     for the currently-viewed session — see the SSE 'status' handler — and
+     reset back to hidden on every session switch (viewSession()), so a
+     freshly-opened chat never shows a stale reading left over from
+     whatever session was viewed before it. */
+  #context-usage-wrap {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  #context-usage-wrap.show { display: flex; }
+  #context-usage-bar {
+    width: 56px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  #context-usage-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--green);
+    transition: width .4s ease, background .3s ease;
+  }
+  #context-usage-fill.warn { background: #f59e0b; }
+  #context-usage-fill.crit { background: #f87171; }
+  /* Actively compacting overrides the percentage color with a pulsing
+     accent — a distinct visual state from "just a high percentage",
+     mirroring the TUI's own compacting-in-progress display. */
+  #context-usage-fill.compacting {
+    background: var(--accent) !important;
+    animation: compacting-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes compacting-pulse { 50% { opacity: .3; } }
+  #context-usage-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  #plan-usage-wrap {
+    display: none;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  #plan-usage-wrap.show { display: block; }
+
   header button {
     background: none;
     border: none;
@@ -259,6 +306,30 @@
     font-weight: 400;
   }
   #new-chat-picker.show { display: block; }
+  .new-chat-backend-row {
+    display: flex;
+    gap: 6px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .new-chat-backend-btn {
+    flex: 1;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .new-chat-backend-btn:hover { border-color: var(--accent); }
+  .new-chat-backend-btn.selected {
+    color: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
   .new-chat-project-item {
     padding: 8px 14px;
     font-size: 13px;
@@ -477,19 +548,81 @@
   }
   #new-pill.show { display: block; }
 
-  /* ── Turn-in-flight indicator ──────────────────────────────────────── */
-  /* Ephemeral "Thinking…" / "Running `Bash`… (12s)" line — covers the gap
-     before any content has streamed in yet, and long-running tool calls.
-     Disappears the moment real content starts streaming (see stream_start
-     handling) or the turn ends. */
+  /* ── Turn-in-flight indicator + backend controls row ─────────────────── */
+  /* One shared flex row, directly above #input-bar: the ephemeral
+     "Thinking…" / "Running `Bash`… (12s)" turn-indicator on the left (same
+     position/behavior as before this row existed — it just no longer gets
+     a whole line to itself), model/mode switchers + the auto-approve
+     checkbox right-aligned on the SAME line. #turn-indicator takes the
+     available space (flex:1) so it can still wrap/ellipsize independently
+     without pushing the controls off to the right when both are showing
+     at once (a long "Running `SomeVeryLongToolName`…" line alongside an
+     active auto-approve checkbox, say). */
+  /* No justify-content: space-between here — with #turn-indicator hidden
+     (display:none, its default state whenever no turn is running), it's
+     not a flex item at all, which left #controls-row as space-between's
+     lone child and sitting at the main-start (left) instead of the right —
+     the "auto-approve dances between left and right" bug. #controls-row's
+     own margin-left:auto below is what pins it to the right edge
+     unconditionally, regardless of whether the indicator is present. */
+  #status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 20px 0;
+  }
   #turn-indicator {
     display: none;
-    padding: 4px 20px 0;
+    flex: 1;
+    min-width: 0;
     font-size: var(--status-font-size);
     color: var(--muted);
     font-style: italic;
   }
   #turn-indicator.show { display: block; }
+
+  /* ── Backend controls row (model/mode switchers, auto-approve) ───────── */
+  /* Each <select> stays hidden (not just empty) whenever the active
+     session's backend has no such concept at all (e.g. Claude Code has no
+     mode/agent concept) rather than showing an empty, useless dropdown —
+     see loadModes()/loadModels(). Font-size is the same --status-font-size
+     variable #turn-indicator uses (and the existing "Status text size"
+     settings slider already controls) rather than a hardcoded size, so the
+     two visually match and stay in sync with that setting automatically. */
+  #controls-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    margin-left: auto; /* always pinned right, independent of #turn-indicator's visibility */
+    font-size: var(--status-font-size);
+    color: var(--muted);
+  }
+  #controls-row select {
+    display: none;
+    background: var(--code-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: var(--status-font-size);
+    max-width: 220px;
+  }
+  #controls-row select.show { display: inline-block; }
+  #auto-approve-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #auto-approve-row input[type="checkbox"] {
+    width: 1.15em;
+    height: 1.15em;
+  }
+  /* Deliberately the same amber used for the context-usage warning
+     threshold — both are "pay attention" states, not errors. */
+  #auto-approve-row.active { color: #f59e0b; font-weight: 600; }
 
   /* ── Input bar ─────────────────────────────────────────────────────── */
   #input-bar {
@@ -704,8 +837,12 @@
     font-size: .88em;
     color: var(--muted);
     background: var(--code-bg);
+    /* renderToolBody() emits plain escaped text outside of fenced code
+       blocks (no <p>/<br> from marked anymore) — this is what keeps its
+       own newlines (e.g. a multi-line one-off summary) visible. */
+    white-space: pre-wrap;
   }
-  .msg.tool .msg-body p { margin: 0; }
+  .msg.tool .msg-body p { margin: 0; } /* dead now marked.parse() no longer runs here; harmless if a stray <p> ever appears */
 
   /* streaming cursor */
   .msg-body.streaming::after {
@@ -846,6 +983,11 @@
     <button id="sessions-btn" title="Sessions">☰</button>
     <div class="logo"></div>
     <span>Claude Viewer</span>
+    <div id="context-usage-wrap" title="Context window usage">
+      <div id="context-usage-bar"><div id="context-usage-fill"></div></div>
+      <div id="context-usage-label"></div>
+    </div>
+    <div id="plan-usage-wrap"></div>
     <div id="status">
       <div id="status-dot"></div>
       <span id="status-label">connecting…</span>
@@ -954,7 +1096,16 @@
     </div>
   </div>
   <button id="new-pill">↓ New messages</button>
-  <div id="turn-indicator"></div>
+  <div id="status-row">
+    <div id="turn-indicator"></div>
+    <div id="controls-row">
+      <select id="model-select" title="Model"></select>
+      <select id="mode-select" title="Agent / mode"></select>
+      <label id="auto-approve-row" title="Automatically approve all tool permission requests for this session, until turned back off">
+        <input type="checkbox" id="auto-approve-toggle"> Auto-approve
+      </label>
+    </div>
+  </div>
 
   <div id="input-bar">
     <div id="palette-dropdown"></div>
@@ -990,6 +1141,34 @@ function copyCode(btn) {
   });
 }
 
+// Tool bubbles are command lines, file paths, and diffs — never meant to go
+// through the *prose* markdown pipeline (a stray "**" flag or "_" in a shell
+// command/path could get misread as bold/italic, "#" at line-start as a
+// heading, etc.). The one deliberate exception is the fenced code block
+// formatToolSummary() (driver-side) wraps Edit/MultiEdit/Write diffs in —
+// that still gets the same hljs syntax highlighting every other code fence
+// gets, just extracted directly here instead of handing the whole bubble to
+// marked.parse(), so nothing *outside* the fence is at risk of being
+// reinterpreted as markdown. Everything outside a fence is escaped and
+// inserted as literal text, unprocessed.
+const TOOL_FENCE_RE = /```([^\n`]*)\n([\s\S]*?)```/g;
+
+function renderToolBody(text) {
+  let out = '';
+  let last = 0;
+  let m;
+  TOOL_FENCE_RE.lastIndex = 0;
+  while ((m = TOOL_FENCE_RE.exec(text))) {
+    out += escapeHtml(text.slice(last, m.index));
+    const lang = hljs.getLanguage(m[1]) ? m[1] : 'plaintext';
+    const highlighted = hljs.highlight(m[2], { language: lang }).value;
+    out += `<pre><button class="copy-btn" onclick="copyCode(this)">copy</button><code class="hljs language-${lang}">${highlighted}</code></pre>`;
+    last = TOOL_FENCE_RE.lastIndex;
+  }
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
 // ── KaTeX render ─────────────────────────────────────────────────────────────
 // Math is extracted and rendered to HTML *before* marked.parse() runs, so
 // markdown (in particular `breaks: true`, which turns newlines into <br>)
@@ -998,8 +1177,16 @@ let mathStore = [];
 
 function extractMath(text) {
   mathStore = [];
-  const pattern = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$([^\$\n]+?)\$/g;
+  // Backtick-delimited spans (fenced ```code blocks``` and inline `code`)
+  // are matched FIRST and returned untouched, purely to make the regex
+  // engine consume and skip past them — this lets someone write out a
+  // literal LaTeX-looking string (`$x$`, a ```diff block with a bare $1,
+  // etc.) inside code without it being pulled out and rendered as math.
+  const pattern = /```[\s\S]*?```|`[^`\n]*?`|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$([^\$\n]+?)\$/g;
   return text.replace(pattern, (match, disp1, disp2, inl1, inl2) => {
+    if (disp1 === undefined && disp2 === undefined && inl1 === undefined && inl2 === undefined) {
+      return match; // matched a code span/fence, not a math delimiter
+    }
     const isDisplay = disp1 !== undefined || disp2 !== undefined;
     const src = disp1 ?? disp2 ?? inl1 ?? inl2;
     const idx = mathStore.push({ src, isDisplay }) - 1;
@@ -1032,6 +1219,48 @@ function setStatus(state, text) {
 }
 
 const turnIndicator = document.getElementById('turn-indicator');
+const contextUsageWrap  = document.getElementById('context-usage-wrap');
+const contextUsageFill  = document.getElementById('context-usage-fill');
+const contextUsageLabel = document.getElementById('context-usage-label');
+const planUsageWrap     = document.getElementById('plan-usage-wrap');
+const modelSelect       = document.getElementById('model-select');
+const modeSelect        = document.getElementById('mode-select');
+const autoApproveRow    = document.getElementById('auto-approve-row');
+const autoApproveToggle = document.getElementById('auto-approve-toggle');
+
+// Whether loadModels()/loadModes() have reached a DEFINITIVE answer for the
+// session currently being viewed — either "this backend has no such concept
+// at all" (server returns null) or "here's the real list" (a non-empty
+// available[]). Deliberately distinct from "got a response": a backend that
+// DOES support models/modes can still legitimately answer with an empty
+// available[] right after a fresh driver.mjs restart, before any turn
+// anywhere has populated its shared, process-wide model/mode cache yet (see
+// backends/claude-code.mjs's knownModels) — that's the one case worth
+// retrying, since the same session's *next* turn ending is likely to have
+// populated it. Once genuinely resolved one way or the other, further
+// retries would just be pinging for an answer that isn't going to change.
+let modelsResolved = false;
+let modesResolved = false;
+
+// Reset to the "nothing known yet" state — called on every session switch
+// (viewSession()) so a freshly-viewed session never shows a stale reading
+// left over from whatever was viewed before it, for the brief window
+// before that session's own resync (resyncTurnStatus/loadModes/loadModels,
+// all called from es.onopen) completes.
+function resetBackendControlsDisplay() {
+  contextUsageWrap.classList.remove('show');
+  contextUsageFill.classList.remove('warn', 'crit', 'compacting');
+  planUsageWrap.classList.remove('show');
+  autoApproveToggle.checked = false;
+  autoApproveRow.classList.remove('active');
+  modelSelect.classList.remove('show');
+  modelSelect.innerHTML = '';
+  modeSelect.classList.remove('show');
+  modeSelect.innerHTML = '';
+  modelsResolved = false;
+  modesResolved = false;
+}
+
 function setTurnIndicator(text) {
   if (!text) {
     turnIndicator.classList.remove('show');
@@ -1150,13 +1379,13 @@ function renderBody(entry) {
     return;
   }
   if (entry.role === 'tool') {
-    // No math extraction here: tool bubbles are command lines, file paths,
-    // and diffs — full of bare `$` (positional/shell params, `$(...)`,
-    // regex anchors, etc.) that extractMath()'s blind regex can't tell
-    // apart from real LaTeX delimiters. Markdown/code-fence rendering
-    // (needed for the Edit/Write diff blocks) still applies, just without
-    // the math pass in front of it.
-    entry.el.innerHTML = marked.parse(entry.rawText || '');
+    // No math extraction and no marked.parse() here at all — see
+    // renderToolBody() above for why (bare `$` in shell params/diffs isn't
+    // LaTeX, and prose markdown constructs shouldn't apply to command
+    // output/paths). Fenced code (the Edit/MultiEdit/Write diff blocks)
+    // still gets hljs syntax highlighting via renderToolBody()'s own
+    // fence extraction.
+    entry.el.innerHTML = renderToolBody(entry.rawText || '');
     return;
   }
   const html = marked.parse(extractMath(entry.rawText || ''));
@@ -1457,6 +1686,8 @@ function connect() {
     setStatus('live', 'live');
     clearTimeout(reconnectTimer);
     resyncTurnStatus();
+    loadModes();
+    loadModels();
   };
 
   es.onerror = () => {
@@ -1516,7 +1747,19 @@ function connect() {
   es.addEventListener('status', e => {
     const s = JSON.parse(e.data);
     if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen(); }
-    if (s.type === 'turn_end') { setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen(); }
+    if (s.type === 'turn_end') {
+      setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
+      // Cheap once resolved: loadModes()/loadModels() early-return
+      // immediately if modesResolved/modelsResolved is already true, so
+      // this is a real re-fetch only for the case it exists to cover — the
+      // shared model/mode cache was still cold the one time this tab's
+      // es.onopen fired (e.g. right after a driver.mjs restart) and this
+      // session's own turn ending is a good moment to check whether it's
+      // populated by now. Not a recurring poll: once resolved, every
+      // subsequent turn_end costs nothing.
+      loadModes();
+      loadModels();
+    }
 
     // Live thinking-token estimate during the redacted-thinking phase, when
     // no actual thinking text streams yet (see SDKThinkingTokensMessage).
@@ -1545,6 +1788,66 @@ function connect() {
       renderBody(entry);
       scrollBottom();
     }
+
+    // Context-window usage — both backends broadcast this (Claude Code from
+    // SDKAssistantMessage.context_usage; OpenCode computed from tokens vs.
+    // the model's own limit.context, see backends/opencode.mjs). Color
+    // thresholds loosely mirror the TUI's own convention: plain green under
+    // 70%, amber approaching the limit, red once compaction is imminent.
+    if (s.type === 'context_usage') {
+      const pct = Math.max(0, Math.min(100, Math.round(s.percentage || 0)));
+      contextUsageWrap.classList.add('show');
+      contextUsageFill.style.width = pct + '%';
+      contextUsageFill.classList.toggle('warn', pct >= 70 && pct < 90);
+      contextUsageFill.classList.toggle('crit', pct >= 90);
+      contextUsageLabel.textContent = pct + '%';
+      const totalStr = (s.totalTokens || 0).toLocaleString();
+      const maxStr = (s.maxTokens || 0).toLocaleString();
+      contextUsageWrap.title = `Context window: ${totalStr} / ${maxStr} tokens${s.model ? ' (' + s.model + ')' : ''}`;
+    }
+
+    // Auto-compaction in progress/finished. The bar itself flips to a
+    // pulsing accent color for the duration (independent of whatever
+    // percentage it was last showing); a plain local notice marks
+    // completion, success or failure, the same way a Stop/error already
+    // gets one (see showLocalNotice).
+    if (s.type === 'compacting') {
+      contextUsageFill.classList.toggle('compacting', !!s.active);
+      if (!s.active && s.result) {
+        const tokenNote = (s.preTokens && s.postTokens)
+          ? ` (${s.preTokens.toLocaleString()} → ${s.postTokens.toLocaleString()} tokens)`
+          : '';
+        showLocalNotice(s.result === 'success'
+          ? `*(context compacted${tokenNote})*`
+          : `*(compaction failed${s.error ? ': ' + s.error : ''})*`);
+      }
+    }
+
+    // Claude subscription plan-limit bar (Claude Code only — hidden
+    // whenever rate_limits_available was false server-side, e.g. this
+    // session is running over LiteLLM/an API key/Bedrock/Vertex rather
+    // than a real Pro/Max/Team/Enterprise OAuth login).
+    if (s.type === 'plan_usage') {
+      const parts = [];
+      if (s.rate_limits?.five_hour?.utilization != null) parts.push(`5h ${Math.round(s.rate_limits.five_hour.utilization)}%`);
+      if (s.rate_limits?.seven_day?.utilization != null) parts.push(`7d ${Math.round(s.rate_limits.seven_day.utilization)}%`);
+      if (s.subscription_type && parts.length) {
+        planUsageWrap.textContent = parts.join(' · ');
+        planUsageWrap.title = `Subscription: ${s.subscription_type}`;
+        planUsageWrap.classList.add('show');
+      } else {
+        planUsageWrap.classList.remove('show');
+      }
+    }
+
+    // OpenCode's analogue of plan_usage — no plan/quota concept exists
+    // there, just a running cumulative cost, shown in the same header slot
+    // (only one of the two ever applies to a given session's backend).
+    if (s.type === 'spend') {
+      planUsageWrap.textContent = `$${Number(s.totalCostUsd || 0).toFixed(2)} session`;
+      planUsageWrap.title = 'Cumulative session spend (OpenCode has no subscription/quota concept)';
+      planUsageWrap.classList.add('show');
+    }
   });
 
 }
@@ -1557,10 +1860,13 @@ function connect() {
 // driver-pushed 'reset' broadcast — that only made sense when every
 // connected tab shared one "current" session to be reset onto; now each tab
 // asks for exactly the session it wants and nothing else is affected.
-function viewSession(sessionId, { updateUrl = true } = {}) {
+function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {}) {
   if (sessionId === currentSessionId) return;
   if (!(pendingCwdForNewSession && pendingCwdForNewSession.sessionId === sessionId)) {
     pendingCwdForNewSession = null;
+  }
+  if (!(pendingBackendForNewSession && pendingBackendForNewSession.sessionId === sessionId)) {
+    pendingBackendForNewSession = null;
   }
   currentSessionId = sessionId;
   localStorage.setItem(LAST_SESSION_KEY, sessionId);
@@ -1571,6 +1877,16 @@ function viewSession(sessionId, { updateUrl = true } = {}) {
   }
   clearFeed();
   setTurnIndicator(null);
+  resetBackendControlsDisplay();
+  // isNewSession (set only by startNewChatInProject()) is a hard guarantee,
+  // not a guess: a session id minted client-side this instant, that has
+  // never had a prompt sent for it, cannot possibly have a turn in flight
+  // anywhere. Resetting unconditionally for *every* switch would be wrong —
+  // switching to some other EXISTING session that genuinely has a live turn
+  // running (common: started from another tab) would flash Send before
+  // resyncTurnStatus() flips it back to Stop a moment later. Scoped to
+  // exactly the one case where the answer is already known for certain.
+  if (isNewSession) setTurnInFlight(false);
   clearTimeout(reconnectTimer);
   if (es) es.close();
   connect();
@@ -1823,6 +2139,11 @@ let turnInFlight = false;
 // switch to any OTHER session before sending that first prompt, so it can
 // never leak into some unrelated session's turn.
 let pendingCwdForNewSession = null;
+// Same lifecycle as pendingCwdForNewSession, for the backend the new-chat
+// picker's backend row chose (see openNewChatPicker/startNewChatInProject
+// below) — driver.mjs's /prompt route reads body.backend the same way it
+// reads body.cwd, only for a session it's never seen a prompt for yet.
+let pendingBackendForNewSession = null;
 
 const promptInput  = document.getElementById('prompt-input');
 const sendBtn       = document.getElementById('send-btn');
@@ -1835,6 +2156,23 @@ async function loadDriverConfig() {
     const res = await fetch('/config');
     const cfg = await res.json();
     driverBase = `${location.protocol}//${location.hostname}:${cfg.driverPort}`;
+    // connect() and loadDriverConfig() both fire from the same window.load
+    // handler, racing each other — resyncTurnStatus()/loadModes()/
+    // loadModels() are also called from es.onopen (see connect()), but ALL
+    // THREE silently no-op if driverBase isn't set yet (each starts with
+    // `if (!driverBase) return;`), and nothing else ever retries them. If
+    // the SSE connection happens to finish opening before this /config
+    // fetch resolves — which real-world timing shows can easily go either
+    // way — those calls are lost for good: the model/mode switchers and
+    // the auto-approve checkbox's resynced state just never appear, with
+    // no visible error, until the next full reconnect (if any). Calling
+    // them again here, now that driverBase is *definitely* set, guarantees
+    // at least one of the two call sites succeeds regardless of which
+    // finished first; the redundant second call (whichever fires second)
+    // is harmless.
+    resyncTurnStatus();
+    loadModes();
+    loadModels();
   } catch (e) {
     console.error('Failed to load /config:', e);
   }
@@ -1857,10 +2195,139 @@ async function resyncTurnStatus() {
     const res = await fetch(`${driverBase}/turn-status?sessionId=${encodeURIComponent(currentSessionId)}`);
     const data = await res.json();
     setTurnInFlight(!!data.inFlight);
+    autoApproveToggle.checked = !!data.autoApprove;
+    autoApproveRow.classList.toggle('active', !!data.autoApprove);
   } catch (e) {
     console.error('Failed to resync turn status:', e);
   }
 }
+
+// ── Mode (agent) and model switchers ────────────────────────────────────
+// Both mirror the same shape: GET returns null for a backend with no such
+// concept at all (Claude Code has no mode/agent concept; a backend not
+// exposing listModels() has no model-switcher either) — the <select> stays
+// hidden rather than rendering empty. Re-fetched on every session switch/
+// reconnect (see es.onopen above) since a different session can be on a
+// different backend entirely.
+async function loadModes() {
+  if (!driverBase || modesResolved) return;
+  try {
+    const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}`);
+    const data = await res.json();
+    if (!data) {
+      // Definitive: this backend has no mode/agent concept at all — never
+      // going to change mid-session, stop asking.
+      modesResolved = true;
+      modeSelect.classList.remove('show');
+      modeSelect.innerHTML = '';
+      return;
+    }
+    if (!data.available || !data.available.length) {
+      // Backend supports modes but doesn't know any yet (e.g. right after a
+      // driver.mjs restart, before any turn has populated the shared cache)
+      // — leave modesResolved false so the turn_end retry below keeps
+      // trying instead of giving up here.
+      modeSelect.classList.remove('show');
+      modeSelect.innerHTML = '';
+      return;
+    }
+    modeSelect.innerHTML = data.available.map((m) =>
+      `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label)}</option>`).join('');
+    modeSelect.value = data.current || data.available[0].id;
+    modeSelect.classList.add('show');
+    modesResolved = true;
+  } catch (e) {
+    console.error('Failed to load /modes:', e);
+  }
+}
+
+modeSelect.addEventListener('change', async () => {
+  if (!driverBase) return;
+  try {
+    await fetch(`${driverBase}/set-mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, mode: modeSelect.value }),
+    });
+  } catch (e) {
+    console.error('Failed to set mode:', e);
+  }
+});
+
+async function loadModels() {
+  if (!driverBase || modelsResolved) return;
+  try {
+    const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}`);
+    const data = await res.json();
+    if (!data) {
+      // Definitive: no model concept for this backend — never going to
+      // change mid-session, stop asking.
+      modelsResolved = true;
+      modelSelect.classList.remove('show');
+      modelSelect.innerHTML = '';
+      return;
+    }
+    if (!data.available || !data.available.length) {
+      // Backend supports models but the shared cache isn't populated yet
+      // (see backends/claude-code.mjs's knownModels — process-wide, filled
+      // in by the first turn anywhere to complete since the last restart).
+      // Leave modelsResolved false so the turn_end retry below tries again.
+      modelSelect.classList.remove('show');
+      modelSelect.innerHTML = '';
+      return;
+    }
+    modelSelect.innerHTML = data.available.map((m) =>
+      `<option value="${escapeHtml(m.id)}" title="${escapeHtml(m.description || '')}">${escapeHtml(m.label)}</option>`).join('');
+    modelSelect.value = data.current || data.available[0].id;
+    modelSelect.classList.add('show');
+    modelsResolved = true;
+  } catch (e) {
+    console.error('Failed to load /models:', e);
+  }
+}
+
+modelSelect.addEventListener('change', async () => {
+  if (!driverBase) return;
+  try {
+    await fetch(`${driverBase}/set-model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, model: modelSelect.value }),
+    });
+  } catch (e) {
+    console.error('Failed to set model:', e);
+  }
+});
+
+// ── Auto-approve toggle ──────────────────────────────────────────────────
+// Enabling requires confirmation (mirrors the delete-session confirm()
+// pattern) since it bypasses every tool-permission prompt for this session
+// until turned back off; disabling (restoring the safe default) needs none.
+// AskUserQuestion-style questions are unaffected either way — see
+// backends/claude-code.mjs's makeCanUseTool and backends/opencode.mjs's
+// onPermission, both of which special-case that regardless of this flag.
+autoApproveToggle.addEventListener('change', async () => {
+  if (!driverBase) { autoApproveToggle.checked = false; return; }
+  const enabling = autoApproveToggle.checked;
+  if (enabling && !confirm(
+    'Auto-approve all tool permission requests for this session?\n\n' +
+    'This bypasses manual review for every tool call until you turn it back off.'
+  )) {
+    autoApproveToggle.checked = false;
+    return;
+  }
+  try {
+    await fetch(`${driverBase}/auto-approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, enabled: enabling }),
+    });
+    autoApproveRow.classList.toggle('active', enabling);
+  } catch (e) {
+    console.error('Failed to set auto-approve:', e);
+    autoApproveToggle.checked = !enabling;
+  }
+});
 
 function autoResizeInput() {
   promptInput.style.height = 'auto';
@@ -1895,9 +2362,14 @@ async function submitPrompt() {
     ? pendingCwdForNewSession.cwd
     : undefined;
   pendingCwdForNewSession = null;
+  const backendForThisPrompt = pendingBackendForNewSession && pendingBackendForNewSession.sessionId === currentSessionId
+    ? pendingBackendForNewSession.backend
+    : undefined;
+  pendingBackendForNewSession = null;
   try {
     const body = { sessionId: currentSessionId, text };
     if (cwdForThisPrompt) body.cwd = cwdForThisPrompt;
+    if (backendForThisPrompt) body.backend = backendForThisPrompt;
     const res = await fetch(`${driverBase}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2420,10 +2892,15 @@ async function archiveSession(sessionId) {
         const nextActive = (data.sessions || [])
           .filter((s) => s.sessionId !== sessionId && s.tag !== 'archived')
           .sort((a, b) => b.lastModified - a.lastModified)[0];
-        viewSession(nextActive ? nextActive.sessionId : crypto.randomUUID());
+        // Same "guaranteed fresh, can't have a turn in flight" case
+        // isNewSession is for — falling back to a brand-new id here for lack
+        // of any other active session to land on, not switching to an
+        // existing one (that branch is left to resync normally).
+        if (nextActive) viewSession(nextActive.sessionId);
+        else viewSession(crypto.randomUUID(), { isNewSession: true });
       } catch (e) {
         console.error('Failed to pick a session to move to after archiving:', e);
-        viewSession(crypto.randomUUID());
+        viewSession(crypto.randomUUID(), { isNewSession: true });
       }
     }
     await refreshSessionsList();
@@ -2486,15 +2963,29 @@ function dismissNewChatPicker() {
 // chat" is just a client-minted id nobody has used before; driver.mjs
 // figures out it's brand new (vs. an existing session it just hasn't
 // touched yet) the same way either way, the first time a prompt actually
-// arrives for it. The cwd (if not the default root) rides along as
-// pendingCwdForNewSession and gets attached to that first prompt.
-function startNewChatInProject(cwd) {
+// arrives for it. The cwd (if not the default root) and backend (if not
+// the server default) ride along as pendingCwdForNewSession/
+// pendingBackendForNewSession and get attached to that first prompt.
+function startNewChatInProject(cwd, backend) {
   const id = crypto.randomUUID();
   pendingCwdForNewSession = cwd ? { sessionId: id, cwd } : null;
+  pendingBackendForNewSession = backend ? { sessionId: id, backend } : null;
   dismissNewChatPicker();
   sessionsPanel.classList.remove('open');
-  viewSession(id);
+  viewSession(id, { isNewSession: true });
 }
+
+// Human-readable labels for known backend ids — falls back to the raw id
+// for any backend this build of viewer.html doesn't specifically know about
+// yet, so a new driver.mjs backend still shows up (just unstyled) instead of
+// being silently hidden.
+const BACKEND_LABELS = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode' };
+
+// Tracks which backend button is currently selected while the picker is
+// open — starts at whatever driver.mjs reports as its own default, updated
+// by clicking a backend button, read when a project row is actually clicked
+// to create the session.
+let newChatSelectedBackend = null;
 
 async function openNewChatPicker() {
   if (newChatPicker.classList.contains('show')) {
@@ -2505,20 +2996,53 @@ async function openNewChatPicker() {
   newChatPicker.innerHTML = '<div class="palette-empty">Loading…</div>';
   newChatPicker.classList.add('show');
   try {
-    const res = await fetch(`${driverBase}/projects`);
-    const data = await res.json();
+    const [projRes, backendsRes] = await Promise.all([
+      fetch(`${driverBase}/projects`),
+      // Tolerate an older driver.mjs without this route — falls back to a
+      // single implicit claude-code choice, same as before this existed.
+      fetch(`${driverBase}/backends`).catch(() => null),
+    ]);
+    const data = await projRes.json();
+    let backendsData = { available: ['claude-code'], default: 'claude-code' };
+    if (backendsRes && backendsRes.ok) backendsData = await backendsRes.json();
+    newChatSelectedBackend = backendsData.default;
+
     // Best-effort only — if the current session isn't in the cached list
     // yet (e.g. panel never opened this tab load), nothing gets marked
     // "current" here, which is purely cosmetic, not a correctness issue.
     const currentCwd = lastSessionsResult?.sessions?.find((s) => s.sessionId === currentSessionId)?.cwd;
 
     newChatPicker.innerHTML = '';
+
+    // Backend row — only worth showing a choice at all when more than one
+    // backend is actually registered (a single-backend deployment just
+    // keeps today's implicit behavior, no picker clutter).
+    if (backendsData.available.length > 1) {
+      const backendRow = document.createElement('div');
+      backendRow.className = 'new-chat-backend-row';
+      for (const b of backendsData.available) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'new-chat-backend-btn' + (b === newChatSelectedBackend ? ' selected' : '');
+        btn.textContent = BACKEND_LABELS[b] || b;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          newChatSelectedBackend = b;
+          backendRow.querySelectorAll('.new-chat-backend-btn')
+            .forEach((el) => el.classList.toggle('selected', el === btn));
+        });
+        backendRow.appendChild(btn);
+      }
+      newChatPicker.appendChild(backendRow);
+    }
+
     for (const p of data.projects || []) {
       const item = document.createElement('div');
       const isCurrent = p.cwd === currentCwd;
       item.className = 'new-chat-project-item' + (isCurrent ? ' current' : '');
       item.textContent = isCurrent ? `${p.label} (current)` : p.label;
-      item.addEventListener('click', () => startNewChatInProject(p.cwd === data.root ? undefined : p.cwd));
+      item.addEventListener('click', () =>
+        startNewChatInProject(p.cwd === data.root ? undefined : p.cwd, newChatSelectedBackend));
       newChatPicker.appendChild(item);
     }
 
@@ -2528,7 +3052,7 @@ async function openNewChatPicker() {
     input.placeholder = 'Or type a subdirectory path…';
     input.addEventListener('click', (e) => e.stopPropagation());
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim());
+      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim(), newChatSelectedBackend);
     });
     customRow.appendChild(input);
     newChatPicker.appendChild(customRow);

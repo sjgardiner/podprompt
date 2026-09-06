@@ -775,12 +775,41 @@
   .msg.permission .msg-body { border-color: var(--accent); }
 
   /* thinking blocks: distinct from assistant text, subdued/italic like the
-     TUI's collapsed thinking display */
+     TUI's collapsed thinking display. Content is plain text, streamed by
+     appending (never markdown/KaTeX-parsed — a long reasoning transcript
+     stays boxed, styled, capped and scrollable instead of re-rendering
+     per token). Three gear-menu modes select the element's classes here:
+       hide     -> .hidden-thought        (not rendered at all)
+       collapse -> no .expanded, body hidden until the header is clicked
+       show     -> .expanded, body visible, capped like long tool diffs */
   .msg.thinking .msg-body {
+    display: none;
     font-style: italic;
     color: var(--muted);
     background: var(--code-bg);
+    padding: 8px 14px;
+    font-size: .9em;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 400px;
+    overflow-y: auto;
   }
+  .msg.thinking.expanded .msg-body { display: block; }
+  .msg.thinking.hidden-thought { display: none; }
+  .msg.thinking .msg-think-toggle {
+    cursor: pointer;
+    user-select: none;
+  }
+  .msg.thinking .msg-think-toggle::before { content: '▸ '; }
+  .msg.thinking.expanded .msg-think-toggle::before { content: '▾ '; }
+  .msg.thinking .msg-think-toggle:hover { text-decoration: underline; }
+  .msg.thinking .msg-label .ts { margin-left: auto; }
+
+  /* per-delta streaming: raw text appended into the bubble (no full
+     markdown re-render per token — that re-flows the whole bubble every
+     chunk and makes long streams janky). Finalize swaps to a clean render. */
+  .msg-body.raw { white-space: pre-wrap; }
 
   /* tool bubbles can now hold real diffs (Edit/Write), not just a one-liner —
      cap height so a huge diff doesn't dominate the feed */
@@ -1042,6 +1071,15 @@
         </select>
       </label>
     </div>
+    <div class="settings-row">
+      <label>Thinking blocks
+        <select id="thinking-mode">
+          <option value="collapse" selected>Collapsed (click to open)</option>
+          <option value="show">Show (streamed, scrollable)</option>
+          <option value="hide">Hide</option>
+        </select>
+      </label>
+    </div>
 
     <div class="settings-group-title">Sessions</div>
     <div class="settings-row">
@@ -1248,9 +1286,12 @@ let modesResolved = false;
 // hadn't sent a prompt yet — e.g. the opencode backend's /config/providers
 // fetch racing `opencode serve`'s bind window right after a container start
 // (the picker simply never appeared until a turn completed). These retry a
-// few times over the first ~8s, then stop and fall back to the existing
-// turn_end/reconnect re-fetch, the same as before.
-const PICKER_MAX_RETRIES = 4;
+// few times over the first ~12s, then stop and fall back to the existing
+// turn_end/reconnect re-fetch, the same as before. (The backend now also
+// fails the underlying config fetch fast via its own 10s timeout, so a hung
+// provider call can no longer hold providerListPromise pending forever —
+// these retries just paper over transient cold-start races.)
+const PICKER_MAX_RETRIES = 6;
 let modelsRetryCount = 0;
 let modesRetryCount = 0;
 let modelsRetryTimer = null;
@@ -1378,6 +1419,23 @@ function getOrCreate(id, role) {
     return msgs[id];
   }
 
+  if (role === 'thinking') {
+    // Reasoning/chain-of-thought — never markdown-parsed, never a copy
+    // button, and collapsed (or hidden) per settings.thinking. The header is
+    // the toggle: click to expand/collapse when in collapse mode.
+    wrap.innerHTML = `<div class="msg-label"><span class="msg-think-toggle">Thinking <span class="ts"></span></span></div>
+                      <div class="msg-body"></div>`;
+    wrap.querySelector('.msg-think-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
+    feed.appendChild(wrap);
+    msgs[id] = {
+      el: wrap.querySelector('.msg-body'),
+      tsEl: wrap.querySelector('.ts'),
+      rawText: '', ts: null, role, revealTimer: null, permId: id, wrap,
+    };
+    applyThinkingVisibility(msgs[id]);
+    return msgs[id];
+  }
+
   wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
                     <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
                     ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
@@ -1399,7 +1457,28 @@ function getOrCreate(id, role) {
   return msgs[id];
 }
 
+function applyThinkingVisibility(entry) {
+  if (!entry || !entry.wrap || entry.role !== 'thinking') return;
+  entry.wrap.classList.toggle('hidden-thought', settings.thinking === 'hide');
+  if (settings.thinking === 'show') entry.wrap.classList.add('expanded');
+  else entry.wrap.classList.remove('expanded');
+}
+
+function applyThinkingMode() {
+  for (const id of feedOrder) {
+    const en = msgs[id];
+    if (en && en.role === 'thinking') applyThinkingVisibility(en);
+  }
+}
+
 function renderBody(entry) {
+  if (entry.role === 'thinking') {
+    // Plain text, never marked.parse() — reasoning is streamed verbatim and
+    // must keep its exact whitespace/line breaks through every delta.
+    entry.el.classList.remove('streaming');
+    entry.el.textContent = entry.rawText || '';
+    return;
+  }
   if (entry.role === 'agent') {
     entry.rawEl.textContent = entry.rawText || '';
     return;
@@ -1734,7 +1813,7 @@ function connect() {
     const entry = getOrCreate(id, role);
     entry.ts = ts;
     if (entry.tsEl) entry.tsEl.textContent = formatTs(ts);
-    if (role === 'user' || role === 'agent' || role === 'permission') {
+    if (role === 'user' || role === 'agent' || role === 'permission' || role === 'thinking') {
       entry.rawText = text;
       entry.el.classList.remove('streaming');
       renderBody(entry);
@@ -1750,7 +1829,7 @@ function connect() {
       // reveal again. Render it instantly instead of re-animating.
       entry.liveStreamed = false;
       entry.rawText = text;
-      entry.el.classList.remove('streaming');
+      entry.el.classList.remove('streaming', 'raw');
       renderBody(entry);
       scrollBottom();
     } else {
@@ -1780,6 +1859,16 @@ function connect() {
     if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen(); }
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
+      // In case a final 'message' for a live-streamed bubble was ever
+      // missed (reconnect gap, backend hiccup), never leave a bubble stuck
+      // with a blinking cursor past the end of its turn.
+      for (const id of feedOrder) {
+        const en = msgs[id];
+        if (en && en.el) {
+          en.el.classList.remove('streaming');
+          en.liveStreamed = false;
+        }
+      }
       // Cheap once resolved: loadModes()/loadModels() early-return
       // immediately if modesResolved/modelsResolved is already true, so
       // this is a real re-fetch only for the case it exists to cover — the
@@ -1804,19 +1893,34 @@ function connect() {
     // block just started — create its bubble now and mark it as
     // live-streamed so the eventual 'message' event finalizes instead of
     // re-revealing. Real content is here now, so the placeholder line goes
-    // away.
+    // away. Thinking bubbles get no blinking cursor (they're plain text and
+    // near-always collapsed anyway).
     if (s.type === 'stream_start') {
       const entry = getOrCreate(s.id, s.role);
       entry.liveStreamed = true;
-      entry.el.classList.add('streaming');
+      if (s.role !== 'thinking') entry.el.classList.add('streaming');
+      entry.el.classList.add('raw');
       setTurnIndicator(null);
     }
 
     if (s.type === 'stream_delta') {
       const entry = getOrCreate(s.id, s.role);
       entry.liveStreamed = true;
-      entry.rawText = s.text;
-      renderBody(entry);
+      const full = String(s.text || '');
+      const prev = entry.rawText || '';
+      if (full.startsWith(prev)) {
+        // Clean append — cheap O(1) DOM insert, no markdown re-parse of the
+        // whole bubble per token (the old renderBody(entry) here re-ran
+        // extractMath + marked.parse on every delta, re-flowing the entire
+        // bubble and making long streams visibly choppy).
+        entry.rawText = full;
+        const add = full.slice(prev.length);
+        if (add) entry.el.insertAdjacentText('beforeend', add);
+      } else {
+        // Not a clean append (backend reset / regenerated tail) — rebuild.
+        entry.rawText = full;
+        entry.el.textContent = full;
+      }
       scrollBottom();
     }
 
@@ -1938,7 +2042,7 @@ const SETTINGS_KEY = 'viewerSettings';
 const SETTINGS_DEFAULTS = {
   fontSize: 15, width: 860, labelFontSize: 11, statusFontSize: 12, theme: 'dark', showTools: true,
   autoScrollAnim: 'smooth',
-  tsFormat: 'time', hour24: false, showTz: false,
+  tsFormat:'time', hour24:false, showTz:false, thinking:'collapse',
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
 };
 
@@ -1970,6 +2074,7 @@ function applySettings() {
   ts24h.disabled = tsHidden;
   tsTz.disabled = tsHidden;
   refreshTimestamps();
+  applyThinkingMode();
 }
 
 const settings = loadSettings();
@@ -1985,6 +2090,7 @@ const statusVal      = document.getElementById('status-size-val');
 const themeToggle    = document.getElementById('theme-toggle');
 const toolsToggle    = document.getElementById('tools-toggle');
 const autoScrollAnimSelect = document.getElementById('autoscroll-anim');
+const thinkingModeSelect   = document.getElementById('thinking-mode');
 const sessionsLayoutSelect = document.getElementById('sessions-layout');
 const unreachableModeSelect = document.getElementById('unreachable-mode');
 const badgePositionSelect = document.getElementById('badge-position');
@@ -2008,6 +2114,7 @@ statusVal.textContent = settings.statusFontSize + 'px';
 themeToggle.checked = settings.theme === 'light';
 toolsToggle.checked = settings.showTools;
 autoScrollAnimSelect.value = settings.autoScrollAnim;
+thinkingModeSelect.value = settings.thinking;
 sessionsLayoutSelect.value = settings.sessionsLayout;
 unreachableModeSelect.value = settings.unreachableMode;
 badgePositionSelect.value = settings.badgePosition;
@@ -2082,6 +2189,12 @@ autoScrollAnimSelect.addEventListener('change', () => {
   settings.autoScrollAnim = autoScrollAnimSelect.value;
   applySettings();
   saveSettings();
+});
+
+thinkingModeSelect.addEventListener('change', () => {
+  settings.thinking = thinkingModeSelect.value;
+  saveSettings();
+  applyThinkingMode();
 });
 
 sessionsLayoutSelect.addEventListener('change', () => {

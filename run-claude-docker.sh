@@ -39,6 +39,54 @@ PROVIDER OPTIONS (mutually exclusive; --direct is the default):
                     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
                     DISABLE_TELEMETRY=1
 
+BACKEND OPTIONS (which coding agent actually runs; --backend claude-code is
+the default):
+
+  --backend BACKEND
+                  "claude-code" (default) or "opencode". Selects which coding
+                  agent's own interactive terminal UI is launched when
+                  --viewer is NOT given (claude-code's `claude`, or
+                  opencode's `opencode`, both plain pass-through binaries —
+                  see PASS-THROUGH ARGUMENTS below). Also supplies the
+                  default for --viewer-backend when --viewer IS given and
+                  --viewer-backend isn't passed explicitly, so
+                  `--backend opencode --viewer` just works without needing
+                  both flags. OpenCode manages its own provider/model
+                  credentials entirely separately from --direct/--direct-api
+                  above (see `opencode auth login`/its TUI's own /connect,
+                  or just use `--backend opencode`'s own TUI once — its
+                  first-run login flow persists to this host's own standard
+                  config/data directories, e.g. ~/.config/opencode/,
+                  independent of ~/.claude-docker/ — see PERSISTENT STATE
+                  below).
+
+                  --litellm IS meaningful with --backend opencode, though —
+                  LiteLLM's default wire protocol is OpenAI-compatible,
+                  which is a first-class, arguably simpler fit for OpenCode
+                  than for Claude Code (which needs the Anthropic-shaped env
+                  vars documented under --litellm above; OpenCode has no use
+                  for those). `--backend opencode --litellm` skips Claude
+                  Code's interactive model picker (nothing here would ever
+                  read its result) and instead passes LITELLM_URL/
+                  LITELLM_API_KEY into the container as plain env vars, for
+                  a custom provider block in opencode.jsonc to pick up via
+                  OpenCode's own {env:LITELLM_URL}/{env:LITELLM_API_KEY}
+                  config substitution:
+
+                    { "$schema": "https://opencode.ai/config.json",
+                      "provider": { "litellm": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": { "baseURL": "{env:LITELLM_URL}/v1",
+                                     "apiKey": "{env:LITELLM_API_KEY}" },
+                        "models": { "your-model-name": {} } } } }
+
+                  List what LiteLLM actually exposes first with
+                  --list-models. If {env:...} substitution for apiKey
+                  doesn't seem to take (a known rough edge in some OpenCode
+                  versions), store the key via the TUI's /connect flow under
+                  the same provider id instead and drop apiKey from the
+                  config entirely.
+
 UTILITY OPTIONS:
 
   --list-models   Print all models currently available on the LiteLLM instance
@@ -52,8 +100,15 @@ UTILITY OPTIONS:
                   (built on the Claude Agent SDK) so the browser drives
                   prompts directly — no terminal UI is attached at all.
                   Requires the viewer/ directory (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, package.json + installed
-                  node_modules) to be copied into ~/.claude-docker/viewer/ first.
+                  start-viewer.sh, driver.mjs, backends/, package.json +
+                  installed node_modules) to be copied into
+                  ~/.claude-docker/viewer/ first. Both the claude-code and
+                  opencode backends are always available to pick per-session
+                  from the browser's "+ New chat" picker regardless of
+                  --viewer-backend's default — this also starts a headless
+                  `opencode serve` instance inside the container for you (see
+                  --viewer-backend below), so nothing needs to be started by
+                  hand first.
 
   --viewer-port PORT
                   Port for the viewer server (browser page + SSE feed).
@@ -63,22 +118,52 @@ UTILITY OPTIONS:
                   Port for the bidirectional driver (accepts prompts/
                   permission responses from the browser). Default: 7844.
 
+  --viewer-backend BACKEND
+                  Which coding agent driver.mjs talks to by default:
+                  "claude-code" or "opencode". Only affects new sessions
+                  started with no explicit backend of their own; existing
+                  sessions always keep whichever backend created them, and a
+                  session can also request either backend explicitly (the
+                  browser's "+ New chat" picker does this). Defaults to
+                  whatever --backend is set to. --viewer itself already
+                  starts `opencode serve` inside the container, so this needs
+                  no separate setup either way.
+
+  --opencode-port PORT
+                  Loopback-only port `opencode serve` listens on inside the
+                  container, and that driver.mjs's opencode backend connects
+                  to. Never published to the host (driver.mjs and
+                  `opencode serve` talk to each other inside the container's
+                  own network namespace) — only worth changing if something
+                  else inside the image ever collides with the default.
+                  Default: 7845.
+
   --help, -h      Show this message and exit.
 
 PASS-THROUGH ARGUMENTS:
 
-  Any option not listed above is passed directly to the `claude` binary inside
-  the container. This includes Claude Code's own flags, for example:
+  Any option not listed above is passed directly to whichever binary
+  --backend selects (`claude` by default, or `opencode` with
+  --backend opencode) — only meaningful when --viewer is NOT given, since
+  --viewer never execs either binary directly. For --backend claude-code,
+  this includes Claude Code's own flags, for example:
 
     --dangerously-skip-permissions   Disable Claude Code's permission prompts.
                                      Only use this against repos you trust fully.
     --print "some prompt"            Run non-interactively and print output.
     --agent AGENT_NAME               Launch a specific subagent at startup.
 
+  For --backend opencode, these are opencode's own flags instead (see
+  `opencode --help`), for example:
+
+    --continue                       Continue the last session.
+    --model PROVIDER/MODEL           Use a specific model for this run.
+
   Pass-through args are forwarded after all recognised flags have been consumed,
   so you can freely mix them:
 
     ./run-claude-docker.sh --litellm --dangerously-skip-permissions
+    ./run-claude-docker.sh --backend opencode --continue
 
 ENVIRONMENT VARIABLES:
 
@@ -97,7 +182,20 @@ PERSISTENT STATE:
 
   ~/.claude-docker/ is bind-mounted into the container as /home/claude/.claude.
   This directory holds your Claude Code OAuth credentials, settings.json,
-  session history, and per-project trust decisions. It persists across container
+  session history, and per-project trust decisions.
+
+  OpenCode gets its own separate, standard set of mounts instead of being
+  nested inside ~/.claude-docker/ — each of the host's own
+  ~/.config/opencode/, ~/.local/share/opencode/, ~/.local/state/opencode/,
+  and ~/.cache/opencode/ is bind-mounted straight onto the identical default
+  path inside the container (no XDG_*_HOME redirection needed — that's
+  already where a plain `opencode` looks; see `opencode debug paths`). A
+  login done via `--backend opencode`'s TUI is what --viewer's headless
+  `opencode serve` then uses too, and vice versa, since both get the same
+  four mounts. These directories are created by Docker on first use if they
+  don't already exist on the host.
+
+  Whichever bucket state lands in, all of it persists across container
   restarts. Back it up if it matters to you.
 
 EXAMPLES:
@@ -122,6 +220,17 @@ EXAMPLES:
   ./run-claude-docker.sh --litellm --viewer
   ./run-claude-docker.sh --viewer --viewer-port 7900
 
+  # OpenCode's own terminal UI instead of Claude Code's
+  ./run-claude-docker.sh --backend opencode
+
+  # OpenCode against your LiteLLM instance (LITELLM_URL/LITELLM_API_KEY
+  # passed through for opencode.jsonc's own custom-provider config)
+  ./run-claude-docker.sh --backend opencode --litellm
+
+  # Viewer defaulting new chats to the OpenCode backend (either backend is
+  # still pickable per-session from the browser's "+ New chat" picker)
+  ./run-claude-docker.sh --viewer --backend opencode
+
   # Pass a flag through to claude
   ./run-claude-docker.sh --dangerously-skip-permissions
 USAGE
@@ -136,6 +245,15 @@ LITELLM_API_KEY="${LITELLM_API_KEY:-}"
 VIEWER_PORT=7843
 VIEWER_DRIVER_PORT=7844
 CONFIG_DIR="$HOME/.claude-docker"
+# OpenCode's own config/data/state/cache — real, standard host locations
+# (matching what a native, non-Docker opencode install already uses; see
+# `opencode debug paths`), not nested inside CONFIG_DIR. Kept separate so
+# OpenCode's state doesn't get bundled with Claude Code's, and so it can be
+# inspected/backed up on its own terms.
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+OPENCODE_DATA_DIR="$HOME/.local/share/opencode"
+OPENCODE_STATE_DIR="$HOME/.local/state/opencode"
+OPENCODE_CACHE_DIR="$HOME/.cache/opencode"
 # ------------------------------------------------------------------------
 
 # ── Port cleanup ──────────────────────────────────────────────────────────────
@@ -326,8 +444,22 @@ remove_stale_viewer_hooks() {
 
 remove_stale_viewer_hooks   # self-heal settings.json regardless of flags used this run
 
+validate_backend() {
+    # Shared by --backend and --viewer-backend — both name the same pair of
+    # coding-agent backends registered in driver.mjs.
+    local flag_name="$1" value="$2"
+    if [ "$value" != "claude-code" ] && [ "$value" != "opencode" ]; then
+        echo "Error: $flag_name must be \"claude-code\" or \"opencode\" (got \"$value\")." >&2
+        exit 1
+    fi
+}
+
 PROVIDER="direct"
+PROVIDER_EXPLICIT=0
+BACKEND="claude-code"
 VIEWER_ENABLED=0
+VIEWER_BACKEND=""   # empty = "not explicitly set"; resolved to $BACKEND below
+OPENCODE_PORT=7845
 CLAUDE_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -341,15 +473,23 @@ while [ $# -gt 0 ]; do
             ;;
         --direct)
             PROVIDER="direct"
+            PROVIDER_EXPLICIT=1
             shift
             ;;
         --direct-api)
             PROVIDER="direct-api"
+            PROVIDER_EXPLICIT=1
             shift
             ;;
         --litellm)
             PROVIDER="litellm"
+            PROVIDER_EXPLICIT=1
             shift
+            ;;
+        --backend)
+            BACKEND="$2"
+            validate_backend "--backend" "$BACKEND"
+            shift 2
             ;;
         --viewer)
             VIEWER_ENABLED=1
@@ -363,12 +503,52 @@ while [ $# -gt 0 ]; do
             VIEWER_DRIVER_PORT="$2"
             shift 2
             ;;
+        --viewer-backend)
+            VIEWER_BACKEND="$2"
+            validate_backend "--viewer-backend" "$VIEWER_BACKEND"
+            shift 2
+            ;;
+        --opencode-port)
+            OPENCODE_PORT="$2"
+            shift 2
+            ;;
         *)
             CLAUDE_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# --viewer-backend defaults to whatever --backend was set to, so a single
+# --backend opencode covers both "launch opencode's own TUI" (no --viewer)
+# and "default new viewer chats to opencode" (with --viewer) without having
+# to pass the same choice twice.
+VIEWER_BACKEND="${VIEWER_BACKEND:-$BACKEND}"
+
+# --direct-api only ever configures Claude Code's own credentials
+# (ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL below) — meaningless, not just
+# unused, for a plain `--backend opencode` TUI launch, which execs `opencode`
+# directly and never reads those env vars at all. Only checked when --viewer
+# is NOT set: with --viewer, a claude-code-backed session can still exist
+# alongside opencode ones and would legitimately use this config, since both
+# backends are always registered regardless of --viewer-backend's default.
+#
+# --litellm is deliberately NOT included here: LiteLLM is a perfectly good
+# (arguably easier, since it's plain OpenAI-compatible) backend for OpenCode
+# too — see the --litellm doc above and PERSISTENT STATE below for how to
+# point OpenCode's own config at it. It just doesn't go through Claude
+# Code's ANTHROPIC_* env vars to get there, so the interactive Claude-Code
+# model picker is skipped for a plain opencode launch (see below) and
+# LITELLM_URL/LITELLM_API_KEY are passed through as plain env vars instead,
+# for opencode.jsonc's own {env:...} substitution to use.
+if [ "$VIEWER_ENABLED" != 1 ] && [ "$BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
+   && [ "$PROVIDER" = "direct-api" ]; then
+    echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --backend opencode." >&2
+    echo "OpenCode manages its own provider auth — run './run-claude-docker.sh --backend opencode' and use its" >&2
+    echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
+    echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude-docker/." >&2
+    exit 1
+fi
 
 # Resolve provider-specific settings
 if [ "$PROVIDER" = "litellm" ]; then
@@ -388,12 +568,27 @@ if [ "$PROVIDER" = "litellm" ]; then
         echo "LiteLLM server OK (HTTP $status)."
     fi
 
-    pick_model   # always run the interactive picker for --litellm
+    if [ "$VIEWER_ENABLED" != 1 ] && [ "$BACKEND" = "opencode" ]; then
+        # Plain `--backend opencode --litellm`: opencode picks its own
+        # model via its own config (or its TUI's own /models, /connect),
+        # not Claude Code's ANTHROPIC_MODEL env var — so skip Claude Code's
+        # interactive model picker here, since a launch that never execs
+        # `claude` would never read its result anyway. (`--list-models` is
+        # still there if you just want to see what LiteLLM exposes before
+        # writing opencode.jsonc's model list.) LITELLM_URL/LITELLM_API_KEY
+        # still get passed through as plain env vars below either way.
+        EFFECTIVE_BASE_URL=""
+        EFFECTIVE_TOKEN=""
+        EFFECTIVE_MODEL=""
+        EFFECTIVE_SMALL_MODEL=""
+    else
+        pick_model   # always run the interactive picker when Claude Code will read the result
 
-    EFFECTIVE_BASE_URL="$LITELLM_URL"
-    EFFECTIVE_TOKEN="$LITELLM_API_KEY"
-    EFFECTIVE_MODEL="$LITELLM_MODEL"
-    EFFECTIVE_SMALL_MODEL="$LITELLM_SMALL_MODEL"
+        EFFECTIVE_BASE_URL="$LITELLM_URL"
+        EFFECTIVE_TOKEN="$LITELLM_API_KEY"
+        EFFECTIVE_MODEL="$LITELLM_MODEL"
+        EFFECTIVE_SMALL_MODEL="$LITELLM_SMALL_MODEL"
+    fi
 
 elif [ "$PROVIDER" = "direct-api" ]; then
     if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -446,25 +641,52 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     free_host_port "$VIEWER_DRIVER_PORT"
 
     # server.py is a plain broadcast relay; driver.mjs (Agent SDK-based) is
-    # what actually drives Claude and is what the browser will talk to once
-    # it has an input box. Both start inside the container.
+    # what actually drives either backend and is what the browser will talk
+    # to once it has an input box; start-viewer.sh also launches a headless
+    # `opencode serve` alongside them, loopback-only, so the opencode backend
+    # is always usable regardless of --viewer-backend's default. All three
+    # start inside the container.
     echo "Viewer: opening http://localhost:$VIEWER_PORT in your browser once it's up..."
     wait_and_open_viewer "$VIEWER_PORT" &
     VIEWER_OPEN_PID=$!
 fi
 
 # ── Interface (plain terminal) ────────────────────────────────────────────────
-# The base image inherits Node's entrypoint, so only `claude` (a Node script)
-# works as a bare command. Any other entrypoint needs --entrypoint to override it.
+# The base image's Node entrypoint execs any bare command that's actually on
+# PATH as-is (falls back to prefixing `node` only for things it can't find,
+# or scripts without +x) — `claude` and `opencode` both work as bare
+# commands unmodified. Only --viewer needs --entrypoint, since it launches a
+# custom script instead of a single binary.
 
-ENTRYPOINT_FLAG=()   # empty = use image default (Node, which runs claude fine)
+ENTRYPOINT_FLAG=()   # empty = use image default (Node, which runs claude/opencode fine)
 
 if [ "$VIEWER_ENABLED" = 1 ]; then
     ENTRYPOINT_FLAG=(--entrypoint /home/claude/.claude/viewer/start-viewer.sh)
     RUN_CMD=("${CLAUDE_ARGS[@]}")
+elif [ "$BACKEND" = "opencode" ]; then
+    RUN_CMD=(opencode "${CLAUDE_ARGS[@]}")
 else
-    # Plain claude — Node entrypoint handles this correctly, no override needed
     RUN_CMD=(claude "${CLAUDE_ARGS[@]}")
+fi
+
+# OpenCode's own credentials/config/sessions (see `opencode debug paths`)
+# persist by bind-mounting this host's own standard XDG directories
+# straight onto opencode's identical default paths inside the container —
+# no XDG_*_HOME override needed, since that's already where a plain
+# `opencode` looks. Populated whenever opencode might actually run in this
+# container: --viewer always starts a headless `opencode serve` regardless
+# of --backend's default (so both backends stay reachable per-session), and
+# a plain `--backend opencode` launch runs its TUI directly. A container
+# that's neither doesn't touch opencode at all, so skip the mounts rather
+# than exposing host directories it'll never use.
+OPENCODE_MOUNT_FLAGS=()
+if [ "$VIEWER_ENABLED" = 1 ] || [ "$BACKEND" = "opencode" ]; then
+    OPENCODE_MOUNT_FLAGS+=(
+        -v "${OPENCODE_CONFIG_DIR}:/home/claude/.config/opencode:z"
+        -v "${OPENCODE_DATA_DIR}:/home/claude/.local/share/opencode:z"
+        -v "${OPENCODE_STATE_DIR}:/home/claude/.local/state/opencode:z"
+        -v "${OPENCODE_CACHE_DIR}:/home/claude/.cache/opencode:z"
+    )
 fi
 
 # Build the litellm-specific env flags separately for clarity.
@@ -473,8 +695,13 @@ fi
 # CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS prevents beta headers that some
 # LiteLLM versions reject with HTTP 400.
 # DISABLE_TELEMETRY stops telemetry pings to Anthropic's servers.
+# These ANTHROPIC_* vars are Claude-Code-specific and only make sense when
+# EFFECTIVE_BASE_URL/EFFECTIVE_TOKEN are actually set — which the block
+# above deliberately leaves empty for a plain `--backend opencode --litellm`
+# launch, so none of this is emitted into a container that never execs
+# `claude` at all.
 LITELLM_ENV_FLAGS=()
-if [ "$PROVIDER" = "litellm" ]; then
+if [ "$PROVIDER" = "litellm" ] && [ -n "$EFFECTIVE_TOKEN" ]; then
     LITELLM_ENV_FLAGS+=(
         -e ANTHROPIC_BASE_URL="$EFFECTIVE_BASE_URL"
         -e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"
@@ -493,6 +720,22 @@ if [ "$PROVIDER" = "litellm" ]; then
     fi
 fi
 
+# Plain (non-ANTHROPIC_*) LITELLM_URL/LITELLM_API_KEY, passed through
+# whenever --litellm is used regardless of backend, so a hand-written
+# opencode.jsonc custom provider can reference them via OpenCode's own
+# {env:LITELLM_URL}/{env:LITELLM_API_KEY} config substitution instead of
+# hardcoding the key into a file. (That substitution has had reliability
+# issues for some custom-provider fields in some OpenCode versions — if it
+# doesn't seem to take, store the key via the TUI's /connect flow instead
+# and drop apiKey from opencode.jsonc entirely; see --backend doc above.)
+OPENCODE_LITELLM_ENV_FLAGS=()
+if [ "$PROVIDER" = "litellm" ]; then
+    OPENCODE_LITELLM_ENV_FLAGS+=(
+        -e LITELLM_URL="$LITELLM_URL"
+        -e LITELLM_API_KEY="$LITELLM_API_KEY"
+    )
+fi
+
 docker run -it --rm \
   --name claude-sandbox \
   --platform linux/amd64 \
@@ -504,13 +747,17 @@ docker run -it --rm \
   -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
   -e VIEWER_PORT="$VIEWER_PORT" \
   -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
+  -e VIEWER_BACKEND="$VIEWER_BACKEND" \
+  -e OPENCODE_PORT="$OPENCODE_PORT" \
   -e HOST_WORKSPACE_PATH="$(pwd)" \
   ${EFFECTIVE_TOKEN:+-e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"} \
   ${EFFECTIVE_MODEL:+-e ANTHROPIC_MODEL="$EFFECTIVE_MODEL"} \
   "${LITELLM_ENV_FLAGS[@]}" \
+  "${OPENCODE_LITELLM_ENV_FLAGS[@]}" \
   "${VIEWER_PORT_FLAGS[@]}" \
   -v "$(pwd):/workspace:z" \
   --workdir /workspace \
   -v "${CONNECT_CONFIG}" \
+  "${OPENCODE_MOUNT_FLAGS[@]}" \
   claude-sandbox \
   "${RUN_CMD[@]}"

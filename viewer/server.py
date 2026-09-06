@@ -233,6 +233,22 @@ class Handler(BaseHTTPRequestHandler):
                 log_snapshot = list(s["log"])
 
             try:
+                # Browsers' EventSource doesn't fire 'open' on response
+                # headers alone — in practice it waits for the first actual
+                # body byte. A brand-new session (e.g. just minted client-side
+                # for "New chat") has an empty log_snapshot below, so without
+                # this, nothing would be written at all until either a real
+                # message arrives or the idle-ping timeout below first fires
+                # — up to 15s during which the browser's 'open' handler (and
+                # everything gated behind it, like the turn-in-flight resync)
+                # never runs. Confirmed via a HAR capture: an empty session's
+                # /events response was 0 bytes until the 15s ping. Sending
+                # this unconditionally, before the history replay, means
+                # there's always at least one byte on the wire immediately
+                # regardless of whether this session has any history yet.
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+
                 # Replay this session's history for late-joining/reconnecting
                 # tabs, or for a tab switching to view this session for the
                 # first time in this browser session.

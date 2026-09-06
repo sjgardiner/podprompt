@@ -60,14 +60,58 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   let modelListCache = []; // [{id, label}]
   let configDefaultModelId = null; // composite "providerID/modelID" of the configured default, if resolvable
 
+  // ── Per-session "which model did this session actually use" ─────────────
+  // listModels(sessionId) derives the picker's pre-selected value from the
+  // session's own message history (the last assistant entry's
+  // info.providerID/info.modelID, composed into the same "providerID/modelID"
+  // string the rest of this file uses), rather than always pre-selecting the
+  // server-wide configured default. opencode retores a session's context
+  // server-side, and /session/{id}/message (already fetched for
+  // getSessionHistory) carries the truth for free. Cached per session and
+  // dropped whenever that session completes a turn (only a real turn changes
+  // the answer), so repeated /models polls don't re-fetch history each time.
+  const derivedModelIdCache = new Map(); // input sessionId (client or real) -> "providerID/modelID" | null
+
+  // Last assistant entry backward until one carries both providerID/modelID —
+  // /session/{id}/message can lead with bookkeeping parts or other odd shapes,
+  // so scan rather than assume the final entry.
+  function lastAssistantModelId(rawMessages) {
+    for (let i = (rawMessages || []).length - 1; i >= 0; i--) {
+      const info = rawMessages[i]?.info;
+      if (info?.role !== "assistant") continue;
+      if (info.providerID && info.modelID) return `${info.providerID}/${info.modelID}`;
+    }
+    return null;
+  }
+
+  async function derivedModelIdForSession(sessionId) {
+    if (derivedModelIdCache.has(sessionId)) return derivedModelIdCache.get(sessionId);
+    let derived = null;
+    if (clientToReal.has(sessionId) || sessionId.startsWith("ses_")) {
+      const target = knownRealId(sessionId);
+      try {
+        const raw = await api(`/session/${target}/message`, { timeoutMs: 15000 });
+        derived = lastAssistantModelId(raw || []);
+      } catch (e) {
+        // Session unreachable / no history — no derivation possible; fall back
+        // to the server default so the picker still has a sane pre-selection.
+        console.error(`[opencode] failed to derive model for session ${sessionId}:`, e.message);
+      }
+    }
+    derivedModelIdCache.set(sessionId, derived);
+    return derived;
+  }
+
   // Returns a promise for a /config/providers fetch so listModels() can await
   // it. The listen loop is shared across callers (the cache of a successful
   // one wins; nobody double-fetches). Failure-safe two ways:
-  //   1) a transient error (e.g. this fires before `opencode serve`'s ~1s
-  //      cold start finishes accepting connections) is retried a couple of
-  //      times here with a short delay, so a single /models call — the
-  //      browser's very first one right after boot — still comes back with
-  //      real data instead of an empty cache, and
+  //   1) a transient error (e.g. this fires before a cold `opencode serve`
+  //      finishes opening its HTTP server — measured at ~4.1s to answer, and
+  //      /config/providers itself gated ~2.6-4s later by the litellm plugin's
+  //      live provider discovery; see the driver.mjs process-ownership block)
+  //      is retried a couple of times here with a short delay, so a single
+  //      /models call — the browser's very first one right after boot — still
+  //      comes back with real data instead of an empty cache, and
   //   2) only when every attempt fails (the server genuinely isn't up) is the
   //      promise dropped, letting the next listModels() call try from scratch
   //      — never leaving the cache wrongly "poisoned" for the container's life.
@@ -220,6 +264,21 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           }
         } catch (e) {
           console.error("[opencode] SSE stream ended unexpectedly, reconnecting:", e.message);
+          // Real gap closed: a turn in flight when the shared stream dies now
+          // gets an immediate signal instead of decaying into runTurn's slower
+          // 15s grace timeout with the browser sitting on a live typing
+          // cursor. Same shape of orphan-cleanup as driver.mjs's
+          // expirePendingApprovals — reject each registered waiter now (the
+          // reject was captured into the waiter entry by runTurn), let that
+          // turn's own try/catch broadcast a clear error promptly, then clear
+          // the map so runTurn's finally-block delete()s are harmless no-ops.
+          if (turnWaiters.size) {
+            const err = new Error("OpenCode SSE connection lost mid-turn; will reconnect");
+            for (const [, waiter] of turnWaiters) {
+              if (typeof waiter.reject === "function") waiter.reject(err);
+            }
+            turnWaiters.clear();
+          }
           sseReady = null;
           setTimeout(ensureSse, 1000);
         }
@@ -299,7 +358,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // real diff renderer for OpenCode's edit/write tools yet (state.metadata
   // doesn't carry the equivalent of Claude's old_string/new_string in the
   // same shape — worth revisiting once a real edit-tool part has been
-  // captured and inspected by hand).
+  // captured and inspected by hand). Text is full, never truncated — the
+  // viewer caps bubble display (scrollable 400px body) and lets the user
+  // hide/collapse tool bubbles entirely.
   function summarizeToolPart(part) {
     const state = part.state || {};
     const input = state.input || {};
@@ -312,7 +373,6 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       }
     }
     if (text === null) text = JSON.stringify(input);
-    if (text.length > 200) text = text.slice(0, 200) + "…";
     return `\`${part.tool}\` ${text}`;
   }
 
@@ -341,7 +401,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // stream_delta status update needs (mirrors the Claude backend's
     // stream_start/stream_delta shape so the browser's existing live-typing
     // rendering works unmodified for either backend).
-    const liveText = new Map(); // partID -> { text, started, type, sentMessage }
+    const liveText = new Map(); // partID -> { text, started, type, sentMessage, messageID }
 
     // opencode re-broadcasts the just-appended USER message as ordinary
     // "type: text" parts over /event (probe-confirmed: message.part.updated
@@ -359,6 +419,20 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const isThinkingPart = (type) => type === "reasoning" || type === "thinking";
     const roleForPartType = (type) => (isThinkingPart(type) ? "thinking" : "assistant");
 
+    // Broadcast a part's accumulated text as its authoritative, final
+    // message. The browser treats a broadcast under a part id it saw stream
+    // (stream_start/stream_delta) as the finalize signal: it drops the
+    // blinking cursor and swaps to the real markdown render. Idempotent via
+    // sentMessage so the three completion paths (terminal part.state.status,
+    // message.updated.time.completed, and the end-of-turn sweep in runTurn)
+    // can all fire against the same part without duplicating the broadcast.
+    function finalizeEntry(entry, partId) {
+      if (!entry?.started) return;
+      if (!entry.text || entry.sentMessage) return;
+      entry.sentMessage = true;
+      broadcast(sessionId, roleForPartType(entry.type), entry.text, partId);
+    }
+
     const pendingApprovalPromises = [];
 
     function onEvent(evt) {
@@ -369,6 +443,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         const entry = liveText.get(part.id) || { text: "", started: false, type: part.type };
         entry.type = part.type; // needed later by the part.delta path to pick the broadcast role
         entry.text = part.text || entry.text;
+        entry.messageID = part.messageID;
         liveText.set(part.id, entry);
 
         if (part.type === "reasoning" || part.type === "thinking") {
@@ -378,8 +453,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           // (or a reasoning frontend delivers the whole thing at once), this
           // is what surfaces it as a thinking bubble. Deltas keep streaming
           // into the same bubble afterwards (same part.id); the final
-          // authoritative text is re-broadcast when the turn ends.
+          // authoritative text is re-broadcast when the part completes (see
+          // finalizeEntry right below) or the turn ends.
           if (entry.text) broadcast(sessionId, "thinking", entry.text, part.id);
+          if (part.state?.status === "completed" || part.state?.status === "error") finalizeEntry(entry, part.id);
           return;
         }
         if (part.type === "text") {
@@ -397,7 +474,17 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             entry.started = true;
             entry.sentMessage = true;
             broadcast(sessionId, "assistant", entry.text, part.id);
+            return;
           }
+          // Per-part completion: a part whose deltas have all streamed now
+          // carries a terminal state. This is the opencode analogue of
+          // Claude Code's content_block_stop → message broadcast — it lets
+          // the browser drop an assistant bubble's blinking cursor and swap
+          // in the authoritative markdown render the moment THIS part
+          // finishes, not when the whole (possibly multi-message, tool-
+          // interleaved) turn ends. Without it every finished bubble keeps
+          // its cursor until turn_end.
+          if (part.state?.status === "completed" || part.state?.status === "error") finalizeEntry(entry, part.id);
           return;
         }
         if (part.type === "tool") {
@@ -478,6 +565,17 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             if (typeof s?.cost === "number") broadcastStatus(sessionId, { type: "spend", totalCostUsd: s.cost });
           }).catch(() => {});
         }
+        // Per-message completion: the terminal message.updated for an
+        // assistant message carries time.completed. In a tool-interleaved
+        // turn each assistant message completes in turn, so this finalizes
+        // exactly that message's parts the moment they're done — same
+        // effect as the terminal part.state.status path above, reached by a
+        // different signal for robustness. Idempotent via sentMessage.
+        if (info.role === "assistant" && info.id && info.time?.completed) {
+          for (const [partId, entry] of liveText) {
+            if (entry.messageID === info.id) finalizeEntry(entry, partId);
+          }
+        }
         return;
       }
 
@@ -531,6 +629,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         },
         onPermission,
         onQuestion,
+        // Held so ensureSse() can reject every in-flight turn the instant the
+        // shared stream dies (see the catch in ensureSse) — otherwise a turn
+        // whose connection vanished has no signal until runTurn's slower 15s
+        // grace timeout below, and the browser sits on a live typing cursor
+        // pretending nothing happened.
+        reject,
       });
     });
 
@@ -567,7 +671,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // Finalize every still-streaming bubble: opencode broadcasts no
       // terminal "message" of its own, so without this the browser's live
       // typing cursor would keep blinking forever on each bubble after the
-      // turn ended. Broadcast the authoritative full text under the correct
+      // turn ended. Most parts are now finalized earlier (per-part on
+      // terminal state, per-message on completion — see finalizeEntry), so
+      // this sweep is a backstop for any part whose completion signal was
+      // missed. Broadcast the authoritative full text under the correct
       // role (a "thinking" one for reasoning/thinking parts, "assistant"
       // otherwise) under the SAME part.id — the browser treats a broadcast
       // for an already-streaming part as the finalize signal (drops the
@@ -587,6 +694,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID());
     } finally {
       turnWaiters.delete(realId);
+      // A completed turn may have run on a different model (state.model) than
+      // the session's last one — drop the cached derivation so the next
+      // listModels() re-reads the new final assistant message.
+      derivedModelIdCache.delete(sessionId);
       state.turnInFlight = false;
       broadcastStatus(sessionId, { type: "turn_end" });
     }
@@ -600,7 +711,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     try {
       await api(`/permission/${requestID}/reply`, {
         method: "POST",
-        body: JSON.stringify({ answer: decision?.allow ? "once" : "reject" }),
+        body: JSON.stringify({ reply: decision?.allow ? "once" : "reject" }),
         timeoutMs: 5000,
       });
     } catch (e) {
@@ -661,6 +772,18 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           const text = extractTextFromParts(parts, "text");
           if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null });
         } else if (info.role === "assistant") {
+          // Reasoning/thinking parts first (each its own bubble, matching the
+          // live stream's broadcasts keyed by part.id). This is what keeps
+          // thinking bubbles across a server.py/container restart: the
+          // browser's in-memory log is wiped on restart and re-seeded from
+          // this conversion, so dropping them here was why reasoning only
+          // ever appeared live and vanished after a bounce.
+          let thinkIdx = 0;
+          for (const p of parts) {
+            if ((p?.type === "reasoning" || p?.type === "thinking") && p?.text) {
+              out.push({ role: "thinking", text: p.text, id: p?.id || `${info.id}-thinking-${thinkIdx++}`, ts: info.time?.created || null });
+            }
+          }
           const text = extractTextFromParts(parts, "text");
           if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null });
           for (const p of parts) {
@@ -871,14 +994,15 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           agentListCache = await api("/agent", { timeoutMs: 5000 });
         } catch (e) {
           console.error("[opencode] failed to fetch /agent (mode list):", e.message);
-          // opencode `serve` can take ~1s to start accepting connections after
-          // the container boots (start-viewer.sh launches it and the driver at
-          // the same time), so the browser's very first /modes call races that
-          // window. Return an empty list rather than rethrow: driver.mjs's
-          // /modes route has no try/catch of its own, and an unhandled
-          // rejection there kills the whole driver process, taking the viewer
-          // down with it. The empty list also leaves viewer.html's modesResolved
-          // false so it re-fetches on the next connect/turn_end status event.
+          // A cold `opencode serve` takes ~4.1s before its HTTP server even
+          // answers (driver.mjs now spawns and supervises it itself — see the
+          // process-ownership block there), so the browser's very first /modes
+          // call races that window. Return an empty list rather than rethrow:
+          // driver.mjs's /modes route has no try/catch of its own, and an
+          // unhandled rejection there kills the whole driver process, taking
+          // the viewer down with it. The empty list also leaves viewer.html's
+          // modesResolved false so it re-fetches on the next connect/turn_end
+          // status event.
           return { available: [] };
         }
       }
@@ -919,17 +1043,23 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // (see the `model` field built in runTurn above), so setModel is a
     // no-op; driver.mjs's own state.model (set right after this resolves)
     // is what runTurn actually reads on the next message it sends.
-    async listModels() {
+    async listModels(sessionId) {
       // Await the in-flight fetch (with its bounded cold-start retries) so the
       // very first /models call — not just a later one — returns real data.
       // On a server that's genuinely down this resolves empty after the retries
       // exhaust and resets, so the next call tries again from scratch.
       await fetchProviderListInBackground();
-      // `current` pre-selects the server's configured default (from
-      // /config/providers' `default` map) so the picker reflects what the
-      // next message would actually use; driver.mjs overrides this with
+      // `current` used to unconditionally pre-select the server's configured
+      // default. Now it prefers this session's own last-used model (derived
+      // from /session/{id}/message's final assistant entry — see the comment
+      // block by derivedModelIdCache) and only falls back to the configured
+      // default when nothing session-specific can be derived (new session, no
+      // history yet, or an unreachable one). driver.mjs overrides this with
       // state.model once the user has made an explicit choice this run.
-      return { current: configDefaultModelId, available: modelListCache };
+      const derived = sessionId ? await derivedModelIdForSession(sessionId) : null;
+      const current = derived || configDefaultModelId || null;
+      const currentConfirmed = !!current && modelListCache.some((m) => m.id === current);
+      return { available: modelListCache, current, currentConfirmed };
     },
 
     async setModel() {},

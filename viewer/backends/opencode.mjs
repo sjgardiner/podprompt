@@ -58,6 +58,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   let providerListFetchStarted = false;
   const modelContextLimits = new Map(); // "providerID/modelID" -> context window size
   let modelListCache = []; // [{id, label}]
+  let configDefaultModelId = null; // composite "providerID/modelID" of the configured default, if resolvable
 
   function fetchProviderListInBackground() {
     if (providerListFetchStarted) return;
@@ -66,7 +67,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       try {
         const data = await api("/config/providers");
         const available = [];
+        let providerIds = new Set();
         for (const p of data?.providers || []) {
+          providerIds.add(p.id);
           for (const [modelKey, info] of Object.entries(p.models || {})) {
             const id = `${p.id}/${modelKey}`;
             if (info?.limit?.context) modelContextLimits.set(id, info.limit.context);
@@ -74,6 +77,18 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           }
         }
         modelListCache = available;
+        // /config/providers also reports the server's configured default as
+        // {providerID: modelID} (or {agentName: ...} in some setups). Pick the
+        // entry whose key names a real provider so /models can pre-select it.
+        configDefaultModelId = null;
+        for (const [key, value] of Object.entries(data?.default || {})) {
+          const composite = String(value).includes("/") ? String(value) : `${key}/${value}`;
+          const [pId, mId] = composite.split("/");
+          if (pId && mId && (providerIds.has(pId) || !providerIds.size)) {
+            configDefaultModelId = composite;
+            break;
+          }
+        }
       } catch (e) {
         console.error("[opencode] failed to fetch /config/providers:", e.message);
         // Don't let a transient failure (e.g. this fires before `opencode
@@ -641,6 +656,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           const clientId = realToClient.get(s.id) || s.id;
           return {
             sessionId: clientId,
+            backend: "opencode",
             summary: s.title,
             customTitle: s.title,
             firstPrompt: s.title,
@@ -652,6 +668,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             inFlight: !!sessionsIndex.get(clientId)?.turnInFlight,
             pendingKind: pendingKindForSession(clientId),
             archived: !!s.time?.archived,
+            // viewer.html's sessions panel filters the "Archived" tab on the
+            // Claude-SDK-style `tag` field; OpenCode's archive flag lives in
+            // time.archived, so translate it (alongside `archived`, which
+            // nothing else reads but is kept for symmetry with claude-code).
+            tag: s.time?.archived ? "archived" : null,
           };
         });
       return { sessions: list, unreachableCount: 0, unreachableSessions: includeUnreachable ? [] : undefined };
@@ -675,10 +696,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     },
 
     async unarchiveSession(sessionId) {
-      // OpenCode has no documented "un-set" for time.archived beyond
-      // omitting it — passing archived: 0 is the best available signal
-      // until this is verified against a real archived session (not yet
-      // exercised live).
+      // Verified against 1.18.29: a PATCH with {time:{archived:0}} persists,
+      // and the archived=0 round-trip is falsy for the viewer (!!0 === false),
+      // so an unarchived session renders and stays unarchived.
       await api(`/session/${knownRealId(sessionId)}`, {
         method: "PATCH",
         body: JSON.stringify({ time: { archived: 0 } }),
@@ -725,10 +745,22 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     },
 
     async setMode(sessionId, mode) {
-      await api(`/api/session/${knownRealId(sessionId)}/agent`, {
-        method: "POST",
-        body: JSON.stringify({ agent: mode }),
-      });
+      // Best-effort by design: driver.mjs records state.mode (which runTurn
+      // actually honors via the per-message `agent` field) regardless of how
+      // this resolves, and driver.mjs callers pass a client-minted id with no
+      // knownRealId mapping for brand-new sessions — so this throws (404) on
+      // exactly the calls where swallowing it is correct. Must never throw
+      // out to driver.mjs, or a pre-session set-mode would fail the request.
+      try {
+        await api(`/api/session/${knownRealId(sessionId)}/agent`, {
+          method: "POST",
+          body: JSON.stringify({ agent: mode }),
+        });
+      } catch (e) {
+        if (process.env.OPENCODE_DEBUG) {
+          console.error("[opencode] setMode best-effort call failed:", e.message);
+        }
+      }
     },
 
     // ── Model switching across every configured provider ──────────────────
@@ -740,7 +772,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // is what runTurn actually reads on the next message it sends.
     listModels() {
       fetchProviderListInBackground();
-      return { available: modelListCache };
+      // `current` pre-selects the server's configured default (from
+      // /config/providers' `default` map) so the picker reflects what the
+      // next message would actually use; driver.mjs overrides this with
+      // state.model once the user has made an explicit choice this run.
+      return { current: configDefaultModelId, available: modelListCache };
     },
 
     async setModel() {},

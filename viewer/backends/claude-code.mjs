@@ -837,6 +837,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           const list = await listSessions({ dir: cwd, limit: 50 });
           return list.map((s) => ({
             ...s,
+            backend: "claude-code",
             cwd,
             projectLabel: projectLabelFor(cwd),
             unreachable: false,
@@ -865,6 +866,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             const sessionId = file.slice(0, -".jsonl".length);
             unreachableSessions.push({
               sessionId,
+              backend: "claude-code",
               cwd,
               projectLabel: projectLabelFor(cwd),
               unreachable: true,

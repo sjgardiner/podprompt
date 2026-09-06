@@ -134,14 +134,20 @@ def _emit(session_id: str, event: str, entry: dict):
     broadcast_to(session_id, event, json.dumps(entry))
 
 
-def _fetch_session_history(session_id: str) -> list:
+def _fetch_session_history(session_id: str, backend: str | None = None) -> list:
     """Ask driver.mjs to convert this session's persisted transcript into
     our {role, text, id, ts} shape. A couple of quick retries guard against
     the narrow startup race where a browser tab connects before driver.mjs
     has finished binding its port (server.py is started first by
     start-viewer.sh) — not against any steady-state failure, which just
-    falls back to an empty history (same as a brand-new session)."""
+    falls back to an empty history (same as a brand-new session). The
+    optional backend is the one the viewing tab learned for this session
+    (its /sessions `backend` marker); relayed so a session this driver run
+    hasn't touched yet still gets its history from the backend that owns it
+    rather than the CLI default."""
     url = f"http://127.0.0.1:{DRIVER_PORT}/session-history?sessionId={urllib.parse.quote(session_id)}"
+    if backend:
+        url += f"&backend={urllib.parse.quote(backend)}"
     for attempt in range(3):
         try:
             with urllib.request.urlopen(url, timeout=15) as resp:
@@ -152,7 +158,7 @@ def _fetch_session_history(session_id: str) -> list:
     return []
 
 
-def _ensure_seeded(session_id: str):
+def _ensure_seeded(session_id: str, backend: str | None = None):
     # Claims the "seeded" flag BEFORE the network call (under the lock) so
     # concurrent connects for the same session don't both fetch; the actual
     # fetch and log-splice happen outside the lock so a slow driver call
@@ -163,7 +169,7 @@ def _ensure_seeded(session_id: str):
             return
         s["seeded"] = True
 
-    history = _fetch_session_history(session_id)
+    history = _fetch_session_history(session_id, backend)
     entries = []
     for h in history:
         role = h.get("role", "assistant")
@@ -198,6 +204,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
         session_id = (qs.get("session") or [None])[0]
+        backend = (qs.get("backend") or [None])[0]
 
         if path == "/":
             # This page changes across deploys of a locally-edited file, not
@@ -218,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            _ensure_seeded(session_id)
+            _ensure_seeded(session_id, backend)
             s = _get_session(session_id)
 
             self.send_response(200)

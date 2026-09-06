@@ -223,7 +223,32 @@ def _ensure_seeded(session_id: str, backend: str | None = None):
         # that could have arrived live while this fetch was in flight.
         s["log"] = entries + s["log"]
         s["seeding"] = False
-        s["seeded"] = True
+        # An empty result fetched WITHOUT an explicit backend (backend is
+        # None — this connect's caller couldn't resolve it, e.g. the
+        # viewer's very first connect after a page load before it's learned
+        # this session's real backend tag) is indistinguishable from "asked
+        # the wrong backend, got a clean empty answer": both
+        # backends/opencode.mjs's and backends/claude-code.mjs's
+        # getSessionHistory return [] rather than erroring on a foreign id,
+        # since a genuinely brand-new, never-prompted session looks
+        # identical to a misrouted one from the backend's own point of view
+        # (so this can't be fixed by making the backends pickier — a real
+        # attempt at that regressed every brand-new session's first view,
+        # since an unmapped client-minted id is normal and expected then,
+        # not just possible under a mismatch). Permanently latching
+        # `seeded=True` on an unlabeled empty guess is exactly the bug that
+        # used to blank a real session's history forever, until a full
+        # server.py restart (which wipes this whole in-memory dict) gave it
+        # another shot. Only commit to "seeded" unconditionally once a real
+        # backend was actually known, or once real content came back (which
+        # can't be a false negative regardless of which backend answered) —
+        # an inconclusive empty guess still populates *this* connect's log
+        # (so the current tab isn't left waiting on nothing) but stays
+        # eligible for a retry on the next connect, hopefully by then armed
+        # with the real backend (see viewer.html's boot sequence, which now
+        # resolves it before the first connect in the common case).
+        if entries or backend:
+            s["seeded"] = True
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────

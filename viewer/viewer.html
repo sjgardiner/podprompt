@@ -1375,22 +1375,31 @@ const autoApproveToggle = document.getElementById('auto-approve-toggle');
 let modelsResolved = false;
 let modesResolved = false;
 
-// Bounded auto-retry for the empty-available case above. Retrying solely on
-// turn_end (es.onopen can also miss it, see loadDriverConfig) left the picks
-// hidden forever whenever the very first answer was empty AND the user
-// hadn't sent a prompt yet — e.g. the opencode backend's /config/providers
-// fetch racing `opencode serve`'s bind window right after a container start
-// (the picker simply never appeared until a turn completed). These retry a
-// few times over the first ~12s, then stop and fall back to the existing
-// turn_end/reconnect re-fetch, the same as before. (The backend now also
-// fails the underlying config fetch fast via its own 10s timeout, so a hung
-// provider call can no longer hold providerListPromise pending forever —
-// these retries just paper over transient cold-start races.)
-const PICKER_MAX_RETRIES = 6;
+// Open-ended, capped-backoff auto-retry for the empty-available/unavailable/
+// unreachable cases below. Retrying solely on turn_end (es.onopen can also
+// miss it, see loadDriverConfig) left the picker hidden forever whenever the
+// very first answer wasn't resolved AND the user hadn't sent a prompt yet —
+// e.g. the opencode backend's /config/providers fetch racing `opencode
+// serve`'s bind window right after a container start (the picker simply
+// never appeared until a turn completed). This used to give up permanently
+// after a fixed handful of attempts; it now keeps retrying, with growing
+// backoff, for as long as the session stays unresolved (bounded only by the
+// session actually being switched away from — resetBackendControlsDisplay()
+// clears these timers/counts on every switch) — a real ceiling now that
+// OpenCode's cold start or a crash-and-restart (see driver.mjs) can
+// genuinely take longer than any fixed budget accounted for, and the
+// "unavailable"/"unreachable" states below are explicitly meant to keep
+// waiting rather than dead-end.
+const PICKER_RETRY_BASE_MS = 2000;
+const PICKER_RETRY_CEILING_MS = 20000;
 let modelsRetryCount = 0;
 let modesRetryCount = 0;
 let modelsRetryTimer = null;
 let modesRetryTimer = null;
+
+function nextPickerRetryDelayMs(attempt) {
+  return Math.min(PICKER_RETRY_BASE_MS * 2 ** attempt, PICKER_RETRY_CEILING_MS);
+}
 
 // Monotonic fetch sequence counters + session-identity capture for
 // loadModels()/loadModes(), mirroring refreshSessionsList()'s sessionsFetchSeq
@@ -1404,13 +1413,13 @@ let modesFetchSeq = 0;
 
 function schedulePickerRetry(kind) {
   if (kind === 'models') {
-    if (modelsRetryTimer || modelsResolved || modelsRetryCount >= PICKER_MAX_RETRIES) return;
-    modelsRetryCount++;
-    modelsRetryTimer = setTimeout(() => { modelsRetryTimer = null; loadModels(); }, 2000);
+    if (modelsRetryTimer || modelsResolved) return;
+    const delay = nextPickerRetryDelayMs(modelsRetryCount++);
+    modelsRetryTimer = setTimeout(() => { modelsRetryTimer = null; loadModels(); }, delay);
   } else {
-    if (modesRetryTimer || modesResolved || modesRetryCount >= PICKER_MAX_RETRIES) return;
-    modesRetryCount++;
-    modesRetryTimer = setTimeout(() => { modesRetryTimer = null; loadModes(); }, 2000);
+    if (modesRetryTimer || modesResolved) return;
+    const delay = nextPickerRetryDelayMs(modesRetryCount++);
+    modesRetryTimer = setTimeout(() => { modesRetryTimer = null; loadModes(); }, delay);
   }
 }
 
@@ -1436,6 +1445,7 @@ function resetBackendControlsDisplay() {
   clearTimeout(modesRetryTimer); modesRetryTimer = null;
   modelsRetryCount = 0;
   modesRetryCount = 0;
+  setModelBlockReason(null);
   // Invalidate any in-flight loadModels()/loadModes() for the session we're
   // leaving, so a stale response can't apply itself to the next session.
   modelsFetchSeq++;
@@ -2281,9 +2291,25 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {})
 // "open in new tab" link and then hitting Back) — reuses the same switch
 // logic, just without pushing another history entry (the browser already
 // moved us to this URL).
-window.addEventListener('popstate', () => {
+// Same eager-backend-resolution treatment as the cold-page-load boot
+// sequence below (see its own comment): sessionBackends only gets populated
+// by refreshSessionsList(), which normally only runs when the sessions panel
+// has been opened. Back/forward can land on a session this tab never
+// touched via that panel (e.g. followed an "open in new tab" link, then hit
+// Back) — without this, viewSession()'s connect() would go out with no
+// &backend=, the same misdetection this fixes for the very first page load.
+// Bounded the same way: worse to wait 3s than hang, worse to hang than fall
+// back to today's occasionally-wrong unlabeled connect.
+window.addEventListener('popstate', async () => {
   const id = new URLSearchParams(location.search).get('session');
-  if (id) viewSession(id, { updateUrl: false });
+  if (!id) return;
+  if (!sessionBackends.has(id)) {
+    await Promise.race([
+      refreshSessionsList().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+  }
+  viewSession(id, { updateUrl: false });
 });
 
 // ── Settings panel ──────────────────────────────────────────────────────────
@@ -2608,9 +2634,37 @@ async function loadDriverConfig() {
   }
 }
 
+// A second, independent reason the textarea can be disabled, alongside
+// turnInFlight — reuses the exact same promptInput.disabled mechanism rather
+// than a parallel disablement path (see updatePromptDisabled()). Set by
+// loadModels() below: 'unavailable' means this session's actual model isn't
+// among the currently-confirmed options yet (still-loading provider, or a
+// genuinely removed/renamed model); 'unreachable' means the whole backend
+// process is down. Both are honest "this can't be sent right now" states,
+// not silent failures discovered only after the user hits send.
+const DEFAULT_PROMPT_PLACEHOLDER = promptInput.placeholder;
+let modelBlockReason = null; // null | 'unavailable' | 'unreachable'
+
+function updatePromptDisabled() {
+  promptInput.disabled = turnInFlight || !!modelBlockReason;
+  if (modelBlockReason === 'unavailable') {
+    promptInput.placeholder = 'Model unavailable — pick a different model, or wait for it to reconnect.';
+  } else if (modelBlockReason === 'unreachable') {
+    promptInput.placeholder = 'OpenCode server unreachable — reconnecting…';
+  } else {
+    promptInput.placeholder = DEFAULT_PROMPT_PLACEHOLDER;
+  }
+}
+
+function setModelBlockReason(reason) {
+  if (modelBlockReason === reason) return;
+  modelBlockReason = reason;
+  updatePromptDisabled();
+}
+
 function setTurnInFlight(inFlight) {
   turnInFlight = inFlight;
-  promptInput.disabled = inFlight;
+  updatePromptDisabled();
   sendBtn.classList.toggle('hide-for-stop', inFlight);
   stopBtn.classList.toggle('show', inFlight);
 }
@@ -2710,18 +2764,55 @@ async function loadModels() {
       modelsResolved = true;
       modelSelect.classList.remove('show');
       modelSelect.innerHTML = '';
+      setModelBlockReason(null);
+      return;
+    }
+    if (data.ok === false && data.reason === 'server_unreachable') {
+      // The whole backend process is down (e.g. OpenCode's serve child
+      // between a crash and driver.mjs's backoff-guarded restart) — distinct
+      // from "reachable, model cache just not populated yet" below: no
+      // models to offer at all, and every session on this backend is
+      // equally affected. Keep polling open-endedly rather than resolving
+      // permanently — this is expected to self-heal.
+      modelSelect.classList.remove('show');
+      modelSelect.innerHTML = '';
+      setModelBlockReason('unreachable');
+      schedulePickerRetry('models');
+      return;
+    }
+    if (data.current && !data.currentConfirmed) {
+      // This session's actual model (Item D's derived value, or an explicit
+      // state.model override) isn't among the currently-confirmed options —
+      // checked before the empty-`available` case below on purpose: this is
+      // exactly the case of a resumed session whose model is still waiting
+      // on OpenCode's slow litellm-sourced provider discovery, where
+      // `available` can easily still be empty. Show it as a disabled
+      // synthetic option rather than silently falling back to something
+      // else, block sending, and keep polling: either the user picks an
+      // already-confirmed model (see the change handler below, which clears
+      // this immediately) or the cache catches up and a later retry finds it
+      // confirmed.
+      const options = (data.available || []).map((m) =>
+        `<option value="${escapeHtml(m.id)}" title="${escapeHtml(m.description || '')}">${escapeHtml(m.label)}</option>`).join('');
+      modelSelect.innerHTML = `<option value="" disabled selected>⚠ ${escapeHtml(data.current)} (unavailable)</option>` + options;
+      modelSelect.classList.add('show');
+      setModelBlockReason('unavailable');
+      schedulePickerRetry('models');
       return;
     }
     if (!data.available || !data.available.length) {
       // Backend supports models but the shared cache isn't populated yet
       // (see the opencode backend's cold-start /config/providers fetch, and
       // backends/claude-code.mjs's knownModels — process-wide, filled in by
-      // the first turn anywhere to complete since the last restart). Leave
-      // modelsResolved false so the retries keep trying: an immediate
-      // bounded auto-retry, and the turn_end retry below for whatever the
-      // backend genuinely won't answer until a turn completes.
+      // the first turn anywhere to complete since the last restart), and
+      // this session has no specific model of its own to be blocked on
+      // (new session, no history yet). Leave modelsResolved false so the
+      // retries keep trying: an immediate open-ended auto-retry, and the
+      // turn_end retry below for whatever the backend genuinely won't
+      // answer until a turn completes.
       modelSelect.classList.remove('show');
       modelSelect.innerHTML = '';
+      setModelBlockReason(null);
       schedulePickerRetry('models');
       return;
     }
@@ -2730,6 +2821,7 @@ async function loadModels() {
     modelSelect.value = data.current || data.available[0].id;
     modelSelect.classList.add('show');
     modelsResolved = true;
+    setModelBlockReason(null);
   } catch (e) {
     console.error('Failed to load /models:', e);
   }
@@ -2737,6 +2829,12 @@ async function loadModels() {
 
 modelSelect.addEventListener('change', async () => {
   if (!driverBase) return;
+  // An explicit pick always overrides the derived value (see driver.mjs's
+  // /models route), so it's confirmed by construction — unblock immediately
+  // rather than waiting for the next loadModels() round-trip to notice.
+  // (The disabled "⚠ ... (unavailable)" placeholder option has value="", so
+  // this can only fire for a real, already-confirmed selection.)
+  if (modelSelect.value) setModelBlockReason(null);
   try {
     await fetch(`${driverBase}/set-model`, {
       method: 'POST',

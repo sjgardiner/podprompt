@@ -123,13 +123,13 @@ function enqueueSend(sessionId, doSend) {
   return next;
 }
 
-async function broadcast(sessionId, role, text, id, ts) {
+async function broadcast(sessionId, role, text, id, ts, model) {
   return enqueueSend(sessionId, async () => {
     try {
       await fetch(VIEWER_MESSAGE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, role, text, id, ts: ts || nowIso() }),
+        body: JSON.stringify({ sessionId, role, text, id, ts: ts || nowIso(), model }),
       });
     } catch (e) {
       console.error("[driver] failed to broadcast to viewer:", e.message);

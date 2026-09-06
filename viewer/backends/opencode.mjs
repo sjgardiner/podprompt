@@ -394,14 +394,16 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     broadcastStatus(sessionId, { type: "turn_start" });
 
     const userMsgUuid = randomUUID();
-    broadcast(sessionId, "user", promptText, userMsgUuid);
+    broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
 
     // partID -> accumulated text, so message.part.delta's incremental
     // {field, delta} patches can be re-broadcast as the running full text a
     // stream_delta status update needs (mirrors the Claude backend's
     // stream_start/stream_delta shape so the browser's existing live-typing
     // rendering works unmodified for either backend).
-    const liveText = new Map(); // partID -> { text, started, type, sentMessage, messageID }
+    const liveText = new Map(); // partID -> { text, started, type, sentMessage, messageID, model }
+    // Track per-assistant-message model from message.updated events
+    const messageModelByRealId = new Map(); // info.id -> "providerID/modelID" string
 
     // opencode re-broadcasts the just-appended USER message as ordinary
     // "type: text" parts over /event (probe-confirmed: message.part.updated
@@ -428,9 +430,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // can all fire against the same part without duplicating the broadcast.
     function finalizeEntry(entry, partId) {
       if (!entry?.started) return;
-      if (!entry.text || entry.sentMessage) return;
+      // Skip whitespace-only content to prevent empty MODEL bubbles
+      if (!entry.text.trim() || entry.sentMessage) return;
       entry.sentMessage = true;
-      broadcast(sessionId, roleForPartType(entry.type), entry.text, partId);
+      const model = entry.model || (entry.messageID ? messageModelByRealId.get(entry.messageID) : null);
+      broadcast(sessionId, roleForPartType(entry.type), entry.text, partId, null, model);
     }
 
     const pendingApprovalPromises = [];
@@ -455,7 +459,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           // into the same bubble afterwards (same part.id); the final
           // authoritative text is re-broadcast when the part completes (see
           // finalizeEntry right below) or the turn ends.
-          if (entry.text) broadcast(sessionId, "thinking", entry.text, part.id);
+          if (entry.text.trim()) broadcast(sessionId, "thinking", entry.text, part.id, null, entry.model);
           if (part.state?.status === "completed" || part.state?.status === "error") finalizeEntry(entry, part.id);
           return;
         }
@@ -471,9 +475,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             // response): surface it directly as the final message. Deltas
             // never fire for it, so started + sentMessage here keep the
             // turn-end finalization from re-broadcasting the same text.
-            entry.started = true;
-            entry.sentMessage = true;
-            broadcast(sessionId, "assistant", entry.text, part.id);
+            // Skip whitespace-only content to prevent empty MODEL bubbles
+            if (entry.text.trim()) {
+              entry.started = true;
+              entry.sentMessage = true;
+              broadcast(sessionId, "assistant", entry.text, part.id);
+            }
             return;
           }
           // Per-part completion: a part whose deltas have all streamed now
@@ -496,7 +503,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           if (status === "running") {
             broadcastStatus(sessionId, { type: "tool_progress", toolName: part.tool, output: part.state?.metadata?.output });
           } else if (status === "completed" || status === "error") {
-            broadcast(sessionId, "tool", summarizeToolPart(part), part.id);
+            const msgModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
+            broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
           }
           return;
         }
@@ -520,7 +528,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         // the model's whole chain-of-thought into a "Claude" bubble).
         if (!entry.started) {
           entry.started = true;
-          broadcastStatus(sessionId, { type: "stream_start", id: partID, role: roleForPartType(entry.type) });
+          // Record model for this message (from messageModelByRealId if available)
+          const model = entry.messageID ? messageModelByRealId.get(entry.messageID) : null;
+          if (model) entry.model = model;
+          broadcastStatus(sessionId, { type: "stream_start", id: partID, role: roleForPartType(entry.type), model: model || null });
         }
         broadcastStatus(sessionId, { type: "stream_delta", id: partID, role: roleForPartType(entry.type), text: entry.text });
         return;
@@ -564,6 +575,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           api(`/session/${realId}`, { timeoutMs: 8000 }).then((s) => {
             if (typeof s?.cost === "number") broadcastStatus(sessionId, { type: "spend", totalCostUsd: s.cost });
           }).catch(() => {});
+        }
+        // Track model for this message (providerID/modelID composite)
+        if (info.role === "assistant" && info.id && info.providerID && info.modelID) {
+          messageModelByRealId.set(info.id, `${info.providerID}/${info.modelID}`);
         }
         // Per-message completion: the terminal message.updated for an
         // assistant message carries time.completed. In a tool-interleaved
@@ -685,8 +700,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // before turn_end so the status-bar resync and the blockers see the
       // finished text arrive in order.
       for (const [partId, entry] of liveText) {
-        if (entry.started && entry.text && !entry.sentMessage) {
-          broadcast(sessionId, roleForPartType(entry.type), entry.text, partId);
+        if (entry.started && entry.text.trim() && !entry.sentMessage) {
+          const model = entry.model || (entry.messageID ? messageModelByRealId.get(entry.messageID) : null);
+          broadcast(sessionId, roleForPartType(entry.type), entry.text, partId, null, model);
         }
       }
     } catch (e) {
@@ -785,8 +801,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         if (!info || typeof info !== "object" || !info.id) continue;
         if (info.role === "user") {
           const text = extractTextFromParts(parts, "text");
-          if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null });
+          if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null, model: null });
         } else if (info.role === "assistant") {
+          const msgModel = (info.providerID && info.modelID) ? `${info.providerID}/${info.modelID}` : null;
           // Reasoning/thinking parts first (each its own bubble, matching the
           // live stream's broadcasts keyed by part.id). This is what keeps
           // thinking bubbles across a server.py/container restart: the
@@ -796,18 +813,18 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           let thinkIdx = 0;
           for (const p of parts) {
             if ((p?.type === "reasoning" || p?.type === "thinking") && p?.text) {
-              out.push({ role: "thinking", text: p.text, id: p?.id || `${info.id}-thinking-${thinkIdx++}`, ts: info.time?.created || null });
+              out.push({ role: "thinking", text: p.text, id: p?.id || `${info.id}-thinking-${thinkIdx++}`, ts: info.time?.created || null, model: msgModel || null });
             }
           }
           const text = extractTextFromParts(parts, "text");
-          if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null });
+          if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null, model: msgModel || null });
           for (const p of parts) {
             if (p?.type === "tool" && (p?.state?.status === "completed" || p?.state?.status === "error")) {
               // Same timestamp source as its sibling assistant/thinking
               // bubbles — without it a tool bubble re-seeded from history
               // (post container restart) rendered with no timestamp while
               // every other role carried one.
-              out.push({ role: "tool", text: summarizeToolPart(p), id: p?.id || info.id, ts: info.time?.created || null });
+              out.push({ role: "tool", text: summarizeToolPart(p), id: p?.id || info.id, ts: info.time?.created || null, model: msgModel || null });
             }
           }
         }

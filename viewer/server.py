@@ -224,7 +224,7 @@ def _ensure_seeded(session_id: str, backend: str | None = None):
         text = h.get("text", h.get("content", ""))
         msg_id = h.get("id") or f"{role}-{uuid.uuid4()}"
         entries.append({"type": "message", "role": role, "text": text,
-                         "id": msg_id, "ts": h.get("ts")})
+                         "id": msg_id, "ts": h.get("ts"), "model": h.get("model")})
 
     with sessions_lock:
         # Prepend: historical entries always logically precede anything
@@ -443,7 +443,8 @@ class Handler(BaseHTTPRequestHandler):
             text = payload.get("content", payload.get("text", ""))
             msg_id = payload.get("id") or f"{role}-{uuid.uuid4()}"
             _emit(session_id, "message", {"type": "message", "role": role,
-                                           "text": text, "id": msg_id, "ts": payload.get("ts")})
+                                           "text": text, "id": msg_id, "ts": payload.get("ts"),
+                                           "model": payload.get("model")})
             # A permission/question card just appeared or got resolved (the
             # same role, rebroadcast with resolved:true) — either way, the
             # sessions-panel badge for this session may have just changed.

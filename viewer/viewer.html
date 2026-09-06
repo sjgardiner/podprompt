@@ -854,6 +854,17 @@
     color: var(--muted);
     opacity: .7;
   }
+  .msg-label .model {
+    font-size: .9em;
+    font-weight: 500;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--muted);
+    opacity: .8;
+    margin-left: 0px;
+    margin-right: 0px;
+  }
+  .msg-label .model:empty { display: none; }
   .msg-label .ts:empty { display: none; }
   .msg.user   .msg-label { color: var(--accent); }
   .msg.assistant .msg-label { color: var(--muted); }
@@ -862,6 +873,7 @@
   .msg.thinking .msg-label { color: var(--purple); }
   .msg.permission .msg-label { color: var(--accent); }
   .msg.permission .msg-body { border-color: var(--accent); }
+  .msg.hidden-empty { display: none; }
 
   /* thinking blocks: distinct from assistant text, subdued/italic like the
      TUI's collapsed thinking display. Content is plain text, streamed by
@@ -894,6 +906,7 @@
   .msg.thinking.expanded .msg-think-toggle::before { content: '▾ '; }
   .msg.thinking .msg-think-toggle:hover { text-decoration: underline; }
   .msg.thinking .msg-label .ts { margin-left: auto; }
+  .msg.thinking .msg-think-toggle .model { color: var(--muted); opacity: .8; margin-left: 0; margin-right: 0; }
 
   /* per-delta streaming: raw text appended into the bubble (no full
      markdown re-render per token — that re-flows the whole bubble every
@@ -975,6 +988,7 @@
   .msg.tool .msg-tool-toggle::before { content: '▸ '; }
   .msg.tool.expanded .msg-tool-toggle::before { content: '▾ '; }
   .msg.tool .msg-tool-toggle:hover { text-decoration: underline; }
+  .msg.tool .msg-tool-toggle .model { color: var(--muted); opacity: .8; margin-left: 0; margin-right: 0; }
   .msg.tool .msg-label .ts { margin-left: auto; }
   .msg.tool .msg-body p { margin: 0; } /* dead now marked.parse() no longer runs here; harmless if a stray <p> ever appears */
 
@@ -1174,6 +1188,22 @@
               <select id="autoscroll-anim">
                 <option value="smooth" selected>Smooth</option>
                 <option value="instant">Instant</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Sessions sort order</span>
+              <select id="sessions-sort">
+                <option value="created">Created time (default)</option>
+                <option value="lastModified">Last modified</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Show model name on</span>
+              <select id="show-model-on">
+                <option value="model-only" selected>MODEL bubbles only</option>
+                <option value="all-bubbles">All bubbles</option>
               </select>
             </label>
           </div>
@@ -1552,6 +1582,21 @@ function refreshTimestamps() {
   }
 }
 
+// Show model name on MODEL bubbles
+function refreshModelNames() {
+  for (const id of feedOrder) {
+    const entry = msgs[id];
+    if (entry && entry.modelEl) {
+      const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
+      if (show && entry.model) {
+        entry.modelEl.textContent = entry.model;
+      } else {
+        entry.modelEl.textContent = '';
+      }
+    }
+  }
+}
+
 // Countdown form of a reset timestamp — "in 3 hr 31 min", matching the
 // wording Claude Desktop uses for the same underlying data. Deliberately
 // not reusing formatTs's opts (12h/24h/tz only make sense for a clock-face
@@ -1619,7 +1664,7 @@ function getOrCreate(id, role) {
     // Async subagent reports are raw and often long — collapsed by default,
     // click to expand. Rendered as plain text, not markdown, since the
     // content is XML-ish tool output rather than prose.
-    wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
+    wrap.innerHTML = `<div class="msg-label">${labelFor(role)}<span class="model"></span><span class="ts"></span></div>
                       <div class="msg-body agent-body">
                         <div class="agent-summary">▸ agent report — click to expand</div>
                         <pre class="agent-raw"></pre>
@@ -1633,6 +1678,7 @@ function getOrCreate(id, role) {
       el: bodyEl,
       rawEl: bodyEl.querySelector('.agent-raw'),
       tsEl: wrap.querySelector('.ts'),
+      modelEl: wrap.querySelector('.model'),
       rawText: '', ts: null, role, revealTimer: null, permId: id,
     };
     return msgs[id];
@@ -1642,13 +1688,14 @@ function getOrCreate(id, role) {
     // Reasoning/chain-of-thought — never markdown-parsed, never a copy
     // button, and collapsed (or hidden) per settings.thinking. The header is
     // the toggle: click to expand/collapse when in collapse mode.
-    wrap.innerHTML = `<div class="msg-label"><span class="msg-think-toggle">Thinking <span class="ts"></span></span></div>
+    wrap.innerHTML = `<div class="msg-label"><span class="msg-think-toggle">Thinking <span class="model"></span><span class="ts"></span></span></div>
                       <div class="msg-body"></div>`;
     wrap.querySelector('.msg-think-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
     feed.appendChild(wrap);
     msgs[id] = {
       el: wrap.querySelector('.msg-body'),
       tsEl: wrap.querySelector('.ts'),
+      modelEl: wrap.querySelector('.model'),
       rawText: '', ts: null, role, revealTimer: null, permId: id, wrap,
     };
     applyThinkingVisibility(msgs[id]);
@@ -1660,26 +1707,27 @@ function getOrCreate(id, role) {
     // (see settings.tools): hidden, collapsed with the header as the toggle,
     // or always-expanded. Content still renders via renderToolBody() so the
     // Edit/MultiEdit/Write diff fences keep their hljs highlighting.
-    wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="ts"></span></span></div>
+    wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="model"></span><span class="ts"></span></span></div>
                       <div class="msg-body"></div>`;
     wrap.querySelector('.msg-tool-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
     feed.appendChild(wrap);
     msgs[id] = {
       el: wrap.querySelector('.msg-body'),
       tsEl: wrap.querySelector('.ts'),
+      modelEl: wrap.querySelector('.model'),
       rawText: '', ts: null, role, revealTimer: null, permId: id, wrap,
     };
     applyToolsVisibility(msgs[id]);
     return msgs[id];
   }
 
-  wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="ts"></span></div>
+  wrap.innerHTML = `<div class="msg-label">${labelFor(role)}<span class="model"></span><span class="ts"></span></div>
                     <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
                     ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
   feed.appendChild(wrap);
 
   const body = wrap.querySelector('.msg-body');
-  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), rawText: '', ts: null, role, revealTimer: null, permId: id };
+  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), modelEl: wrap.querySelector('.model'), rawText: '', ts: null, role, revealTimer: null, permId: id, model: null, hasVisibleContent: false };
 
   const copyBtn = wrap.querySelector('.msg-copy-btn');
   if (copyBtn) {
@@ -2186,9 +2234,18 @@ function connect() {
   // Complete messages, broadcast live by driver.mjs
   es.addEventListener('message', e => {
     const msg = JSON.parse(e.data);
-    const { id, role, text, ts } = msg;
+    const { id, role, text, ts, model } = msg;
     const entry = getOrCreate(id, role);
     entry.ts = ts;
+    entry.model = model || null;
+    if (entry.modelEl) {
+      const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
+      if (show && entry.model) {
+        entry.modelEl.textContent = entry.model;
+      } else {
+        entry.modelEl.textContent = '';
+      }
+    }
     if (entry.tsEl) entry.tsEl.textContent = formatTs(ts);
     if (role === 'user' || role === 'agent' || role === 'permission' || role === 'thinking') {
       entry.rawText = text;
@@ -2212,10 +2269,14 @@ function connect() {
       // render right after this one.
       if (entry.renderRaf) { cancelAnimationFrame(entry.renderRaf); entry.renderRaf = null; }
       entry.rawText = text;
+      // Mark hasVisibleContent for assistant bubbles
+      if (role === 'assistant' && text && text.trim()) entry.hasVisibleContent = true;
       entry.el.classList.remove('streaming', 'raw');
       renderBody(entry);
       scrollBottom();
     } else {
+      // Mark hasVisibleContent for assistant bubbles
+      if (role === 'assistant' && text && text.trim()) entry.hasVisibleContent = true;
       revealText(entry, text);
     }
   });
@@ -2226,8 +2287,19 @@ function connect() {
     if (entry.type === 'message') {
       const m = getOrCreate(entry.id, entry.role);
       m.ts = entry.ts;
+      m.model = entry.model || null;
+      if (m.modelEl) {
+        const show = settings.showModelOn === 'all-bubbles' ? m.role !== 'user' : m.role === 'assistant';
+        if (show && m.model) {
+          m.modelEl.textContent = m.model;
+        } else {
+          m.modelEl.textContent = '';
+        }
+      }
       if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
       m.rawText = entry.text;
+      // Mark hasVisibleContent for assistant bubbles with non-whitespace text
+      if (m.role === 'assistant' && entry.text && entry.text.trim()) m.hasVisibleContent = true;
       m.el.classList.remove('streaming');
       renderBody(m);
       scrollBottom();
@@ -2245,11 +2317,16 @@ function connect() {
       // In case a final 'message' for a live-streamed bubble was ever
       // missed (reconnect gap, backend hiccup), never leave a bubble stuck
       // with a blinking cursor past the end of its turn.
+      // Also suppress empty MODEL bubbles (assistant bubbles with no visible content)
       for (const id of feedOrder) {
         const en = msgs[id];
         if (en && en.el) {
           en.el.classList.remove('streaming');
           en.liveStreamed = false;
+          // Suppress empty assistant bubbles (those that never received non-whitespace content)
+          if (en.role === 'assistant' && !en.hasVisibleContent) {
+            en.wrap.classList.add('hidden-empty');
+          }
         }
       }
       // Cheap once resolved: loadModes()/loadModels() early-return
@@ -2285,6 +2362,11 @@ function connect() {
       // rather than ever being dropped.
       if (typeof s.seq === 'number') entry.lastSeq = s.seq;
       entry.liveStreamed = true;
+      // Update modelEl immediately if model is known
+      if (s.model && entry.modelEl) {
+        const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
+        if (show && s.model) entry.modelEl.textContent = s.model;
+      }
       if (s.role !== 'thinking') entry.el.classList.add('streaming');
       // 'raw' (plain pre-wrap text) is still how a thinking bubble's
       // verbatim chain-of-thought is displayed, permanently — renderBody()
@@ -2319,6 +2401,8 @@ function connect() {
       }
       entry.liveStreamed = true;
       entry.rawText = String(s.text || '');
+      // Mark that this entry has visible content (non-whitespace)
+      if (s.text && s.text.trim()) entry.hasVisibleContent = true;
       scheduleStreamRender(entry);
     }
 
@@ -2455,7 +2539,7 @@ const SETTINGS_DEFAULTS = {
   autoScrollAnim: 'smooth',
   tsFormat:'time', hour24:false, showTz:false, thinking:'collapse',
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
-  planResetFormat: 'absolute',
+  planResetFormat: 'absolute', showModelOn: 'model-only', sessionsSort: 'created',
 };
 
 function loadSettings() {
@@ -2492,6 +2576,7 @@ function applySettings() {
   ts24h.disabled = tsHidden;
   tsTz.disabled = tsHidden;
   refreshTimestamps();
+  refreshModelNames();
   renderPlanUsage();
   applyThinkingMode();
   applyToolsMode();
@@ -2520,7 +2605,9 @@ const tsTz           = document.getElementById('ts-tz');
 const ts24hRow       = document.getElementById('ts-24h-row');
 const tsTzRow        = document.getElementById('ts-tz-row');
 const planResetFormatSelect = document.getElementById('usage-reset-format');
-const settingsBtn    = document.getElementById('settings-btn');
+const sessionsSortSelect = document.getElementById('sessions-sort');
+const showModelOnSelect  = document.getElementById('show-model-on');
+const settingsBtn      = document.getElementById('settings-btn');
 const settingsPanel  = document.getElementById('settings-panel');
 const exportBtn      = document.getElementById('export-btn');
 
@@ -2543,6 +2630,8 @@ tsFormat.value = settings.tsFormat;
 ts24h.checked = settings.hour24;
 tsTz.checked = settings.showTz;
 planResetFormatSelect.value = settings.planResetFormat;
+showModelOnSelect.value = settings.showModelOn;
+sessionsSortSelect.value = settings.sessionsSort;
 applySettings();
 
 fontSlider.addEventListener('input', () => {
@@ -2671,6 +2760,18 @@ planResetFormatSelect.addEventListener('change', () => {
   saveSettings();
 });
 
+showModelOnSelect.addEventListener('change', () => {
+  settings.showModelOn = showModelOnSelect.value;
+  applySettings();
+  saveSettings();
+});
+
+sessionsSortSelect.addEventListener('change', () => {
+  settings.sessionsSort = sessionsSortSelect.value;
+  applySettings();
+  saveSettings();
+});
+
 // Relative reset times ("in 3 hr 31 min") go stale on their own, unlike an
 // absolute clock reading — re-render once a minute purely to keep the
 // countdown accurate, but only bother when there's something cached to
@@ -2697,7 +2798,9 @@ function exportMarkdown() {
   for (const id of feedOrder) {
     const entry = msgs[id];
     if (!entry) continue;
-    lines.push(`### ${labelFor(entry.role)}`, '', entry.rawText || '', '');
+    const roleLabel = labelFor(entry.role);
+    const modelPart = settings.showModelOn === 'all-bubbles' ? (entry.role !== 'user' ? ` (${entry.model})` : '' ) : (entry.role === 'assistant' ? ` (${entry.model})` : '' );
+    lines.push(`### ${roleLabel}${modelPart}`, '', entry.rawText || '', '');
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
@@ -3421,27 +3524,33 @@ function renderSessionsList() {
 
   if (sessions.length === 0) {
     sessionsList.innerHTML = `<div class="palette-empty">${wantArchived ? 'No archived sessions.' : 'No sessions yet.'}</div>`;
-  } else if (settings.sessionsLayout === 'grouped') {
-    const groups = new Map(); // projectLabel -> sessions[]
-    for (const s of sessions) {
-      const label = s.projectLabel || '(root)';
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(s);
-    }
-    // Each group ordered internally by recency (already true — sessions
-    // arrives pre-sorted); groups themselves ordered by their own most
-    // recent session, so the busiest-lately project floats to the top.
-    const sortedGroups = [...groups.entries()].sort((a, b) =>
-      Math.max(...b[1].map((s) => s.lastModified || 0)) - Math.max(...a[1].map((s) => s.lastModified || 0)));
-    for (const [label, groupSessions] of sortedGroups) {
-      const header = document.createElement('div');
-      header.className = 'session-group-header';
-      header.textContent = `${label} (${groupSessions.length})`;
-      sessionsList.appendChild(header);
-      for (const s of groupSessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
-    }
   } else {
-    for (const s of sessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+    // Sort sessions by selected key (created or lastModified)
+    const sortKey = settings.sessionsSort === 'lastModified' ? 'lastModified' : 'createdAt';
+    const sessionsSorted = [...sessions].sort((a, b) =>
+      ((b[sortKey] || 0) - (a[sortKey] || 0)));
+    if (settings.sessionsLayout === 'grouped') {
+      const groups = new Map(); // projectLabel -> sessions[]
+      for (const s of sessionsSorted) {
+        const label = s.projectLabel || '(root)';
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(s);
+      }
+      // Each group ordered internally by selected key; groups themselves ordered
+      // by their own most recent session (selected key), so the busiest-lately
+      // project floats to the top.
+      const sortedGroups = [...groups.entries()].sort((a, b) =>
+        Math.max(...b[1].map((s) => s[sortKey] || 0)) - Math.max(...a[1].map((s) => s[sortKey] || 0)));
+      for (const [label, groupSessions] of sortedGroups) {
+        const header = document.createElement('div');
+        header.className = 'session-group-header';
+        header.textContent = `${label} (${groupSessions.length})`;
+        sessionsList.appendChild(header);
+        for (const s of groupSessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+      }
+    } else {
+      for (const s of sessionsSorted) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+    }
   }
 
   if (!wantArchived) renderUnreachableFooter(data);

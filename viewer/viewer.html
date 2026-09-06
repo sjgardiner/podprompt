@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Claude Viewer</title>
+<title>PodPrompt</title>
 
 <!-- Applies saved font-size/width/theme before first paint, so there's no
      flash of default sizing on load. Kept intentionally tiny and dependency-free. -->
@@ -45,6 +45,7 @@
     --code-bg:   #12151f;
     --green:     #4ade80;
     --purple:    #a78bfa;
+    --opencode-accent: #2dd4bf;
     --heading:   #eef0f8;
     --em-color:  #b0bcd8;
     --inline-code-color: #a5b4fc;
@@ -75,6 +76,7 @@
     --code-bg:   #f0f1f6;
     --green:     #15803d;
     --purple:    #7c3aed;
+    --opencode-accent: #0d9488;
     --heading:   #10131f;
     --em-color:  #475569;
     --inline-code-color: #4338ca;
@@ -119,8 +121,26 @@
     background: var(--accent);
     opacity: .85;
     flex-shrink: 0;
+    transition: background .25s ease;
   }
+  /* Per-backend dot color — set via updateBackendIndicator() whenever the
+     viewed session's backend is known; falls back to the base --accent
+     color above (unchanged from before this existed) while unresolved. */
+  header .logo.backend-claude-code { background: var(--accent); }
+  header .logo.backend-opencode    { background: var(--opencode-accent); }
   header span { flex: 1; }
+  /* ── Backend badge (next to the app title) ────────────────────────────
+     Empty/hidden until updateBackendIndicator() knows the viewed session's
+     backend (see the same function that colors header .logo above) — a
+     freshly-loaded page with no session open yet shows just the bare app
+     name, not a stale or default backend label. */
+  #backend-badge {
+    font-size: .78em;
+    font-weight: 400;
+    color: var(--muted);
+    opacity: .8;
+  }
+  #backend-badge:empty { display: none; }
   #status {
     display: flex;
     align-items: center;
@@ -783,6 +803,27 @@
   }
   .perm-submit-btn:disabled { opacity: .4; cursor: not-allowed; }
   .perm-resolved { color: var(--muted); font-size: .9em; font-style: italic; }
+  /* "Other…" always sits alongside whatever fixed options the model
+     supplied, matching the real AskUserQuestion tool's guaranteed free-text
+     escape hatch — dashed border sets it apart from the fixed choices. */
+  .perm-option-btn.perm-other-btn { border-style: dashed; }
+  .perm-other-textarea {
+    display: none;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    resize: none;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .perm-other-textarea.show { display: block; }
+  .perm-other-textarea:focus { outline: none; border-color: var(--accent); }
 
   /* ── Message bubble ─────────────────────────────────────────────────── */
   .msg {
@@ -1074,8 +1115,8 @@
 <div id="app">
   <header>
     <button id="sessions-btn" title="Sessions">☰</button>
-    <div class="logo"></div>
-    <span>Claude Viewer</span>
+    <div class="logo" id="app-logo"></div>
+    <span id="app-title-wrap">PodPrompt<span id="backend-badge"></span></span>
     <div id="context-usage-wrap" title="Context window usage">
       <div id="context-usage-bar"><div id="context-usage-fill"></div></div>
       <div id="context-usage-label"></div>
@@ -1224,8 +1265,8 @@
   <div id="feed">
     <div id="empty">
       <div class="icon">⌨</div>
-      <p>Waiting for messages from Claude Code…</p>
-      <p>Type a prompt below, or in your terminal — either way, it renders here.</p>
+      <p>Waiting for messages…</p>
+      <p>Type a prompt below to get started.</p>
     </div>
   </div>
   <button id="new-pill">↓ New messages</button>
@@ -1244,7 +1285,7 @@
     <div id="palette-dropdown"></div>
     <div id="input-row">
       <button id="palette-btn" title="Commands">/</button>
-      <textarea id="prompt-input" rows="1" placeholder="Message Claude… (Enter to send, Shift+Enter for newline)"></textarea>
+      <textarea id="prompt-input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
       <button id="send-btn">Send</button>
       <button id="stop-btn">Stop</button>
     </div>
@@ -1469,10 +1510,14 @@ function removeEmpty() {
 function labelFor(role) {
   if (role === 'user') return 'You';
   if (role === 'tool') return 'Tool';
+  // 'agent' is reserved for a future sub-agent bubble type — no backend
+  // emits it yet (both backends' plain model-response text uses role
+  // 'assistant', which falls through to 'Model' below), but the CSS
+  // (.msg.agent) and this label are already wired up for whenever one does.
   if (role === 'agent') return 'Agent';
   if (role === 'thinking') return 'Thinking';
   if (role === 'permission') return 'Permission';
-  return 'Claude';
+  return 'Model';
 }
 
 function escapeHtml(text) {
@@ -1791,11 +1836,33 @@ function renderPermissionCard(entry) {
 
   if (kind === 'question') {
     const questions = toolInput?.questions || [];
-    const answers = {};
+    // Per-question selection state. `chosen` holds the labels of any real
+    // (non-"Other") options picked so far — a single label for an ordinary
+    // question, any number for a multiSelect one. `otherOn`/`otherText`
+    // track the free-text "Other" option independently, since its value can
+    // keep changing after it's been picked (unlike a fixed option label).
+    // This mirrors the real AskUserQuestion tool, which always guarantees
+    // an "Other" choice alongside whatever fixed options it supplies.
+    const state = questions.map(() => ({ chosen: new Set(), otherOn: false }));
+
     const submitBtn = document.createElement('button');
     submitBtn.className = 'perm-submit-btn';
     submitBtn.textContent = questions.length > 1 ? 'Submit answers' : 'Submit answer';
     submitBtn.disabled = true;
+
+    // The full set of labels currently selected for question qi, in the
+    // order: fixed options first (declaration order, via Set insertion),
+    // then the free-typed "Other" text last, if active and non-blank.
+    const otherTextareas = [];
+    function labelsFor(qi) {
+      const labels = [...state[qi].chosen];
+      const otherVal = otherTextareas[qi] ? otherTextareas[qi].value.trim() : '';
+      if (state[qi].otherOn && otherVal) labels.push(otherVal);
+      return labels;
+    }
+    function updateSubmitEnabled() {
+      submitBtn.disabled = !questions.every((q, qi) => labelsFor(qi).length > 0);
+    }
 
     questions.forEach((q, qi) => {
       const qDiv = document.createElement('div');
@@ -1807,29 +1874,97 @@ function renderPermissionCard(entry) {
 
       const optsDiv = document.createElement('div');
       optsDiv.className = 'perm-options';
+
+      const otherTextarea = document.createElement('textarea');
+      otherTextarea.className = 'perm-other-textarea';
+      otherTextarea.rows = 1;
+      otherTextarea.placeholder = 'Type your own answer… (Shift+Enter for newline)';
+      otherTextareas[qi] = otherTextarea;
+
       (q.options || []).forEach((opt) => {
         const btn = document.createElement('button');
         btn.className = 'perm-option-btn';
         btn.textContent = opt.label;
         if (opt.description) btn.title = opt.description;
         btn.addEventListener('click', () => {
-          answers[qi] = opt.label;
-          optsDiv.querySelectorAll('.perm-option-btn').forEach((b) => b.classList.remove('selected'));
-          btn.classList.add('selected');
-          submitBtn.disabled = Object.keys(answers).length < questions.length;
+          if (q.multiSelect) {
+            if (state[qi].chosen.has(opt.label)) {
+              state[qi].chosen.delete(opt.label);
+              btn.classList.remove('selected');
+            } else {
+              state[qi].chosen.add(opt.label);
+              btn.classList.add('selected');
+            }
+          } else {
+            // Exclusive: this option replaces any prior option AND turns
+            // off "Other" — only one answer makes sense at a time.
+            state[qi].chosen.clear();
+            state[qi].chosen.add(opt.label);
+            optsDiv.querySelectorAll('.perm-option-btn').forEach((b) => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            if (state[qi].otherOn) {
+              state[qi].otherOn = false;
+              otherBtn.classList.remove('selected');
+              otherTextarea.classList.remove('show');
+            }
+          }
+          updateSubmitEnabled();
         });
         optsDiv.appendChild(btn);
       });
+
+      // "Other" is always offered, exactly like the real tool — never
+      // conditional on the options list the model happened to supply.
+      const otherBtn = document.createElement('button');
+      otherBtn.className = 'perm-option-btn perm-other-btn';
+      otherBtn.textContent = 'Other…';
+      otherBtn.addEventListener('click', () => {
+        state[qi].otherOn = !state[qi].otherOn;
+        if (state[qi].otherOn && !q.multiSelect) {
+          // Exclusive: picking "Other" replaces any fixed option.
+          state[qi].chosen.clear();
+          optsDiv.querySelectorAll('.perm-option-btn:not(.perm-other-btn)')
+            .forEach((b) => b.classList.remove('selected'));
+        }
+        otherBtn.classList.toggle('selected', state[qi].otherOn);
+        otherTextarea.classList.toggle('show', state[qi].otherOn);
+        if (state[qi].otherOn) {
+          otherTextarea.focus();
+          autoResizeTextarea(otherTextarea);
+        }
+        updateSubmitEnabled();
+      });
+      optsDiv.appendChild(otherBtn);
+
+      otherTextarea.addEventListener('input', () => {
+        autoResizeTextarea(otherTextarea);
+        updateSubmitEnabled();
+      });
+      // Enter submits (like the main prompt box) unless Shift is held; the
+      // textarea is single-question, so there's no ambiguity about which
+      // answer this newline-vs-submit choice applies to.
+      otherTextarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (!submitBtn.disabled) submitBtn.click();
+        }
+      });
+
       qDiv.appendChild(optsDiv);
+      qDiv.appendChild(otherTextarea);
       card.appendChild(qDiv);
     });
 
     submitBtn.addEventListener('click', async () => {
       submitBtn.disabled = true;
+      const structured = questions.map((q, qi) => {
+        const labels = labelsFor(qi);
+        return { header: q.header || q.question, answer: q.multiSelect ? labels : (labels[0] ?? '') };
+      });
       const formatted = questions
-        .map((q, qi) => `${q.header || q.question}: ${answers[qi]}`)
+        .map((q, qi) => `${q.header || q.question}: ${labelsFor(qi).join(', ')}`)
         .join('; ');
-      const ok = await resolvePermission(entry.permId, { answer: formatted });
+      const ok = await resolvePermission(entry.permId, { answer: formatted, answers: structured });
       entry.resolved = true;
       entry.resolvedText = ok ? `Answered: ${formatted}` : 'This request already expired.';
       renderPermissionCard(entry);
@@ -2272,6 +2407,7 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {})
   clearFeed();
   setTurnIndicator(null);
   resetBackendControlsDisplay();
+  updateBackendIndicator();
   // isNewSession (set only by startNewChatInProject()) is a hard guarantee,
   // not a guess: a session id minted client-side this instant, that has
   // never had a prompt sent for it, cannot possibly have a turn in flight
@@ -2567,7 +2703,7 @@ function exportMarkdown() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'claude-conversation.md';
+  a.download = 'conversation.md';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -2642,8 +2778,22 @@ async function loadDriverConfig() {
 // genuinely removed/renamed model); 'unreachable' means the whole backend
 // process is down. Both are honest "this can't be sent right now" states,
 // not silent failures discovered only after the user hits send.
-const DEFAULT_PROMPT_PLACEHOLDER = promptInput.placeholder;
+// Mutable, not the fixed string it used to be — the backend a session is
+// bound to is genuinely model-specific ("Claude" was hardcoded here before),
+// so this now tracks whichever backend the viewed session resolves to (see
+// updateBackendIndicator()) and falls back to a generic placeholder before
+// that's known at all. Still just the "no block reason active" fallback —
+// modelBlockReason's two states below always take priority over it, exactly
+// as before.
+let DEFAULT_PROMPT_PLACEHOLDER = promptInput.placeholder;
 let modelBlockReason = null; // null | 'unavailable' | 'unreachable'
+
+function updateDefaultPromptPlaceholder(backend) {
+  DEFAULT_PROMPT_PLACEHOLDER = backend
+    ? `Message ${BACKEND_LABELS[backend] || backend}… (Enter to send, Shift+Enter for newline)`
+    : 'Message the agent… (Enter to send, Shift+Enter for newline)';
+  updatePromptDisabled();
+}
 
 function updatePromptDisabled() {
   promptInput.disabled = turnInFlight || !!modelBlockReason;
@@ -2876,10 +3026,15 @@ autoApproveToggle.addEventListener('change', async () => {
   }
 });
 
-function autoResizeInput() {
-  promptInput.style.height = 'auto';
-  promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
+// Shared by the main prompt box and any AskUserQuestion "Other" free-text
+// textarea (see renderPermissionCard) — same auto-grow-then-cap behavior,
+// same 200px ceiling, so verbose "Other" answers get the same breathing
+// room as the main prompt rather than being stuck in a cramped single line.
+function autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
 }
+function autoResizeInput() { autoResizeTextarea(promptInput); }
 
 // Renders a message locally only — not sent to server.py/message_log, not
 // synced to other tabs. For client-side observations (submission failures)
@@ -3329,6 +3484,13 @@ async function refreshSessionsList({ full = true } = {}) {
     for (const s of data.sessions || []) {
       if (s.backend) sessionBackends.set(s.sessionId, s.backend);
     }
+    // The currently-viewed session may have just learned its real backend
+    // for the first time (e.g. cold page load — see the boot-sequence
+    // comment above window.addEventListener('load', ...)), or this refresh
+    // may be the thing that first gives backendForCurrentSession() any
+    // answer at all. Either way, keep the header dot/badge/placeholder in
+    // sync rather than waiting for the next viewSession() switch.
+    updateBackendIndicator();
     renderSessionsList();
   } catch (e) {
     if (seq !== sessionsFetchSeq) return;
@@ -3532,6 +3694,47 @@ function startNewChatInProject(cwd, backend) {
 // yet, so a new driver.mjs backend still shows up (just unstyled) instead of
 // being silently hidden.
 const BACKEND_LABELS = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode' };
+
+// ── Header backend indicator (dot color + "PodPrompt · <Backend>" badge) ──
+// Each session is permanently bound to one backend from creation (driver.mjs
+// never changes state.backend for a session's lifetime — see its own
+// SessionState comment), so this is purely a display concern: show whichever
+// backend the *currently viewed* session resolves to, via the same
+// precedence submitPrompt() already uses for "what backend is this session
+// really on" (a pending new-chat pick for a session with no driver state
+// yet, else whatever the sessions list has taught us). Deliberately a
+// read-only mirror of that precedence, not a shared helper that consumes
+// pendingBackendForNewSession — submitPrompt() needs to null it out after
+// first use; this needs to be able to re-read it as many times as the
+// indicator gets refreshed before that first prompt actually goes out.
+function resolvedBackendForIndicator() {
+  if (pendingBackendForNewSession && pendingBackendForNewSession.sessionId === currentSessionId) {
+    return pendingBackendForNewSession.backend;
+  }
+  return backendForCurrentSession();
+}
+
+const appLogo = document.getElementById('app-logo');
+const backendBadge = document.getElementById('backend-badge');
+
+// Called from viewSession() (every switch), and again from wherever
+// sessionBackends/pendingBackendForNewSession later learn a fresher answer
+// for the session still being viewed (refreshSessionsList()'s per-entry
+// loop, startNewChatInProject()) — so the dot/badge/placeholder never sit on
+// a stale or unresolved backend any longer than the underlying data does.
+function updateBackendIndicator() {
+  const backend = resolvedBackendForIndicator();
+  appLogo.classList.remove('backend-claude-code', 'backend-opencode');
+  if (backend) {
+    appLogo.classList.add(`backend-${backend}`);
+    appLogo.title = BACKEND_LABELS[backend] || backend;
+    backendBadge.textContent = ` · ${BACKEND_LABELS[backend] || backend}`;
+  } else {
+    appLogo.title = '';
+    backendBadge.textContent = '';
+  }
+  updateDefaultPromptPlaceholder(backend);
+}
 
 // Tracks which backend button is currently selected while the picker is
 // open — starts at whatever driver.mjs reports as its own default, updated

@@ -32,7 +32,7 @@ interactive TUI session) — that mode is retired as of the bidirectional
 driver work; the read-only tailer is preserved in git history if ever
 needed again, not in this file.
 
-Usage (managed by run-claude-docker.sh — you don't normally call this):
+Usage (managed by podprompt.sh — you don't normally call this):
   python3 server.py --port 7843
 
 The server binds to 0.0.0.0 so it is reachable via Docker's port mapping.

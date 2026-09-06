@@ -27,13 +27,22 @@ import {
 
 export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval }) {
   // Same config directory Claude Code's own session storage uses (and the
-  // same one run-claude-docker.sh bind-mounts from ~/.claude-docker/ on the
-  // host) — stable across container relaunches regardless of what /workspace
+  // same real ~/.claude podprompt.sh bind-mounts — shared with any native,
+  // non-Docker `claude` install on this host, not a container-only copy) —
+  // stable across container relaunches regardless of what /workspace
   // currently points at, which is exactly why the cross-project bookkeeping
   // below lives here rather than anywhere under /workspace itself.
   const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude");
   const PROJECTS_DIR = nodePath.join(CLAUDE_CONFIG_DIR, "projects");
-  const SESSION_HOSTS_FILE = nodePath.join(CLAUDE_CONFIG_DIR, "viewer-session-hosts.json");
+  // Deliberately NOT under CLAUDE_CONFIG_DIR: this is PodPrompt's own
+  // bookkeeping, not Claude Code's — since CLAUDE_CONFIG_DIR now points at
+  // the user's real, shared ~/.claude (see above), writing our own files in
+  // there would leak into a native install's config directory too. Lives in
+  // its own XDG state directory instead (see podprompt.sh's
+  // PODPROMPT_STATE_DIR), independent of both backends' own directories.
+  const PODPROMPT_STATE_DIR = process.env.PODPROMPT_STATE_DIR
+    || nodePath.join(os.homedir(), ".local", "state", "podprompt");
+  const SESSION_HOSTS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-hosts.json");
 
   // ── Multi-project discovery ─────────────────────────────────────────────
   // A launch of --viewer is pinned to one root cwd (cwdRoot, normally just
@@ -190,7 +199,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // Records, per session, which host directory was backing /workspace the
   // last time a turn actually started for it — the one piece of state that
   // needs the *launch script* itself to cooperate (HOST_WORKSPACE_PATH is
-  // exported by run-claude-docker.sh; nothing inside the container otherwise
+  // exported by podprompt.sh; nothing inside the container otherwise
   // has any way to know the host-side path at all — Docker bind mounts don't
   // carry that information across the boundary on their own). Lives in the
   // same config directory session storage does, so it survives container
@@ -318,12 +327,97 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     });
     return modelsWarmPromise;
   }
-  // Rate-limits (not disables) the console.error for usage_EXPERIMENTAL_...()
-  // failures — see the "system"/"init" handling in consume() below, which
-  // calls it fresh every turn regardless of whether a past attempt failed,
-  // so one transient failure can't permanently hide the plan-usage bar for
-  // the rest of this process's life.
-  let loggedUsageApiUnavailable = false;
+  // ── Account-wide plan usage (subscription 5-hour/7-day rate-limit windows)
+  // For future sessions investigating the plan-usage bar (this exact
+  // question has come up more than once — the control-request API for it is
+  // genuinely hard to find in docs, so don't rediscover this from scratch):
+  // the never-yielding-prompt trick above is NOT specific to models.
+  // Empirically verified (throwaway script, 2026-09-06 — see the
+  // project-docker-viewer memory file for the full investigation) that the
+  // SDK's usage control-request resolves the same way on a never-run Query
+  // built exactly like the one above — no `resume` option needed at all,
+  // since the payload (`subscription_type`/`rate_limits`) is account-scoped,
+  // not session-scoped. Round trip was ~1.6s (heavier than the ~270ms models
+  // case, presumably a real network hop to Anthropic's usage endpoint rather
+  // than CLI-local state, but still cheap enough to poll on a timer),
+  // `interrupt()` afterward was clean, no orphan process, no phantom
+  // transcript — same cleanliness as the models warm-up.
+  //
+  // One fetch answers for every session sharing this account, so — like
+  // knownModels above — this cache lives at backend-module scope, not
+  // per-session. But *when* to poll and *who* to tell is driver.mjs's job,
+  // not this file's: only driver.mjs knows every session id currently live
+  // (this backend instance is shared across all of them and has no
+  // visibility into the `sessions` Map). So this file only exposes
+  // refreshAccountUsage()/getCachedAccountUsage() (see the returned object
+  // at the bottom of this file); driver.mjs calls refreshAccountUsage() on a
+  // timer and opportunistically after every turn, then fans the result out
+  // via broadcastStatus() to every session id it knows about.
+  //
+  // Wrapped in a plainly-named function rather than calling the SDK method
+  // inline: `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` is
+  // the SDK's own (still officially unstable) name for it, but we've now
+  // verified it thoroughly enough to build on — leaving that name scattered
+  // across call sites would make every future reader assume this feature is
+  // shakier than it's actually proven to be. If a future SDK release renames
+  // or stabilizes the method, this is the one place to update.
+  async function fetchSubscriptionUsage(q) {
+    return q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
+  }
+
+  let planUsageCache = null; // last successful {subscription_type, rate_limits}, or null (never fetched yet, or this account has no plan/quota — e.g. API-key/Bedrock/Vertex)
+  let planUsagePromise = null; // single-flight in-flight fetch, same pattern as modelsWarmPromise
+  let loggedPlanUsageUnavailable = false;
+
+  function getCachedAccountUsage() {
+    return planUsageCache;
+  }
+
+  // Single-flight: a timer tick and a just-finished turn landing at the same
+  // moment collapse into one real fetch instead of two. Always resolves to
+  // the best-known payload — a transient failure returns the last good
+  // cache (if any) rather than null, so one bad poll never blanks out an
+  // already-working bar; only a genuinely never-fetched-yet cache is null.
+  function refreshPlanUsage() {
+    if (planUsagePromise) return planUsagePromise;
+    planUsagePromise = (async () => {
+      const neverPrompt = (async function* () {
+        await new Promise(() => {});
+      })();
+      const q = query({
+        prompt: neverPrompt,
+        options: { cwd: cwdRoot, permissionMode: "default" },
+      });
+      try {
+        const usage = await fetchSubscriptionUsage(q);
+        if (usage?.rate_limits_available) {
+          planUsageCache = { subscription_type: usage.subscription_type, rate_limits: usage.rate_limits };
+        }
+      } finally {
+        try {
+          await q.interrupt();
+        } catch (e) {
+          console.error("[claude-code] plan-usage poll interrupt failed:", e.message);
+        }
+      }
+      return planUsageCache;
+    })().catch((e) => {
+      // Not a one-shot breaker: keep retrying on every future call (timer
+      // tick or post-turn trigger) regardless of this failure, same
+      // philosophy as the old per-turn code this replaces. Just rate-limit
+      // the console spam.
+      if (!loggedPlanUsageUnavailable) {
+        loggedPlanUsageUnavailable = true;
+        console.error(
+          `[claude-code] plan-usage poll failed (will keep retrying, logging this class of failure once): ${e.message}`
+        );
+      }
+      return planUsageCache;
+    }).finally(() => {
+      planUsagePromise = null; // let the next tick/trigger retry, success or failure
+    });
+    return planUsagePromise;
+  }
 
   // ── Per-session "which model did this session actually use" ─────────────
   // listModels(sessionId) derives the picker's pre-selected value from the
@@ -561,12 +655,20 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // concerns tool-permission gating, not answering substantive
         // questions Claude is asking the user; those always still reach the
         // browser regardless.
+        //
+        // requestApproval resolves with { text, structured } for a question
+        // (see driver.mjs's /permission-response — text/structured shape
+        // added alongside per-question "Other" free-text support so
+        // backends/opencode.mjs's replyQuestion can consume per-question
+        // answers directly instead of re-parsing a joined string). This
+        // backend only ever wants the plain-text form — Claude reads the
+        // answer as a crafted deny message, not structured data.
         const answer = await requestApproval(sessionId, "question", toolName, toolInput);
         // Verified: canUseTool fires for AskUserQuestion, but `allow` alone
         // leaves it unanswered ("The user did not answer the questions").
         // Denying with a crafted message is the mechanism that actually
         // works — Claude treats the message as the real answer.
-        return { behavior: "deny", message: `The user answered: ${answer}` };
+        return { behavior: "deny", message: `The user answered: ${answer.text}` };
       }
 
       if (state.autoApprove) {
@@ -750,49 +852,37 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             terminal_slash_commands: msg.terminal_slash_commands || [],
             skills: msg.skills || [],
           };
-          // supportedModels()/usage_EXPERIMENTAL_...() are control-request
-          // methods on this live Query `q` — they round-trip to the CLI
-          // subprocess over its control channel. Verified by hand (against
-          // this exact CLI build) that this channel stops being serviced
-          // right around when the CLI emits its final `result` message for
-          // the turn: calling either method there (previously done, at the
-          // `result` branch below) reliably rejects with "Query closed
-          // before response received" — 100% reproducible, not a flaky
-          // race — while calling the *same* methods here, immediately after
-          // `system/init`, resolves in ~1s every time. So this isn't a
-          // CLI-version gap (both control commands are already implemented
-          // in this container's CLI binary — confirmed by string-searching
-          // the actual binary at CLAUDE_CODE_EXECPATH — and this call
-          // proves it live), it's purely about calling before the turn's
-          // control channel winds down. Net effect: these refresh once per
-          // turn, from *before* that turn's tokens are counted (a turn's
-          // lag behind, same trade-off knownCommands above already made) —
-          // acceptable for a usage meter that only needs to move over time,
-          // not be perfectly real-time.
+          // supportedModels() is a control-request method on this live Query
+          // `q` — it round-trips to the CLI subprocess over its control
+          // channel. Verified by hand (against this exact CLI build) that
+          // this channel stops being serviced right around when the CLI
+          // emits its final `result` message for the turn: calling it there
+          // (previously done, at the `result` branch below) reliably
+          // rejects with "Query closed before response received" — 100%
+          // reproducible, not a flaky race — while calling it here,
+          // immediately after `system/init`, resolves in ~1s every time. So
+          // this isn't a CLI-version gap (the control command is already
+          // implemented in this container's CLI binary — confirmed by
+          // string-searching the actual binary at CLAUDE_CODE_EXECPATH —
+          // and this call proves it live), it's purely about calling before
+          // the turn's control channel winds down. Net effect: this
+          // refreshes once per turn, from *before* that turn's tokens are
+          // counted (a turn's lag behind, same trade-off knownCommands
+          // above already made) — acceptable for a model list that only
+          // needs to move over time, not be perfectly real-time.
+          //
+          // usage_EXPERIMENTAL_...() (the plan-usage bar) used to be called
+          // here too, on exactly this same reasoning — moved out entirely as
+          // of 2026-09-06 to a driver-level global poll instead (see
+          // refreshPlanUsage()/fetchSubscriptionUsage() above and driver.mjs)
+          // once it was verified that call doesn't need a real turn (or even
+          // this session's `resume`) at all, since the payload is
+          // account-scoped. Don't re-add a per-turn usage_EXPERIMENTAL_...()
+          // call here — see this file's plan-usage section above for why.
           q.supportedModels().then((models) => {
             knownModels = models || [];
           }).catch((e) => {
             console.error(`[claude-code] supportedModels() failed for session ${sessionId}:`, e.message);
-          });
-          q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then((usage) => {
-            broadcastStatus(sessionId, {
-              type: "plan_usage",
-              subscription_type: usage?.rate_limits_available ? usage.subscription_type : null,
-              rate_limits: usage?.rate_limits_available ? usage.rate_limits : null,
-            });
-          }).catch((e) => {
-            // Not disabling future attempts on failure (unlike the old
-            // loggedUsageApiUnavailable one-shot breaker this replaces) —
-            // a transient failure on one turn shouldn't permanently hide
-            // the bar for the rest of this process's life across every
-            // session. Just rate-limit the console spam.
-            if (!loggedUsageApiUnavailable) {
-              loggedUsageApiUnavailable = true;
-              console.error(
-                `[claude-code] usage_EXPERIMENTAL_...() failed for session ${sessionId} (will keep retrying ` +
-                `each turn, logging this class of failure once): ${e.message}`
-              );
-            }
           });
           continue;
         }
@@ -842,13 +932,15 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         }
 
         if (msg.type === "result") {
-          // supportedModels()/usage_EXPERIMENTAL_...() used to be called
-          // here — moved to the system/init handler above. See the comment
-          // there: calling either one at this point (the turn's last
-          // message) reliably fails with "Query closed before response
-          // received" because this CLI build stops servicing `q`'s control
-          // channel once the turn is winding down, not because the CLI
-          // lacks the command.
+          // supportedModels() used to be called here too (and, briefly,
+          // usage_EXPERIMENTAL_...() alongside it) — moved to the
+          // system/init handler above. See the comment there: calling
+          // either one at this point (the turn's last message) reliably
+          // fails with "Query closed before response received" because this
+          // CLI build stops servicing `q`'s control channel once the turn
+          // is winding down, not because the CLI lacks the command.
+          // usage_EXPERIMENTAL_...() has since moved again, off this
+          // per-turn `q` entirely — see refreshPlanUsage() above.
           continue;
         }
 
@@ -1075,12 +1167,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // this reads the exact same settings.json modelPicker.options list
       // that ADDS those entries in the first place (populated by the
       // separate LiteLLM-sync tooling the user runs, independent of
-      // run-claude-docker.sh itself) and excludes precisely those `value`s
+      // podprompt.sh itself) and excludes precisely those `value`s
       // — nothing else in supportedModels()'s response was ever added by
       // that tooling, so this is an exact filter, not a heuristic. Those
       // custom entries are only reachable at all when this process is
       // actually talking to that gateway — ANTHROPIC_BASE_URL is set if and
-      // only if run-claude-docker.sh launched with --litellm (confirmed
+      // only if podprompt.sh launched with --litellm (confirmed
       // against that script: --direct and --direct-api never set it) — so
       // showing them in the switcher under --direct/--direct-api would just
       // offer a pile of models that don't exist there and will error if
@@ -1121,5 +1213,21 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     },
 
     async setModel() {},
+
+    // ── Account-wide plan usage (see the section by refreshPlanUsage() above
+    // for the full story) ────────────────────────────────────────────────
+    // Not part of the documented backend contract at the top of driver.mjs
+    // (both are optional, feature-detected with `typeof backend.x ===
+    // "function"`, same as listModels()/getKnownCommands()) — OpenCode has
+    // no equivalent (its "spend" concept is a per-session running cost
+    // accumulator, not an account-wide quota, so there's nothing to
+    // centralize there the same way).
+    async refreshAccountUsage() {
+      return refreshPlanUsage();
+    },
+
+    getCachedAccountUsage() {
+      return getCachedAccountUsage();
+    },
   };
 }

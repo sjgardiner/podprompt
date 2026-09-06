@@ -31,15 +31,23 @@
 //   setMode(sessionId, mode) [optional]                  -- switch a session's agent/mode; no-op if absent
 //   listModels(sessionId)   [optional]                    -- -> {current, available: [{id,label,description?}]} or null
 //   setModel(sessionId, modelId) [optional]               -- switch a session's model; no-op if absent
+//   refreshAccountUsage()   [optional]                     -- account-scoped, NOT per-session (single-flight;
+//                                                              fetches+caches, returns {subscription_type,
+//                                                              rate_limits} or null) — see the plan/usage
+//                                                              polling block just above runTurn() for who calls this
+//   getCachedAccountUsage() [optional]                     -- synchronous read of the last value
+//                                                              refreshAccountUsage() cached, or null
 //
 // Status payload types broadcast via broadcastStatus (beyond the older
 // turn_start/turn_end/thinking_tokens/tool_progress/stream_start/
 // stream_delta set): context_usage {percentage,totalTokens,maxTokens},
 // compacting {active,result?,error?}, plan_usage {subscription_type,
 // rate_limits} (Claude Code only — null/null when not on a real
-// subscription-backed session, e.g. LiteLLM/API-key/Bedrock/Vertex), and
-// spend {totalCostUsd} (OpenCode's analogue of plan_usage — no plan/quota
-// concept exists there, just a running cost accumulator).
+// subscription-backed session, e.g. LiteLLM/API-key/Bedrock/Vertex; account-
+// scoped, not session-scoped — see refreshAccountUsage() above and the
+// polling block just above runTurn() for the full mechanism), and spend
+// {totalCostUsd} (OpenCode's analogue of plan_usage — no plan/quota concept
+// exists there, just a running cost accumulator).
 //
 // Multi-session concurrency: every piece of turn-related state (bootstrap
 // status, in-flight flag, abort controller, cwd, backend) is keyed by
@@ -170,9 +178,14 @@ async function broadcastStatus(sessionId, payload) {
 const pendingApprovals = new Map(); // id -> { resolve, sessionId, kind, toolName, toolInput }
 
 // Called by a backend when it needs the browser to approve/answer something.
-// Returns a Promise that resolves with whatever /permission-response passed
-// (a plain {allow, message} decision for a permission ask, or a raw string
-// answer for a question) — the backend decides how to interpret that.
+// Returns a Promise that resolves with whatever /permission-response passed:
+// a plain {allow, message} decision for a permission ask, or
+// {text, structured} for a question — `text` is the joined human-readable
+// answer string (Claude Code's own plain-text protocol just wants this),
+// `structured` is a per-question {header, answer} array when the viewer sent
+// one (answer is a string, or an array of strings for a multiSelect
+// question) — OpenCode's replyQuestion uses this instead of re-parsing
+// `text`. The backend decides which half it needs.
 function requestApproval(sessionId, kind, toolName, toolInput) {
   const id = randomUUID();
   return new Promise((resolve) => {
@@ -490,8 +503,15 @@ const preSeeds = new Map(); // sessionId -> { model?, mode? }
 // modelID ids aren't ambiguous, but an explicit pick made just before a
 // restart, with no turn run yet to record it, is exactly the same kind of
 // fact this exists to not lose regardless of backend.
+//
+// Lives in PodPrompt's own XDG state directory, NOT under CLAUDE_CONFIG_DIR
+// (see podprompt.sh's PODPROMPT_STATE_DIR) — this is PodPrompt's own
+// bookkeeping, not Claude Code's, and CLAUDE_CONFIG_DIR now points at the
+// user's real, shared ~/.claude (also used by any native install on the
+// host), which should never end up with PodPrompt-internal files in it.
+// Same reasoning as backends/claude-code.mjs's SESSION_HOSTS_FILE.
 const MODEL_PICKS_FILE = nodePath.join(
-  process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude"),
+  process.env.PODPROMPT_STATE_DIR || nodePath.join(os.homedir(), ".local", "state", "podprompt"),
   "viewer-model-picks.json"
 );
 
@@ -535,6 +555,18 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
       preSeeds.delete(sessionId);
     }
     sessions.set(sessionId, s);
+    // Hand a brand-new session the current best-known account usage right
+    // away, instead of leaving its bar blank until the next global timer
+    // tick (up to PLAN_USAGE_POLL_INTERVAL_MS away, see below) or this
+    // session's own first turn completes. Synchronous cache read only —
+    // never triggers a fetch from here, so creating session state (cheap,
+    // frequent) never gains a network round-trip.
+    if (typeof backend.getCachedAccountUsage === "function") {
+      const usage = backend.getCachedAccountUsage();
+      if (usage) {
+        broadcastStatus(sessionId, { type: "plan_usage", subscription_type: usage.subscription_type, rate_limits: usage.rate_limits });
+      }
+    }
   }
   return s;
 }
@@ -551,6 +583,60 @@ function backendFor(sessionId, explicitBackendId) {
   return state?.backend || getBackend(explicitBackendId || args.backend);
 }
 
+// ── Account-wide plan/usage polling (backend-agnostic; currently only
+// claude-code.mjs implements refreshAccountUsage()/getCachedAccountUsage() —
+// see the "Account-wide plan usage" section near the top of that file for
+// the full investigation this is built on). Usage turned out to be
+// account-scoped, not session-scoped (verified 2026-09-06: the SDK's usage
+// control-request resolves fine on a throwaway, never-run Query, no
+// `resume`/session id needed at all) — so one fetch per backend answers for
+// every session sharing it, and lives here (not per-session, not inside the
+// backend module) purely because only this module knows every currently
+// live session id to fan the result out to. A backend that doesn't
+// implement these two methods (OpenCode, whose analogous "spend" figure is
+// a genuine per-session running cost, not an account-wide quota) is simply
+// skipped — feature-detected the same way listModels()/getKnownCommands()
+// already are above.
+const PLAN_USAGE_POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 min: the fetch itself
+// is cheap (~1.6s, one throwaway CLI subprocess) but the 5-hour/7-day
+// rate-limit windows this reports don't move fast enough to need finer
+// resolution — polling harder would just be needless subprocess churn.
+
+async function pollAccountUsage(backend) {
+  if (typeof backend.refreshAccountUsage !== "function") return;
+  let usage;
+  try {
+    usage = await backend.refreshAccountUsage();
+  } catch (e) {
+    // refreshAccountUsage() itself already retries/logs on failure and
+    // resolves to its last-known-good cache rather than rejecting — a
+    // throw here would mean something unexpected slipped past that, so it's
+    // worth its own log line rather than silently swallowing it.
+    console.error("[driver] refreshAccountUsage() threw unexpectedly:", e.message);
+    return;
+  }
+  if (!usage) return; // never fetched successfully yet, or this account has no plan/quota (API-key/Bedrock/Vertex)
+  for (const [sid, state] of sessions) {
+    if (state.backend !== backend) continue; // don't send claude-code's plan_usage to an opencode session
+    broadcastStatus(sid, { type: "plan_usage", subscription_type: usage.subscription_type, rate_limits: usage.rate_limits });
+  }
+}
+
+function pollAccountUsageForAllBackends() {
+  for (const backend of Object.values(backends)) {
+    pollAccountUsage(backend).catch((e) => console.error("[driver] pollAccountUsage failed:", e.message));
+  }
+}
+
+// Kick one off immediately at startup (don't wait for the first timer tick
+// or the first turn) so a browser tab opened before any prompt is sent
+// still sees a populated bar shortly after boot, same spirit as the
+// eager listModels()/getKnownCommands() warm-up above — then keep it moving
+// on its own regardless of turn activity, which is the entire point of this
+// mechanism over the old per-turn-only refresh.
+pollAccountUsageForAllBackends();
+setInterval(pollAccountUsageForAllBackends, PLAN_USAGE_POLL_INTERVAL_MS);
+
 // ── Drive one turn (backend-agnostic wrapper) ───────────────────────────
 // Delegates the actual work to state.backend.runTurn — this wrapper only
 // owns the bookkeeping that must happen identically regardless of which
@@ -566,6 +652,13 @@ async function runTurn(sessionId, promptText) {
     console.error(`[driver] runTurn failed for session ${sessionId}:`, e.message);
   } finally {
     expirePendingApprovals(sessionId);
+    // Opportunistic refresh after every turn, any session, any backend —
+    // piggybacks on refreshAccountUsage()'s own single-flight cache, so a
+    // turn ending right as the timer above is about to tick just collapses
+    // into the same fetch instead of stacking a redundant one. Deliberately
+    // not awaited: a slow/failed usage poll must never delay the turn's own
+    // completion being reported back to the browser.
+    pollAccountUsage(state.backend).catch((e) => console.error("[driver] post-turn pollAccountUsage failed:", e.message));
   }
 }
 
@@ -1154,7 +1247,22 @@ const server = createServer(async (req, res) => {
     }), body.id);
 
     if (typeof body.answer === "string") {
-      pending.resolve(body.answer);
+      // Question answers now carry both the human-readable joined string
+      // (`text` — what Claude Code's plain-text protocol wants, and what
+      // resolvedText above already displays) and, when the viewer sent one,
+      // a per-question structured array (`structured` — {header, answer}
+      // per question, answer itself a string or an array of strings for a
+      // multiSelect question). Added so backends/opencode.mjs's
+      // replyQuestion can consume each question's answer directly instead
+      // of re-parsing the joined string by splitting on "; " and stripping
+      // a header prefix — fragile once free-typed "Other" text can contain
+      // either of those. `structured` is null whenever the caller didn't
+      // send one (older client, or a plain permission decision never hits
+      // this branch at all since body.answer wouldn't be a string then).
+      pending.resolve({
+        text: body.answer,
+        structured: Array.isArray(body.answers) ? body.answers : null,
+      });
     } else {
       pending.resolve({ allow: !!body.allow, message: body.message });
     }

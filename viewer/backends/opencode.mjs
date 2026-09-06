@@ -719,20 +719,35 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     }
   }
 
-  async function replyQuestion(requestID, questions, formattedAnswer) {
-    // The viewer's question card only ever sends back one joined string —
-    // `${header}: ${label}; ${header2}: ${label2}` — built in viewer.html
-    // from the same `questions` array in the same order, so it's split back
-    // apart here rather than changing the shared viewer<->driver contract
-    // (which also serves the Claude backend's plain-text AskUserQuestion
-    // answer) just for OpenCode's structured answers: [[label], ...] shape.
-    const segments = String(formattedAnswer || "").split("; ");
-    const answers = questions.map((q, i) => {
-      const seg = segments[i] || "";
-      const prefix = `${q.header || q.question}: `;
-      const label = seg.startsWith(prefix) ? seg.slice(prefix.length) : seg;
-      return [label];
-    });
+  async function replyQuestion(requestID, questions, answer) {
+    // `answer` is {text, structured} (see driver.mjs's /permission-response).
+    // `structured` is a per-question {header, answer} array in the same
+    // order as `questions` — `answer` is a string, or an array of strings
+    // for a multiSelect question — which is already exactly the shape
+    // OpenCode's /question/{id}/reply wants (`answers: [[label,...], ...]`,
+    // one array of labels per question), so no parsing needed at all.
+    //
+    // Falls back to re-deriving it from the joined display string
+    // (`text`/`${header}: ${label}; ${header2}: ${label2}`, split on "; "
+    // with a header-prefix strip) only if `structured` wasn't sent — kept
+    // cheap and harmless as a defensive fallback, but don't rely on it: that
+    // old approach is fragile whenever a label or free-typed "Other" answer
+    // contains "; " or a colon, which is exactly why `structured` exists now.
+    let answers;
+    if (Array.isArray(answer?.structured)) {
+      answers = questions.map((q, i) => {
+        const raw = answer.structured[i]?.answer;
+        return Array.isArray(raw) ? raw : [raw ?? ""];
+      });
+    } else {
+      const segments = String(answer?.text ?? "").split("; ");
+      answers = questions.map((q, i) => {
+        const seg = segments[i] || "";
+        const prefix = `${q.header || q.question}: `;
+        const label = seg.startsWith(prefix) ? seg.slice(prefix.length) : seg;
+        return [label];
+      });
+    }
     try {
       await api(`/question/${requestID}/reply`, {
         method: "POST",

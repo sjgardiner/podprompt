@@ -1242,6 +1242,32 @@ const autoApproveToggle = document.getElementById('auto-approve-toggle');
 let modelsResolved = false;
 let modesResolved = false;
 
+// Bounded auto-retry for the empty-available case above. Retrying solely on
+// turn_end (es.onopen can also miss it, see loadDriverConfig) left the picks
+// hidden forever whenever the very first answer was empty AND the user
+// hadn't sent a prompt yet — e.g. the opencode backend's /config/providers
+// fetch racing `opencode serve`'s bind window right after a container start
+// (the picker simply never appeared until a turn completed). These retry a
+// few times over the first ~8s, then stop and fall back to the existing
+// turn_end/reconnect re-fetch, the same as before.
+const PICKER_MAX_RETRIES = 4;
+let modelsRetryCount = 0;
+let modesRetryCount = 0;
+let modelsRetryTimer = null;
+let modesRetryTimer = null;
+
+function schedulePickerRetry(kind) {
+  if (kind === 'models') {
+    if (modelsRetryTimer || modelsResolved || modelsRetryCount >= PICKER_MAX_RETRIES) return;
+    modelsRetryCount++;
+    modelsRetryTimer = setTimeout(() => { modelsRetryTimer = null; loadModels(); }, 2000);
+  } else {
+    if (modesRetryTimer || modesResolved || modesRetryCount >= PICKER_MAX_RETRIES) return;
+    modesRetryCount++;
+    modesRetryTimer = setTimeout(() => { modesRetryTimer = null; loadModes(); }, 2000);
+  }
+}
+
 // Reset to the "nothing known yet" state — called on every session switch
 // (viewSession()) so a freshly-viewed session never shows a stale reading
 // left over from whatever was viewed before it, for the brief window
@@ -1259,6 +1285,10 @@ function resetBackendControlsDisplay() {
   modeSelect.innerHTML = '';
   modelsResolved = false;
   modesResolved = false;
+  clearTimeout(modelsRetryTimer); modelsRetryTimer = null;
+  clearTimeout(modesRetryTimer); modesRetryTimer = null;
+  modelsRetryCount = 0;
+  modesRetryCount = 0;
 }
 
 function setTurnIndicator(text) {
@@ -2237,10 +2267,12 @@ async function loadModes() {
     if (!data.available || !data.available.length) {
       // Backend supports modes but doesn't know any yet (e.g. right after a
       // driver.mjs restart, before any turn has populated the shared cache)
-      // — leave modesResolved false so the turn_end retry below keeps
-      // trying instead of giving up here.
+      // — leave modesResolved false so the retries keep trying: an immediate
+      // bounded auto-retry, and the turn_end retry below for whatever the
+      // backend genuinely won't answer until a turn completes.
       modeSelect.classList.remove('show');
       modeSelect.innerHTML = '';
+      schedulePickerRetry('modes');
       return;
     }
     modeSelect.innerHTML = data.available.map((m) =>
@@ -2281,11 +2313,15 @@ async function loadModels() {
     }
     if (!data.available || !data.available.length) {
       // Backend supports models but the shared cache isn't populated yet
-      // (see backends/claude-code.mjs's knownModels — process-wide, filled
-      // in by the first turn anywhere to complete since the last restart).
-      // Leave modelsResolved false so the turn_end retry below tries again.
+      // (see the opencode backend's cold-start /config/providers fetch, and
+      // backends/claude-code.mjs's knownModels — process-wide, filled in by
+      // the first turn anywhere to complete since the last restart). Leave
+      // modelsResolved false so the retries keep trying: an immediate
+      // bounded auto-retry, and the turn_end retry below for whatever the
+      // backend genuinely won't answer until a turn completes.
       modelSelect.classList.remove('show');
       modelSelect.innerHTML = '';
+      schedulePickerRetry('models');
       return;
     }
     modelSelect.innerHTML = data.available.map((m) =>

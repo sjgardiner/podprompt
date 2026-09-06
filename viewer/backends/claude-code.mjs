@@ -399,18 +399,27 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   function convertSessionMessages(rawMessages) {
     const out = [];
     for (const entry of rawMessages) {
-      if (entry.parent_agent_id) continue; // subagent-internal, skip (mirrors the old isSidechain filter)
-      const content = entry.message?.content;
+      // Same fragility-margin as the opencode backend's converter: one
+      // odd-shaped JSONL entry (a partial line from a crash, an interstitial
+      // bookkeeping message, a subagent message missing `message.something`)
+      // must not blank that session's whole rendered history. Convert
+      // per-entry; skip what's unusable, keep the rest.
+      try {
+        if (entry.parent_agent_id) continue; // subagent-internal, skip (mirrors the old isSidechain filter)
+        const content = entry.message?.content;
 
-      if (entry.type === "assistant") {
-        const text = extractTextFromContent(content);
-        if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null });
-        for (const tu of toolUsesFromContent(content)) {
-          out.push({ role: "tool", text: formatToolSummary(tu.name, tu.input), id: tu.id, ts: null });
+        if (entry.type === "assistant") {
+          const text = extractTextFromContent(content);
+          if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null });
+          for (const tu of toolUsesFromContent(content)) {
+            out.push({ role: "tool", text: formatToolSummary(tu.name, tu.input), id: tu.id, ts: null });
+          }
+        } else if (entry.type === "user" && isRealUserPrompt(content)) {
+          const text = extractTextFromContent(content);
+          if (text.trim()) out.push({ role: "user", text, id: entry.uuid, ts: null });
         }
-      } else if (entry.type === "user" && isRealUserPrompt(content)) {
-        const text = extractTextFromContent(content);
-        if (text.trim()) out.push({ role: "user", text, id: entry.uuid, ts: null });
+      } catch (e) {
+        console.error("[claude-code] skipped a history entry during conversion:", e.message);
       }
     }
     return out;

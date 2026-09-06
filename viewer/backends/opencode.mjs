@@ -552,19 +552,33 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   function convertSessionMessages(rawMessages) {
     const out = [];
     for (const m of rawMessages) {
-      const info = m.info;
-      const parts = m.parts || [];
-      if (info.role === "user") {
-        const text = extractTextFromParts(parts, "text");
-        if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null });
-      } else if (info.role === "assistant") {
-        const text = extractTextFromParts(parts, "text");
-        if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null });
-        for (const p of parts) {
-          if (p.type === "tool" && (p.state?.status === "completed" || p.state?.status === "error")) {
-            out.push({ role: "tool", text: summarizeToolPart(p), id: p.id, ts: null });
+      // One malformed or odd-shaped message must NEVER blank that session's
+      // whole transcript for the viewer. /session/{id}/message can contain
+      // background bookkeeping entries (compaction/summary agents, permission
+      // interstitials) whose `info` is missing or shaped differently than a
+      // normal user/assistant message, and the history route used to bubble
+      // any such exception straight up to a catch-all that returned [] —
+      // so a single such message in an otherwise fine conversation wiped the
+      // entire rendered history. Convert per-message now: skip the unusable
+      // entry, keep everything else.
+      try {
+        const info = m?.info;
+        const parts = Array.isArray(m?.parts) ? m.parts : [];
+        if (!info || typeof info !== "object" || !info.id) continue;
+        if (info.role === "user") {
+          const text = extractTextFromParts(parts, "text");
+          if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null });
+        } else if (info.role === "assistant") {
+          const text = extractTextFromParts(parts, "text");
+          if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null });
+          for (const p of parts) {
+            if (p?.type === "tool" && (p?.state?.status === "completed" || p?.state?.status === "error")) {
+              out.push({ role: "tool", text: summarizeToolPart(p), id: p?.id || info.id, ts: null });
+            }
           }
         }
+      } catch (e) {
+        console.error("[opencode] skipped a history message during conversion:", e.message);
       }
     }
     return out;
@@ -696,7 +710,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       try {
         const raw = await api(`/session/${knownRealId(sessionId)}/message`);
         return convertSessionMessages(raw || []);
-      } catch {
+      } catch (e) {
+        // No silent blanking: an empty transcript looks identical to a
+        // brand-new session to the browser. Log it so a real backend failure
+        // is distinguishable from legitimately having no history yet.
+        console.error(`[opencode] failed to fetch history for session ${sessionId}:`, e.message);
         return [];
       }
     },

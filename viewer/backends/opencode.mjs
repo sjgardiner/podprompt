@@ -414,6 +414,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // for the user message carries its role + id; parts carry messageID, so
     // matching on that set filters the echoes out exactly.
     const userMessageIDs = new Set(); // message ids originating from the user
+    // Part ids of the echoed user text. Delta events carry no messageID, so
+    // the delta path can't check userMessageIDs itself — it mirrors that
+    // guard via these part ids, captured when part.updated detects the echo.
+    const userPartIDs = new Set();
 
     // part.type values that carry a model's chain-of-thought (older opencode
     // calls it "reasoning", newer "thinking"); anything else streaming on a
@@ -443,7 +447,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       if (evt.type === "message.part.updated") {
         const part = evt.properties.part;
         if (!part || !part.id) return;
-        if (userMessageIDs.has(part.messageID)) return; // user-echo part — never render
+        if (userMessageIDs.has(part.messageID)) {
+          // User-echo part — never render, and remember its part id so the
+          // delta path below (which carries no messageID) can't fabricate a
+          // phantom assistant bubble out of that part's streamed deltas.
+          userPartIDs.add(part.id);
+          return;
+        }
         const entry = liveText.get(part.id) || { text: "", started: false, type: part.type };
         entry.type = part.type; // needed later by the part.delta path to pick the broadcast role
         entry.text = part.text || entry.text;
@@ -514,6 +524,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       if (evt.type === "message.part.delta") {
         const { partID, field, delta } = evt.properties;
         if (field !== "text" || !delta) return;
+        if (userPartIDs.has(partID)) return; // user-echo part — never render
         // part.delta carries no part type (verified empirically): the type
         // is whatever the matching message.part.updated recorded, which
         // opencode always delivers before the first delta of a part.
@@ -526,6 +537,15 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         // for the thinking stream and "text" for the answer). Reasoning text
         // must never be broadcast under the assistant role (that's what put
         // the model's whole chain-of-thought into a "Claude" bubble).
+        // Don't open a bubble on pure whitespace: a text part's first delta
+        // can be whitespace only ("\n", spaces), and emitting a stream_start
+        // there created an empty MODEL bubble the moment the turn began —
+        // visible until turn_end and never finalized (finalizeEntry and the
+        // end-of-turn sweep both skip whitespace-only text). Accumulate the
+        // whitespace silently (a real reply's leading whitespace still shows
+        // once the first real token lands) and start broadcasting only once
+        // the part actually holds non-whitespace content.
+        if (!entry.text.trim()) return; // still whitespace-only — keep accumulating, emit nothing
         if (!entry.started) {
           entry.started = true;
           // Record model for this message (from messageModelByRealId if available)

@@ -55,50 +55,63 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // viewer.html's model-switcher payload shape stays identical across
   // backends (see backends/claude-code.mjs's listModels, whose ids are
   // plain model-name strings with no such split).
-  let providerListFetchStarted = false;
+  let providerListPromise = null; // in-flight /config/providers fetch (listModels() awaits it)
   const modelContextLimits = new Map(); // "providerID/modelID" -> context window size
   let modelListCache = []; // [{id, label}]
   let configDefaultModelId = null; // composite "providerID/modelID" of the configured default, if resolvable
 
+  // Returns a promise for a /config/providers fetch so listModels() can await
+  // it. The listen loop is shared across callers (the cache of a successful
+  // one wins; nobody double-fetches). Failure-safe two ways:
+  //   1) a transient error (e.g. this fires before `opencode serve`'s ~1s
+  //      cold start finishes accepting connections) is retried a couple of
+  //      times here with a short delay, so a single /models call — the
+  //      browser's very first one right after boot — still comes back with
+  //      real data instead of an empty cache, and
+  //   2) only when every attempt fails (the server genuinely isn't up) is the
+  //      promise dropped, letting the next listModels() call try from scratch
+  //      — never leaving the cache wrongly "poisoned" for the container's life.
   function fetchProviderListInBackground() {
-    if (providerListFetchStarted) return;
-    providerListFetchStarted = true;
-    (async () => {
-      try {
-        const data = await api("/config/providers");
-        const available = [];
-        let providerIds = new Set();
-        for (const p of data?.providers || []) {
-          providerIds.add(p.id);
-          for (const [modelKey, info] of Object.entries(p.models || {})) {
-            const id = `${p.id}/${modelKey}`;
-            if (info?.limit?.context) modelContextLimits.set(id, info.limit.context);
-            available.push({ id, label: `${p.name || p.id} / ${info?.name || modelKey}` });
+    if (providerListPromise) return providerListPromise;
+    providerListPromise = (async () => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const data = await api("/config/providers");
+          const available = [];
+          let providerIds = new Set();
+          for (const p of data?.providers || []) {
+            providerIds.add(p.id);
+            for (const [modelKey, info] of Object.entries(p.models || {})) {
+              const id = `${p.id}/${modelKey}`;
+              if (info?.limit?.context) modelContextLimits.set(id, info.limit.context);
+              available.push({ id, label: `${p.name || p.id} / ${info?.name || modelKey}` });
+            }
           }
-        }
-        modelListCache = available;
-        // /config/providers also reports the server's configured default as
-        // {providerID: modelID} (or {agentName: ...} in some setups). Pick the
-        // entry whose key names a real provider so /models can pre-select it.
-        configDefaultModelId = null;
-        for (const [key, value] of Object.entries(data?.default || {})) {
-          const composite = String(value).includes("/") ? String(value) : `${key}/${value}`;
-          const [pId, mId] = composite.split("/");
-          if (pId && mId && (providerIds.has(pId) || !providerIds.size)) {
-            configDefaultModelId = composite;
-            break;
+          modelListCache = available;
+          // /config/providers also reports the server's configured default as
+          // {providerID: modelID} (or {agentName: ...} in some setups). Pick the
+          // entry whose key names a real provider so /models can pre-select it.
+          configDefaultModelId = null;
+          for (const [key, value] of Object.entries(data?.default || {})) {
+            const composite = String(value).includes("/") ? String(value) : `${key}/${value}`;
+            const [pId, mId] = composite.split("/");
+            if (pId && mId && (providerIds.has(pId) || !providerIds.size)) {
+              configDefaultModelId = composite;
+              break;
+            }
           }
+          return;
+        } catch (e) {
+          console.error(`[opencode] failed to fetch /config/providers (attempt ${attempt}/3):`, e.message);
+          if (attempt >= 3) break;
+          await new Promise((r) => setTimeout(r, 750));
         }
-      } catch (e) {
-        console.error("[opencode] failed to fetch /config/providers:", e.message);
-        // Don't let a transient failure (e.g. this fires before `opencode
-        // serve`'s ~1s cold start finishes accepting connections) poison the
-        // cache for the rest of the container's life — this flag is what
-        // makes every future call a no-op, so a failed attempt must clear it
-        // to let the next listModels() call try again.
-        providerListFetchStarted = false;
       }
+      // All attempts failed — drop the promise so the next listModels() call
+      // (viewer.html re-fetches on connect and after each turn) retries.
+      providerListPromise = null;
     })();
+    return providerListPromise;
   }
 
   function parseModelId(id) {
@@ -731,7 +744,20 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // same as the Claude backend has no server-side "current mode" of its
       // own either.
       if (!agentListCache) {
-        agentListCache = await api("/agent");
+        try {
+          agentListCache = await api("/agent");
+        } catch (e) {
+          console.error("[opencode] failed to fetch /agent (mode list):", e.message);
+          // opencode `serve` can take ~1s to start accepting connections after
+          // the container boots (start-viewer.sh launches it and the driver at
+          // the same time), so the browser's very first /modes call races that
+          // window. Return an empty list rather than rethrow: driver.mjs's
+          // /modes route has no try/catch of its own, and an unhandled
+          // rejection there kills the whole driver process, taking the viewer
+          // down with it. The empty list also leaves viewer.html's modesResolved
+          // false so it re-fetches on the next connect/turn_end status event.
+          return { available: [] };
+        }
       }
       return {
         // mode: "primary" also includes internal agents (compaction/
@@ -770,8 +796,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // (see the `model` field built in runTurn above), so setModel is a
     // no-op; driver.mjs's own state.model (set right after this resolves)
     // is what runTurn actually reads on the next message it sends.
-    listModels() {
-      fetchProviderListInBackground();
+    async listModels() {
+      // Await the in-flight fetch (with its bounded cold-start retries) so the
+      // very first /models call — not just a later one — returns real data.
+      // On a server that's genuinely down this resolves empty after the retries
+      // exhaust and resets, so the next call tries again from scratch.
+      await fetchProviderListInBackground();
       // `current` pre-selects the server's configured default (from
       // /config/providers' `default` map) so the picker reflects what the
       // next message would actually use; driver.mjs overrides this with

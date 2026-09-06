@@ -474,7 +474,20 @@ const server = createServer(async (req, res) => {
       res.end("null"); // no mode concept for this backend (e.g. Claude Code)
       return;
     }
-    const modes = await backend.listModes(sessionId);
+    let modes;
+    try {
+      modes = await backend.listModes(sessionId);
+    } catch (e) {
+      // A backend error must never kill the process: the async handler's
+      // rejection would otherwise surface as an unhandled rejection and node
+      // exits, which is exactly what leaves the whole viewer "unusable" when
+      // /modes races `opencode serve`'s ~1s cold-start window. viewer.html
+      // swallow-errors this response and retries on the next status event.
+      console.error("[driver] /modes backend call failed:", e.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end('{"error":"backend failed to list modes"}');
+      return;
+    }
     if (modes && state) modes.current = state.mode || modes.current || null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(modes));
@@ -527,7 +540,17 @@ const server = createServer(async (req, res) => {
       res.end("null"); // no model concept for this backend
       return;
     }
-    const models = await backend.listModels(sessionId);
+    let models;
+    try {
+      models = await backend.listModels(sessionId);
+    } catch (e) {
+      // Same resilience rationale as /modes above: no backend can take the
+      // driver down with an unhandled rejection.
+      console.error("[driver] /models backend call failed:", e.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end('{"error":"backend failed to list models"}');
+      return;
+    }
     if (models && state) models.current = state.model || models.current || null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(models));

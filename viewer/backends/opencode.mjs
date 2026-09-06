@@ -76,7 +76,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     providerListPromise = (async () => {
       for (let attempt = 1; ; attempt++) {
         try {
-          const data = await api("/config/providers");
+          const data = await api("/config/providers", { timeoutMs: 10000 });
           const available = [];
           let providerIds = new Set();
           for (const p of data?.providers || []) {
@@ -160,7 +160,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     knownCommandsFetchStarted = true;
     (async () => {
       try {
-        const list = await api("/command");
+        const list = await api("/command", { timeoutMs: 5000 });
         knownCommandsCache = {
           slash_commands: (list || []).map((c) => c.name),
           terminal_slash_commands: [],
@@ -259,18 +259,38 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     if (waiter) waiter.onEvent(evt);
   }
 
+  // Optional explicit timeout (opts.timeoutMs) — some requests MUST be able to
+  // fail fast: a /config/providers fetch that hangs (a socket race during a
+  // serve cold start can leave undici's connection stuck forever) would hold
+  // providerListPromise pending indefinitely and every later /models call
+  // would await a promise that never settles — the model picker silently
+  // never appearing. Default is NO timeout: the POST to /session/{id}/message
+  // waits for the full generation and must not be aborted mid-reply.
   async function api(path, opts) {
-    const res = await fetch(`${BASE}${path}`, {
-      ...opts,
-      headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
-    });
-    if (!res.ok && res.status !== 204) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`OpenCode API ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    const { timeoutMs, headers, ...rest } = opts || {};
+    let signal;
+    let timer;
+    if (timeoutMs) {
+      const ctl = new AbortController();
+      timer = setTimeout(() => ctl.abort(new Error(`OpenCode API ${path} timed out after ${timeoutMs}ms`)), timeoutMs);
+      signal = ctl.signal;
     }
-    if (res.status === 204) return null;
-    const ct = res.headers.get("content-type") || "";
-    return ct.includes("application/json") ? res.json() : res.text();
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        ...rest,
+        signal,
+        headers: { "Content-Type": "application/json", ...(headers || {}) },
+      });
+      if (!res.ok && res.status !== 204) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`OpenCode API ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+      }
+      if (res.status === 204) return null;
+      const ct = res.headers.get("content-type") || "";
+      return ct.includes("application/json") ? res.json() : res.text();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // ── Part -> viewer broadcast translation ────────────────────────────────
@@ -321,28 +341,63 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // stream_delta status update needs (mirrors the Claude backend's
     // stream_start/stream_delta shape so the browser's existing live-typing
     // rendering works unmodified for either backend).
-    const liveText = new Map(); // partID -> { text, started }
+    const liveText = new Map(); // partID -> { text, started, type, sentMessage }
+
+    // opencode re-broadcasts the just-appended USER message as ordinary
+    // "type: text" parts over /event (probe-confirmed: message.part.updated
+    // with the full prompt text under the user message's id). Those would
+    // otherwise be indistinguishable from the assistant's first answer parts
+    // and get fabricated into a spurious assistant bubble right after every
+    // prompt — the empty-bubble-plus-blinking-cursor bug. message.updated
+    // for the user message carries its role + id; parts carry messageID, so
+    // matching on that set filters the echoes out exactly.
+    const userMessageIDs = new Set(); // message ids originating from the user
+
+    // part.type values that carry a model's chain-of-thought (older opencode
+    // calls it "reasoning", newer "thinking"); anything else streaming on a
+    // part.delta is the assistant's actual answer.
+    const isThinkingPart = (type) => type === "reasoning" || type === "thinking";
+    const roleForPartType = (type) => (isThinkingPart(type) ? "thinking" : "assistant");
 
     const pendingApprovalPromises = [];
 
     function onEvent(evt) {
       if (evt.type === "message.part.updated") {
         const part = evt.properties.part;
-        if (part.type === "text") {
-          const entry = liveText.get(part.id) || { text: "", started: false };
-          entry.text = part.text || entry.text;
-          liveText.set(part.id, entry);
-          if (!entry.started && entry.text) {
-            entry.started = true;
-            broadcastStatus(sessionId, { type: "stream_start", id: part.id, role: "assistant" });
-          }
+        if (!part || !part.id) return;
+        if (userMessageIDs.has(part.messageID)) return; // user-echo part — never render
+        const entry = liveText.get(part.id) || { text: "", started: false, type: part.type };
+        entry.type = part.type; // needed later by the part.delta path to pick the broadcast role
+        entry.text = part.text || entry.text;
+        liveText.set(part.id, entry);
+
+        if (part.type === "reasoning" || part.type === "thinking") {
+          // Thinking full-text path. opencode's server almost always streams
+          // thinking via part.delta (the reasoning part's part.updated shows
+          // text:"" at creation) — but when it does carry text on this event
+          // (or a reasoning frontend delivers the whole thing at once), this
+          // is what surfaces it as a thinking bubble. Deltas keep streaming
+          // into the same bubble afterwards (same part.id); the final
+          // authoritative text is re-broadcast when the turn ends.
+          if (entry.text) broadcast(sessionId, "thinking", entry.text, part.id);
           return;
         }
-        if (part.type === "reasoning") {
-          const entry = liveText.get(part.id) || { text: "", started: false };
-          entry.text = part.text || entry.text;
-          liveText.set(part.id, entry);
-          if (entry.text) broadcast(sessionId, "thinking", entry.text, part.id);
+        if (part.type === "text") {
+          // NO stream_start here — that's emitted by the first part.delta
+          // below instead. opencode fires message.part.updated for the
+          // USER's own echoed text part too, and emitting a stream_start on
+          // that used to raise an EMPTY assistant bubble with a blinking
+          // cursor immediately after every prompt, before a single reply
+          // token had arrived.
+          if (entry.text && !entry.started) {
+            // A reply delivered whole with no deltas (a short/unchunked
+            // response): surface it directly as the final message. Deltas
+            // never fire for it, so started + sentMessage here keep the
+            // turn-end finalization from re-broadcasting the same text.
+            entry.started = true;
+            entry.sentMessage = true;
+            broadcast(sessionId, "assistant", entry.text, part.id);
+          }
           return;
         }
         if (part.type === "tool") {
@@ -364,14 +419,23 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       if (evt.type === "message.part.delta") {
         const { partID, field, delta } = evt.properties;
         if (field !== "text" || !delta) return;
-        const entry = liveText.get(partID) || { text: "", started: false };
+        // part.delta carries no part type (verified empirically): the type
+        // is whatever the matching message.part.updated recorded, which
+        // opencode always delivers before the first delta of a part.
+        const entry = liveText.get(partID) || { text: "", started: false, type: undefined };
         entry.text += delta;
         liveText.set(partID, entry);
+        // part.delta carries NO part type — the role is looked up from the
+        // most recent part.updated for this part.id (empirically that event
+        // arrives before the first delta of a part, carrying type "reasoning"
+        // for the thinking stream and "text" for the answer). Reasoning text
+        // must never be broadcast under the assistant role (that's what put
+        // the model's whole chain-of-thought into a "Claude" bubble).
         if (!entry.started) {
           entry.started = true;
-          broadcastStatus(sessionId, { type: "stream_start", id: partID, role: "assistant" });
+          broadcastStatus(sessionId, { type: "stream_start", id: partID, role: roleForPartType(entry.type) });
         }
-        broadcastStatus(sessionId, { type: "stream_delta", id: partID, role: "assistant", text: entry.text });
+        broadcastStatus(sessionId, { type: "stream_delta", id: partID, role: roleForPartType(entry.type), text: entry.text });
         return;
       }
 
@@ -384,7 +448,14 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // plan/rate-limit bar (OpenCode has no subscription/quota concept).
       if (evt.type === "message.updated") {
         const info = evt.properties?.info;
-        if (!info || info.role !== "assistant") return;
+        if (!info) return;
+        if (info.role === "user" && info.id) {
+          // Remember user message ids so the echoed user text part above can
+          // be told apart from the assistant's answer parts.
+          userMessageIDs.add(info.id);
+          return;
+        }
+        if (info.role !== "assistant") return;
         if (info.tokens) {
           const t = info.tokens;
           const totalTokens = (t.input || 0) + (t.output || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
@@ -403,7 +474,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         // ourselves sidesteps any risk of double-counting if this event
         // fires more than once per message.
         if (info.time?.completed) {
-          api(`/session/${realId}`).then((s) => {
+          api(`/session/${realId}`, { timeoutMs: 8000 }).then((s) => {
             if (typeof s?.cost === "number") broadcastStatus(sessionId, { type: "spend", totalCostUsd: s.cost });
           }).catch(() => {});
         }
@@ -492,6 +563,25 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // period.
       await Promise.race([done, sleep(15000).then(() => {})]);
       await Promise.all(pendingApprovalPromises);
+
+      // Finalize every still-streaming bubble: opencode broadcasts no
+      // terminal "message" of its own, so without this the browser's live
+      // typing cursor would keep blinking forever on each bubble after the
+      // turn ended. Broadcast the authoritative full text under the correct
+      // role (a "thinking" one for reasoning/thinking parts, "assistant"
+      // otherwise) under the SAME part.id — the browser treats a broadcast
+      // for an already-streaming part as the finalize signal (drops the
+      // typing cursor, swaps to a real markdown render for assistants).
+      // Thinking bubbles get their own final authoritative text even if
+      // part.updated already carried it mid-stream (entries sent whole via
+      // the "no deltas" path above are skipped via sentMessage). All done
+      // before turn_end so the status-bar resync and the blockers see the
+      // finished text arrive in order.
+      for (const [partId, entry] of liveText) {
+        if (entry.started && entry.text && !entry.sentMessage) {
+          broadcast(sessionId, roleForPartType(entry.type), entry.text, partId);
+        }
+      }
     } catch (e) {
       console.error(`[opencode] error during turn for session ${sessionId}:`, e.message);
       broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID());
@@ -510,7 +600,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     try {
       await api(`/permission/${requestID}/reply`, {
         method: "POST",
-        body: JSON.stringify({ reply: decision?.allow ? "once" : "reject" }),
+        body: JSON.stringify({ answer: decision?.allow ? "once" : "reject" }),
+        timeoutMs: 5000,
       });
     } catch (e) {
       console.error("[opencode] failed to reply to permission:", e.message);
@@ -535,6 +626,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       await api(`/question/${requestID}/reply`, {
         method: "POST",
         body: JSON.stringify({ answers }),
+        timeoutMs: 5000,
       });
     } catch (e) {
       console.error("[opencode] failed to reply to question:", e.message);
@@ -601,6 +693,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const created = await api(`/session?directory=${encodeURIComponent(dir)}`, {
       method: "POST",
       body: JSON.stringify({}),
+      timeoutMs: 10000,
     });
     clientToReal.set(sessionId, created.id);
     realToClient.set(created.id, sessionId);
@@ -617,7 +710,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
 
     async abort(sessionId) {
       try {
-        await api(`/session/${knownRealId(sessionId)}/abort`, { method: "POST" });
+        await api(`/session/${knownRealId(sessionId)}/abort`, { method: "POST", timeoutMs: 5000 });
       } catch (e) {
         console.error("[opencode] abort failed:", e.message);
       }
@@ -669,7 +762,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     },
 
     async listSessions({ includeUnreachable }, sessionsIndex, pendingKindForSession) {
-      const raw = await api("/session");
+      const raw = await api("/session", { timeoutMs: 8000 });
       const list = (raw || [])
         .filter((s) => !s.parentID) // subtask/child sessions aren't shown as their own top-level entry
         .map((s) => {
@@ -711,7 +804,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       let lastErr;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const raw = await api(`/session/${target}/message`);
+          const raw = await api(`/session/${target}/message`, { timeoutMs: 15000 });
           return convertSessionMessages(raw || []);
         } catch (e) {
           // Same cold-start budget as the provider fetch: a tab can connect
@@ -732,6 +825,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       await api(`/session/${knownRealId(sessionId)}`, {
         method: "PATCH",
         body: JSON.stringify({ time: { archived: Date.now() } }),
+        timeoutMs: 8000,
       });
     },
 
@@ -742,12 +836,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       await api(`/session/${knownRealId(sessionId)}`, {
         method: "PATCH",
         body: JSON.stringify({ time: { archived: 0 } }),
+        timeoutMs: 8000,
       });
     },
 
     async deleteSession(sessionId) {
       const realId = knownRealId(sessionId);
-      await api(`/session/${realId}`, { method: "DELETE" });
+      await api(`/session/${realId}`, { method: "DELETE", timeoutMs: 5000 });
       clientToReal.delete(sessionId);
       realToClient.delete(realId);
     },
@@ -756,6 +851,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       await api(`/session/${knownRealId(sessionId)}`, {
         method: "PATCH",
         body: JSON.stringify({ title }),
+        timeoutMs: 5000,
       });
     },
 
@@ -772,7 +868,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // own either.
       if (!agentListCache) {
         try {
-          agentListCache = await api("/agent");
+          agentListCache = await api("/agent", { timeoutMs: 5000 });
         } catch (e) {
           console.error("[opencode] failed to fetch /agent (mode list):", e.message);
           // opencode `serve` can take ~1s to start accepting connections after

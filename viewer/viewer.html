@@ -181,6 +181,12 @@
     white-space: nowrap;
     flex-shrink: 0;
   }
+  /* Deliberately the same red as #context-usage-fill.crit, for the same
+     "you're in trouble" meaning — but no intermediate amber tier here (see
+     the plan_usage handler below for why: this is a plain-text label, not a
+     fill bar, so a single normal/warning state reads more cleanly than a
+     three-stage gradient would). */
+  #plan-usage-wrap.warn { color: #f87171; }
   #plan-usage-wrap.show { display: block; }
 
   header button {
@@ -196,12 +202,23 @@
   header button:hover { background: var(--border); color: var(--text); }
 
   /* ── Settings panel ────────────────────────────────────────────────── */
+  /* Was a single 230px column of ~14 rows — taller than most browser
+     windows. Now a fixed-size grid of column groups (see .settings-columns
+     below) so it grows wide instead of tall; #settings-panel itself still
+     caps its own height and scrolls internally (max-height/overflow-y) as a
+     backstop, since a future added row/group could still push total content
+     past viewport height even in a 2-column layout, and a panel with no
+     escape hatch that overflows off the bottom of the screen is worse than
+     one that merely scrolls. */
   #settings-panel {
     display: none;
     position: absolute;
     top: 48px;
     right: 20px;
-    width: 230px;
+    width: 460px;
+    max-width: calc(100vw - 40px);
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -210,7 +227,26 @@
     z-index: 20;
   }
   #settings-panel.open { display: block; }
-  .settings-row { margin-bottom: 14px; font-size: 13px; }
+  .settings-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 24px;
+  }
+  /* Narrow windows (or this panel's own max-width kicking in) collapse back
+     to one column rather than squeezing two columns into too little space
+     — the same reason max-width above exists: nothing here should ever be
+     able to push content past the viewport's edge. */
+  @media (max-width: 520px) {
+    .settings-columns { grid-template-columns: 1fr; }
+  }
+  .settings-col {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-width: 0;
+  }
+  .settings-group { min-width: 0; }
+  .settings-row { margin-bottom: 14px; font-size: 13px; min-width: 0; }
   .settings-row:last-child { margin-bottom: 0; }
   .settings-row label {
     display: flex;
@@ -219,8 +255,19 @@
     gap: 8px;
     color: var(--text);
   }
-  .settings-row input[type="range"] { width: 100%; margin-top: 6px; grid-column: 1 / -1; }
+  .settings-row input[type="range"] { width: 100%; margin-top: 6px; }
   .settings-row .row-value { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Rows whose control is a <select>: stacked (label text above, select
+     below spanning the full row width) rather than side-by-side. A
+     <select> sizes itself to its longest <option> text regardless of
+     flexbox shrink rules in every browser tested, which is exactly what
+     used to push one of these past the panel's right edge under the old
+     side-by-side layout — width:100% on a full-width block below the label
+     can't overflow the row no matter how long its options' text is. */
+  .settings-row.select-row label {
+    display: block;
+  }
+  .settings-row.select-row label > span { display: block; margin-bottom: 4px; }
   .settings-row select {
     background: var(--code-bg);
     color: var(--text);
@@ -228,6 +275,9 @@
     border-radius: 5px;
     padding: 3px 6px;
     font-size: 12px;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
   .settings-row.disabled label { opacity: .45; }
   .settings-group-title {
@@ -1041,88 +1091,113 @@
   </div>
 
   <div id="settings-panel">
-    <div class="settings-row">
-      <label>Font size <span class="row-value" id="font-size-val">15px</span></label>
-      <input type="range" id="font-size-slider" min="8" max="40" step="1" value="15">
-    </div>
-    <div class="settings-row">
-      <label>Content width <span class="row-value" id="width-val">860px</span></label>
-      <input type="range" id="width-slider" min="360" max="2600" step="20" value="860">
-    </div>
-    <div class="settings-row">
-      <label>Label size <span class="row-value" id="label-size-val">11px</span></label>
-      <input type="range" id="label-size-slider" min="6" max="32" step="1" value="11">
-    </div>
-    <div class="settings-row">
-      <label>Status text size <span class="row-value" id="status-size-val">12px</span></label>
-      <input type="range" id="status-size-slider" min="6" max="32" step="1" value="12">
-    </div>
-    <div class="settings-row">
-      <label><span>Light theme</span> <input type="checkbox" id="theme-toggle"></label>
-    </div>
-    <div class="settings-row">
-      <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
-    </div>
-    <div class="settings-row">
-      <label>Auto-scroll animation
-        <select id="autoscroll-anim">
-          <option value="smooth" selected>Smooth</option>
-          <option value="instant">Instant</option>
-        </select>
-      </label>
-    </div>
-    <div class="settings-row">
-      <label>Thinking blocks
-        <select id="thinking-mode">
-          <option value="collapse" selected>Collapsed (click to open)</option>
-          <option value="show">Show (streamed, scrollable)</option>
-          <option value="hide">Hide</option>
-        </select>
-      </label>
-    </div>
+    <div class="settings-columns">
+      <div class="settings-col">
+        <div class="settings-group">
+          <div class="settings-group-title">Display</div>
+          <div class="settings-row">
+            <label>Font size <span class="row-value" id="font-size-val">15px</span></label>
+            <input type="range" id="font-size-slider" min="8" max="40" step="1" value="15">
+          </div>
+          <div class="settings-row">
+            <label>Content width <span class="row-value" id="width-val">860px</span></label>
+            <input type="range" id="width-slider" min="360" max="2600" step="20" value="860">
+          </div>
+          <div class="settings-row">
+            <label>Label size <span class="row-value" id="label-size-val">11px</span></label>
+            <input type="range" id="label-size-slider" min="6" max="32" step="1" value="11">
+          </div>
+          <div class="settings-row">
+            <label>Status text size <span class="row-value" id="status-size-val">12px</span></label>
+            <input type="range" id="status-size-slider" min="6" max="32" step="1" value="12">
+          </div>
+          <div class="settings-row">
+            <label><span>Light theme</span> <input type="checkbox" id="theme-toggle"></label>
+          </div>
+          <div class="settings-row">
+            <label><span>Show tool calls</span> <input type="checkbox" id="tools-toggle" checked></label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Auto-scroll animation</span>
+              <select id="autoscroll-anim">
+                <option value="smooth" selected>Smooth</option>
+                <option value="instant">Instant</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Thinking blocks</span>
+              <select id="thinking-mode">
+                <option value="collapse" selected>Collapsed (click to open)</option>
+                <option value="show">Show (streamed, scrollable)</option>
+                <option value="hide">Hide</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
 
-    <div class="settings-group-title">Sessions</div>
-    <div class="settings-row">
-      <label>Layout
-        <select id="sessions-layout">
-          <option value="flat" selected>Flat</option>
-          <option value="grouped">Grouped by project</option>
-        </select>
-      </label>
-    </div>
-    <div class="settings-row">
-      <label>Unreachable sessions
-        <select id="unreachable-mode">
-          <option value="hidden">Hidden</option>
-          <option value="count" selected>Show count</option>
-          <option value="shown">Show, greyed out</option>
-        </select>
-      </label>
-    </div>
-    <div class="settings-row">
-      <label>Status badge position
-        <select id="badge-position">
-          <option value="after" selected>After title</option>
-          <option value="before">Before title</option>
-        </select>
-      </label>
-    </div>
+      <div class="settings-col">
+        <div class="settings-group">
+          <div class="settings-group-title">Sessions</div>
+          <div class="settings-row select-row">
+            <label><span>Layout</span>
+              <select id="sessions-layout">
+                <option value="flat" selected>Flat</option>
+                <option value="grouped">Grouped by project</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Unreachable sessions</span>
+              <select id="unreachable-mode">
+                <option value="hidden">Hidden</option>
+                <option value="count" selected>Show count</option>
+                <option value="shown">Show, greyed out</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row select-row">
+            <label><span>Status badge position</span>
+              <select id="badge-position">
+                <option value="after" selected>After title</option>
+                <option value="before">Before title</option>
+              </select>
+            </label>
+          </div>
+        </div>
 
-    <div class="settings-group-title">Timestamps</div>
-    <div class="settings-row">
-      <label>Format
-        <select id="ts-format">
-          <option value="hidden">Hidden</option>
-          <option value="time" selected>Time only</option>
-          <option value="datetime">Date + time</option>
-        </select>
-      </label>
-    </div>
-    <div class="settings-row" id="ts-24h-row">
-      <label><span>24-hour time</span> <input type="checkbox" id="ts-24h"></label>
-    </div>
-    <div class="settings-row" id="ts-tz-row">
-      <label><span>Show time zone</span> <input type="checkbox" id="ts-tz"></label>
+        <div class="settings-group">
+          <div class="settings-group-title">Timestamps</div>
+          <div class="settings-row select-row">
+            <label><span>Format</span>
+              <select id="ts-format">
+                <option value="hidden">Hidden</option>
+                <option value="time" selected>Time only</option>
+                <option value="datetime">Date + time</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-row" id="ts-24h-row">
+            <label><span>24-hour time</span> <input type="checkbox" id="ts-24h"></label>
+          </div>
+          <div class="settings-row" id="ts-tz-row">
+            <label><span>Show time zone</span> <input type="checkbox" id="ts-tz"></label>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-group-title">Usage</div>
+          <div class="settings-row select-row">
+            <label><span>Reset time format</span>
+              <select id="usage-reset-format">
+                <option value="absolute" selected>Absolute (e.g. 2:20 PM)</option>
+                <option value="relative">Relative (e.g. in 3 hr 31 min)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1318,6 +1393,7 @@ function resetBackendControlsDisplay() {
   contextUsageWrap.classList.remove('show');
   contextUsageFill.classList.remove('warn', 'crit', 'compacting');
   planUsageWrap.classList.remove('show');
+  lastPlanUsageStatus = null;
   autoApproveToggle.checked = false;
   autoApproveRow.classList.remove('active');
   modelSelect.classList.remove('show');
@@ -1384,6 +1460,60 @@ function refreshTimestamps() {
   for (const id of feedOrder) {
     const entry = msgs[id];
     if (entry && entry.tsEl) entry.tsEl.textContent = formatTs(entry.ts);
+  }
+}
+
+// Countdown form of a reset timestamp — "in 3 hr 31 min", matching the
+// wording Claude Desktop uses for the same underlying data. Deliberately
+// not reusing formatTs's opts (12h/24h/tz only make sense for a clock-face
+// reading, not a duration) — this is a from-scratch relative render, not a
+// variant of it.
+function formatRelativeReset(iso) {
+  if (!iso) return '';
+  const deltaMs = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(deltaMs)) return '';
+  if (deltaMs <= 0) return 'shortly';
+  const totalMin = Math.round(deltaMs / 60000);
+  const hr = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  if (hr <= 0) return `in ${min} min`;
+  if (min === 0) return `in ${hr} hr`;
+  return `in ${hr} hr ${min} min`;
+}
+
+// Last plan_usage status received for whatever session is currently being
+// viewed — kept around (rather than only ever rendering the bar once, when
+// the status first arrives) so renderPlanUsage() can be re-run any time
+// something that affects its *display* changes without a new turn having
+// happened: settings.planResetFormat (absolute/relative) and the same
+// tsFormat/hour24/showTz settings the message bubbles use, both handled by
+// applySettings() calling this the same way it calls refreshTimestamps().
+// Cleared by resetBackendControlsDisplay() on every session switch so a
+// settings change made while viewing session B can't redisplay session A's
+// stale reading.
+let lastPlanUsageStatus = null;
+
+function renderPlanUsage() {
+  const s = lastPlanUsageStatus;
+  if (!s) return;
+  const WARN_THRESHOLD = 70;
+  // Not named `window` — that'd shadow the global browser window object.
+  const rateWindow = s.rate_limits?.five_hour?.utilization != null
+    ? s.rate_limits.five_hour
+    : (s.rate_limits?.seven_day?.utilization != null ? s.rate_limits.seven_day : null);
+  if (s.subscription_type && rateWindow) {
+    const pct = Math.round(rateWindow.utilization);
+    const resetStr = rateWindow.resets_at
+      ? (settings.planResetFormat === 'relative' ? formatRelativeReset(rateWindow.resets_at) : formatTs(rateWindow.resets_at))
+      : '';
+    // Percentage always shown now (used to disappear behind just the reset
+    // time) — the reset time is appended when available, not swapped in.
+    planUsageWrap.textContent = resetStr ? `${pct}% · resets ${resetStr}` : `${pct}%`;
+    planUsageWrap.title = `Subscription: ${s.subscription_type} — ${pct}% of usage window used`;
+    planUsageWrap.classList.toggle('warn', pct >= WARN_THRESHOLD);
+    planUsageWrap.classList.add('show');
+  } else {
+    planUsageWrap.classList.remove('show');
   }
 }
 
@@ -2018,18 +2148,14 @@ function connect() {
     // Claude subscription plan-limit bar (Claude Code only — hidden
     // whenever rate_limits_available was false server-side, e.g. this
     // session is running over LiteLLM/an API key/Bedrock/Vertex rather
-    // than a real Pro/Max/Team/Enterprise OAuth login).
+    // than a real Pro/Max/Team/Enterprise OAuth login). Actual rendering
+    // lives in renderPlanUsage() (see its definition, near formatTs) so the
+    // same code path can be re-run from applySettings() when the
+    // absolute/relative or timestamp-format settings change, without
+    // needing a fresh status broadcast to do it.
     if (s.type === 'plan_usage') {
-      const parts = [];
-      if (s.rate_limits?.five_hour?.utilization != null) parts.push(`5h ${Math.round(s.rate_limits.five_hour.utilization)}%`);
-      if (s.rate_limits?.seven_day?.utilization != null) parts.push(`7d ${Math.round(s.rate_limits.seven_day.utilization)}%`);
-      if (s.subscription_type && parts.length) {
-        planUsageWrap.textContent = parts.join(' · ');
-        planUsageWrap.title = `Subscription: ${s.subscription_type}`;
-        planUsageWrap.classList.add('show');
-      } else {
-        planUsageWrap.classList.remove('show');
-      }
+      lastPlanUsageStatus = s;
+      renderPlanUsage();
     }
 
     // OpenCode's analogue of plan_usage — no plan/quota concept exists
@@ -2101,6 +2227,7 @@ const SETTINGS_DEFAULTS = {
   autoScrollAnim: 'smooth',
   tsFormat:'time', hour24:false, showTz:false, thinking:'collapse',
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
+  planResetFormat: 'absolute',
 };
 
 function loadSettings() {
@@ -2131,6 +2258,7 @@ function applySettings() {
   ts24h.disabled = tsHidden;
   tsTz.disabled = tsHidden;
   refreshTimestamps();
+  renderPlanUsage();
   applyThinkingMode();
 }
 
@@ -2156,6 +2284,7 @@ const ts24h          = document.getElementById('ts-24h');
 const tsTz           = document.getElementById('ts-tz');
 const ts24hRow       = document.getElementById('ts-24h-row');
 const tsTzRow        = document.getElementById('ts-tz-row');
+const planResetFormatSelect = document.getElementById('usage-reset-format');
 const settingsBtn    = document.getElementById('settings-btn');
 const settingsPanel  = document.getElementById('settings-panel');
 const exportBtn      = document.getElementById('export-btn');
@@ -2178,6 +2307,7 @@ badgePositionSelect.value = settings.badgePosition;
 tsFormat.value = settings.tsFormat;
 ts24h.checked = settings.hour24;
 tsTz.checked = settings.showTz;
+planResetFormatSelect.value = settings.planResetFormat;
 applySettings();
 
 fontSlider.addEventListener('input', () => {
@@ -2299,6 +2429,21 @@ tsTz.addEventListener('change', () => {
   applySettings();
   saveSettings();
 });
+
+planResetFormatSelect.addEventListener('change', () => {
+  settings.planResetFormat = planResetFormatSelect.value;
+  applySettings();
+  saveSettings();
+});
+
+// Relative reset times ("in 3 hr 31 min") go stale on their own, unlike an
+// absolute clock reading — re-render once a minute purely to keep the
+// countdown accurate, but only bother when there's something cached to
+// re-render and the user is actually looking at relative mode; renderPlanUsage()
+// itself is a no-op with nothing cached, so this is a cheap poll either way.
+setInterval(() => {
+  if (settings.planResetFormat === 'relative' && lastPlanUsageStatus) renderPlanUsage();
+}, 60000);
 
 settingsBtn.addEventListener('click', () => {
   settingsPanel.classList.toggle('open');

@@ -53,17 +53,25 @@ from urllib.parse import parse_qs, urlparse
 VIEWER_HTML = Path(__file__).parent / "viewer.html"
 
 # ── Per-session shared state ────────────────────────────────────────────────────
-# sessionId -> {"log": [...], "seeded": bool, "seeding": bool, "clients": [Queue, ...]}
+# sessionId -> {"log": [...], "seeded": bool, "seeding": bool, "clients": [Queue, ...],
+#               "last_status": {type: payload}}
 sessions: dict[str, dict] = {}
 sessions_lock = threading.Lock()
 DRIVER_PORT: int | None = None
+
+# Which /status payload types are a *current gauge reading* (still true and
+# worth showing immediately to a tab that only just connected) rather than a
+# one-off event about something that just happened (turn_start/turn_end/
+# stream_delta/tool_progress/thinking_tokens/...). Keyed by type so
+# GAUGE_STATUS_TYPES membership doubles as the cache-and-replay allowlist.
+GAUGE_STATUS_TYPES = {"plan_usage", "context_usage", "spend"}
 
 
 def _get_session(session_id: str) -> dict:
     with sessions_lock:
         s = sessions.get(session_id)
         if s is None:
-            s = {"log": [], "seeded": False, "seeding": False, "clients": []}
+            s = {"log": [], "seeded": False, "seeding": False, "clients": [], "last_status": {}}
             sessions[session_id] = s
         return s
 
@@ -305,6 +313,7 @@ class Handler(BaseHTTPRequestHandler):
             with sessions_lock:
                 s["clients"].append(q)
                 log_snapshot = list(s["log"])
+                status_snapshot = list(s["last_status"].values())
 
             try:
                 # Browsers' EventSource doesn't fire 'open' on response
@@ -328,6 +337,17 @@ class Handler(BaseHTTPRequestHandler):
                 # first time in this browser session.
                 for entry in log_snapshot:
                     payload = f"event: history\ndata: {json.dumps(entry)}\n\n"
+                    self.wfile.write(payload.encode())
+                self.wfile.flush()
+
+                # Restore any "current gauge reading" statuses (plan_usage/
+                # context_usage/spend — see GAUGE_STATUS_TYPES) so the
+                # usage bars reappear immediately on connect instead of
+                # staying hidden until the next turn happens to rebroadcast
+                # them. Sent as plain "status" events, same as live ones —
+                # the client can't tell (and doesn't need to) the difference.
+                for status_payload in status_snapshot:
+                    payload = f"event: status\ndata: {json.dumps(status_payload)}\n\n"
                     self.wfile.write(payload.encode())
                 self.wfile.flush()
 
@@ -431,9 +451,21 @@ class Handler(BaseHTTPRequestHandler):
                 broadcast_meta(session_id, "permission")
 
         # Ephemeral UI-state signals (turn_start/turn_end/stream_delta/...) —
-        # broadcast only, deliberately not appended to any log: these are
-        # point-in-time signals, not something that makes sense to replay.
+        # broadcast only, deliberately not appended to the message log: these
+        # are point-in-time signals, not something that makes sense to replay
+        # as part of the conversation. A *subset* of them (GAUGE_STATUS_TYPES)
+        # describe a current reading rather than a momentary event, though —
+        # e.g. plan_usage/context_usage — and those ARE worth restoring to a
+        # tab that (re)connects between turns, otherwise the bar just vanishes
+        # on every refresh until the next turn happens to refresh it, even
+        # though the underlying fact it displays hasn't changed at all. Fixed
+        # 2026-09-06 after exactly that was reported: the bar showed once,
+        # then a refresh alone made it disappear.
         elif path == "/status" and session_id:
+            if payload.get("type") in GAUGE_STATUS_TYPES:
+                s = _get_session(session_id)
+                with sessions_lock:
+                    s["last_status"][payload["type"]] = payload
             broadcast_to(session_id, "status", json.dumps(payload))
             if payload.get("type") in ("turn_start", "turn_end"):
                 broadcast_meta(session_id, payload["type"])

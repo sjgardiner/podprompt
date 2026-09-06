@@ -269,19 +269,19 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // runs anywhere without keeping an idle Query warm, which we don't do here.)
   let knownCommands = { slash_commands: [], terminal_slash_commands: [], skills: [] };
 
-  // ── Available models, refreshed opportunistically from the tail of every
-  // turn (see the `result` handling in consume() below) ───────────────────
+  // ── Available models, refreshed opportunistically from the start of every
+  // turn (see the `system`/`init` handling in consume() below) ────────────
   // Same shape of problem as knownCommands above: Query.supportedModels() is
   // a live control-request method, not a standalone function, so there's no
   // way to populate this before any turn has ever run. Shared across sessions
   // for the same reason knownCommands is — the model lineup doesn't vary per
   // session, only which one a given session has selected (state.model).
   let knownModels = [];
-  // Set once usage_EXPERIMENTAL_...() has rejected a first time — see the
-  // "result" message handling below — so an unsupported-on-this-CLI-build
-  // control command logs one clear line instead of spamming the console
-  // (and the attached pty a human may never actually see) on every turn of
-  // every session for the rest of this process's life.
+  // Rate-limits (not disables) the console.error for usage_EXPERIMENTAL_...()
+  // failures — see the "system"/"init" handling in consume() below, which
+  // calls it fresh every turn regardless of whether a past attempt failed,
+  // so one transient failure can't permanently hide the plan-usage bar for
+  // the rest of this process's life.
   let loggedUsageApiUnavailable = false;
 
   function summarizeToolInput(toolInput) {
@@ -631,6 +631,50 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             terminal_slash_commands: msg.terminal_slash_commands || [],
             skills: msg.skills || [],
           };
+          // supportedModels()/usage_EXPERIMENTAL_...() are control-request
+          // methods on this live Query `q` — they round-trip to the CLI
+          // subprocess over its control channel. Verified by hand (against
+          // this exact CLI build) that this channel stops being serviced
+          // right around when the CLI emits its final `result` message for
+          // the turn: calling either method there (previously done, at the
+          // `result` branch below) reliably rejects with "Query closed
+          // before response received" — 100% reproducible, not a flaky
+          // race — while calling the *same* methods here, immediately after
+          // `system/init`, resolves in ~1s every time. So this isn't a
+          // CLI-version gap (both control commands are already implemented
+          // in this container's CLI binary — confirmed by string-searching
+          // the actual binary at CLAUDE_CODE_EXECPATH — and this call
+          // proves it live), it's purely about calling before the turn's
+          // control channel winds down. Net effect: these refresh once per
+          // turn, from *before* that turn's tokens are counted (a turn's
+          // lag behind, same trade-off knownCommands above already made) —
+          // acceptable for a usage meter that only needs to move over time,
+          // not be perfectly real-time.
+          q.supportedModels().then((models) => {
+            knownModels = models || [];
+          }).catch((e) => {
+            console.error(`[claude-code] supportedModels() failed for session ${sessionId}:`, e.message);
+          });
+          q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then((usage) => {
+            broadcastStatus(sessionId, {
+              type: "plan_usage",
+              subscription_type: usage?.rate_limits_available ? usage.subscription_type : null,
+              rate_limits: usage?.rate_limits_available ? usage.rate_limits : null,
+            });
+          }).catch((e) => {
+            // Not disabling future attempts on failure (unlike the old
+            // loggedUsageApiUnavailable one-shot breaker this replaces) —
+            // a transient failure on one turn shouldn't permanently hide
+            // the bar for the rest of this process's life across every
+            // session. Just rate-limit the console spam.
+            if (!loggedUsageApiUnavailable) {
+              loggedUsageApiUnavailable = true;
+              console.error(
+                `[claude-code] usage_EXPERIMENTAL_...() failed for session ${sessionId} (will keep retrying ` +
+                `each turn, logging this class of failure once): ${e.message}`
+              );
+            }
+          });
           continue;
         }
 
@@ -679,47 +723,13 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         }
 
         if (msg.type === "result") {
-          // Both of these are control-request methods on the live Query
-          // object `q`, called here (still inside the for-await loop, right
-          // as the turn's final message arrives) on the theory that this is
-          // the freshest safe point to ask. Verified by hand against this
-          // exact CLI build, though, that timing isn't actually what decides
-          // whether usage_EXPERIMENTAL_...() succeeds here: calling it right
-          // at turn start (system/init) rejects with the exact same "Query
-          // closed before response received" as calling it here at the very
-          // end — this CLI binary (2.1.261, paired with SDK wrapper
-          // 0.3.261) simply doesn't implement that control command yet (nor
-          // getContextUsage(), same rejection). supportedModels() is a
-          // different, older control command this same CLI build DOES
-          // implement, which is why the model switcher works fine while the
-          // plan-usage bar stays silently hidden — not a bug in either path,
-          // just an environment/CLI-version gap. usage_EXPERIMENTAL_...()'s
-          // one-time (not per-turn) log line below exists so that's fast to
-          // rediscover later, without needing another from-scratch
-          // diagnostic session — this should simply start working, with no
-          // code change, whenever this container's CLI is upgraded past
-          // whatever version first added server-side support for it.
-          q.supportedModels().then((models) => {
-            knownModels = models || [];
-          }).catch((e) => {
-            console.error(`[claude-code] supportedModels() failed for session ${sessionId}:`, e.message);
-          });
-          if (!loggedUsageApiUnavailable) {
-            q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET().then((usage) => {
-              broadcastStatus(sessionId, {
-                type: "plan_usage",
-                subscription_type: usage?.rate_limits_available ? usage.subscription_type : null,
-                rate_limits: usage?.rate_limits_available ? usage.rate_limits : null,
-              });
-            }).catch((e) => {
-              loggedUsageApiUnavailable = true;
-              console.error(
-                "[claude-code] usage_EXPERIMENTAL_...() unavailable on this CLI build — the " +
-                "plan-usage bar will stay hidden for every session until the CLI is upgraded " +
-                `(logging this once, not per-turn). Rejection was: ${e.message}`
-              );
-            });
-          }
+          // supportedModels()/usage_EXPERIMENTAL_...() used to be called
+          // here — moved to the system/init handler above. See the comment
+          // there: calling either one at this point (the turn's last
+          // message) reliably fails with "Query closed before response
+          // received" because this CLI build stops servicing `q`'s control
+          // channel once the turn is winding down, not because the CLI
+          // lacks the command.
           continue;
         }
 

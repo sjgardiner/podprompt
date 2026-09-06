@@ -614,6 +614,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         const content = entry.message?.content;
 
         if (entry.type === "assistant") {
+          // Get model for this assistant message from transcript entry
+          const msgModel = entry.message?.model;
+          const model = msgModel ? aliasForResolvedModel(msgModel) : null;
           // Thinking blocks first (each its own bubble, matching the live
           // stream's per-block broadcast). Without this the browser's
           // in-memory log would re-seed tool/assistant text but silently
@@ -622,17 +625,17 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           let thinkIdx = 0;
           for (const b of (Array.isArray(content) ? content : [])) {
             if (b?.type === "thinking" && b?.thinking) {
-              out.push({ role: "thinking", text: b.thinking, id: `${entry.uuid}-thinking-${thinkIdx++}`, ts: null });
+              out.push({ role: "thinking", text: b.thinking, id: `${entry.uuid}-thinking-${thinkIdx++}`, ts: null, model: model || null });
             }
           }
           const text = extractTextFromContent(content);
-          if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null });
+          if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null, model: model || null });
           for (const tu of toolUsesFromContent(content)) {
-            out.push({ role: "tool", text: formatToolSummary(tu.name, tu.input), id: tu.id, ts: null });
+            out.push({ role: "tool", text: formatToolSummary(tu.name, tu.input), id: tu.id, ts: null, model: model || null });
           }
         } else if (entry.type === "user" && isRealUserPrompt(content)) {
           const text = extractTextFromContent(content);
-          if (text.trim()) out.push({ role: "user", text, id: entry.uuid, ts: null });
+          if (text.trim()) out.push({ role: "user", text, id: entry.uuid, ts: null, model: null });
         }
       } catch (e) {
         console.error("[claude-code] skipped a history entry during conversion:", e.message);
@@ -737,6 +740,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                     : delta?.type === "thinking_delta" ? delta.thinking
                     : null;
         if (!chunk) return; // ignore empty text and non-text deltas (signature_delta, pings, ...)
+        // Skip whitespace-only deltas to prevent empty MODEL bubbles
+        if (!chunk.trim()) return;
         entry.text += chunk;
         const role = entry.type === "thinking" ? "thinking" : "assistant";
         if (!entry.started) {
@@ -747,13 +752,13 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         return;
       }
 
-      if (event.type === "content_block_stop") {
-        const entry = liveBlocks.get(event.index);
-        if (!entry) return;
-        liveBlocks.delete(event.index);
-        if (!entry.text) return; // never produced visible content — no bubble exists, nothing to finalize
-        broadcast(sessionId, entry.type === "thinking" ? "thinking" : "assistant", entry.text, entry.id);
-      }
+        if (event.type === "content_block_stop") {
+          const entry = liveBlocks.get(event.index);
+          if (!entry) return;
+          liveBlocks.delete(event.index);
+          if (!entry.text.trim()) return; // never produced visible content — no bubble exists, nothing to finalize
+          broadcast(sessionId, entry.type === "thinking" ? "thinking" : "assistant", entry.text, entry.id, null, null);
+        }
     }
 
     return {
@@ -798,7 +803,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const canUseTool = makeCanUseTool(sessionId, state);
 
     const userMsgUuid = randomUUID();
-    broadcast(sessionId, "user", promptText, userMsgUuid);
+    broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
 
     function onePrompt() {
       // A fresh async generator per attempt: once iterated (even partially,
@@ -839,6 +844,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
     async function consume(opts) {
       const q = query({ prompt: onePrompt(), options: opts });
+      const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
         if (msg.type === "system" && msg.subtype === "init") {
           // sessionId is always chosen by the browser up front (create-mode
@@ -948,6 +954,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         }
 
         if (msg.type === "assistant" && msg.message?.content) {
+          // Capture model for this message (msg.model takes precedence, fallback to context_usage)
+          const model = msg.model || (msg.context_usage?.model || null);
+          if (model) modelByUuid.set(msg.uuid, aliasForResolvedModel(model));
           if (msg.context_usage) {
             broadcastStatus(sessionId, {
               type: "context_usage",
@@ -965,11 +974,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             // broadcasting them directly if streaming genuinely never
             // happened for this turn, so content is never silently dropped.
             if (block.type === "text" && block.text && !streamTracker.sawStreamEvents) {
-              broadcast(sessionId, "assistant", block.text, msg.uuid);
+              broadcast(sessionId, "assistant", block.text, msg.uuid, null, modelByUuid.get(msg.uuid));
             } else if (block.type === "thinking" && block.thinking && !streamTracker.sawStreamEvents) {
-              broadcast(sessionId, "thinking", block.thinking, randomUUID());
+              broadcast(sessionId, "thinking", block.thinking, randomUUID(), null, null);
             } else if (block.type === "tool_use") {
-              broadcast(sessionId, "tool", formatToolSummary(block.name, block.input), block.id);
+              const msgModel = modelByUuid.get(msg.uuid) || null;
+              broadcast(sessionId, "tool", formatToolSummary(block.name, block.input), block.id, null, msgModel);
             }
           }
         }
@@ -1011,10 +1021,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // robust than guessing at the SDK's exception shape.
       if (abortController.signal.aborted) {
         console.log(`[claude-code] turn aborted for session ${sessionId}`);
-        broadcast(sessionId, "tool", "*(stopped)*", randomUUID());
+        broadcast(sessionId, "tool", "*(stopped)*", randomUUID(), null, null);
       } else {
         console.error(`[claude-code] error during turn for session ${sessionId}:`, e.message);
-        broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID());
+        broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID(), null, null);
       }
     } finally {
       if (state.abortController === abortController) state.abortController = null;
@@ -1072,15 +1082,30 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       const perProject = await Promise.all(reachableCwds.map(async (cwd) => {
         try {
           const list = await listSessions({ dir: cwd, limit: 50 });
-          return list.map((s) => ({
-            ...s,
-            backend: "claude-code",
-            cwd,
-            projectLabel: projectLabelFor(cwd),
-            unreachable: false,
-            inFlight: !!sessionsIndex.get(s.sessionId)?.turnInFlight,
-            pendingKind: pendingKindForSession(s.sessionId),
-          }));
+          return list.map((s) => {
+            // Get file path for createdAt from transcript
+            const transcriptPath = s.transcript_path || null;
+            let createdAt = null;
+            if (transcriptPath) {
+              try {
+                const stat = statSync(transcriptPath);
+                // Try birthtime first (most accurate), fallback to ctime
+                createdAt = stat.birthtimeMs || stat.ctimeMs || null;
+              } catch {
+                // ignore
+              }
+            }
+            return {
+              ...s,
+              backend: "claude-code",
+              cwd,
+              projectLabel: projectLabelFor(cwd),
+              createdAt: createdAt || null,
+              unreachable: false,
+              inFlight: !!sessionsIndex.get(s.sessionId)?.turnInFlight,
+              pendingKind: pendingKindForSession(s.sessionId),
+            };
+          });
         } catch (e) {
           console.error(`[claude-code] listSessions failed for ${cwd}:`, e.message);
           return [];
@@ -1101,14 +1126,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           }
           for (const file of files) {
             const sessionId = file.slice(0, -".jsonl".length);
+            const filePath = nodePath.join(folderPath, file);
+            // Get file birthtime for createdAt
+            let createdAt = null;
+            try {
+              const stat = statSync(filePath);
+              createdAt = stat.birthtimeMs || stat.ctimeMs || null;
+            } catch {
+              // ignore
+            }
             unreachableSessions.push({
               sessionId,
               backend: "claude-code",
               cwd,
               projectLabel: projectLabelFor(cwd),
+              createdAt: createdAt,
               unreachable: true,
               lastKnownHostPath: lastKnownHostPath(sessionId),
-              ...lightweightSessionSummary(nodePath.join(folderPath, file)),
+              ...lightweightSessionSummary(filePath),
             });
           }
         }
@@ -1161,44 +1196,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // startup loop and every /models request share the same single-flight
       // promise, so concurrent early calls don't spawn competing queries.
       await ensureModelsWarmed();
-      // ModelInfo.resolvedModel is NOT the reliable "is this a genuine
-      // first-party model" signal it looks like — verified by hand that
-      // Claude Code echoes `value` straight back as `resolvedModel` for
-      // every custom modelPicker.options entry too (e.g. "azure/gpt-5.2" ->
-      // resolvedModel "azure/gpt-5.2"), not just the real built-in aliases.
-      // So instead of trying to infer "custom" from the ModelInfo shape,
-      // this reads the exact same settings.json modelPicker.options list
-      // that ADDS those entries in the first place (populated by the
-      // separate LiteLLM-sync tooling the user runs, independent of
-      // podprompt.sh itself) and excludes precisely those `value`s
-      // — nothing else in supportedModels()'s response was ever added by
-      // that tooling, so this is an exact filter, not a heuristic. Those
-      // custom entries are only reachable at all when this process is
-      // actually talking to that gateway — ANTHROPIC_BASE_URL is set if and
-      // only if podprompt.sh launched with --litellm (confirmed
-      // against that script: --direct and --direct-api never set it) — so
-      // showing them in the switcher under --direct/--direct-api would just
-      // offer a pile of models that don't exist there and will error if
-      // picked.
-      const usingGateway = !!process.env.ANTHROPIC_BASE_URL;
-      let customValues = new Set();
-      if (!usingGateway) {
-        try {
-          const settings = JSON.parse(readFileSync(nodePath.join(CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));
-          for (const opt of settings?.modelPicker?.options || []) {
-            if (opt?.model) customValues.add(opt.model);
-          }
-        } catch (e) {
-          console.error("[claude-code] failed to read settings.json for model-picker filtering:", e.message);
-        }
-      }
-      const available = knownModels
-        .filter((m) => usingGateway || !customValues.has(m.value))
-        .map((m) => ({
-          id: m.value,
-          label: m.displayName,
-          description: m.description,
-        }));
+      const available = knownModels.map((m) => ({
+        id: m.value,
+        label: m.displayName,
+        description: m.description,
+      }));
       // Derive this session's own last-used model (see the comment block by
       // derivedModelCache) and reverse-map it to a picker alias. This is the
       // session-specific `current` that replaces the old global-default

@@ -1501,6 +1501,42 @@ function renderBody(entry) {
   entry.el.innerHTML = injectMath(html);
 }
 
+// Live-formats a streaming bubble (markdown/KaTeX/hljs via renderBody, same
+// as a finished message) instead of leaving it as an unformatted text dump
+// until the turn ends — restores pre-existing behavior a prior fix
+// regressed (that fix appended raw text nodes per delta and only ever
+// called renderBody() once, at finalize, specifically to stop re-running
+// marked.parse()+hljs.highlight() on the WHOLE accumulated bubble on every
+// single token, which was the real source of a different choppiness
+// complaint). The fix for that problem doesn't require skipping formatting
+// entirely — it only requires bounding how often the expensive full
+// re-parse+re-render happens, independent of how many stream_delta events
+// arrive. Coalescing into "at most once per animation frame" does exactly
+// that: however many deltas land between paints (a dense opencode burst can
+// be a dozen), they collapse into the one renderBody() call that runs on
+// the next frame, so total render work scales with actual frames painted
+// (~60/sec ceiling), never with raw event count.
+function scheduleStreamRender(entry) {
+  if (entry.renderRaf) return; // already scheduled — the next frame will pick up this delta's text too
+  entry.renderRaf = requestAnimationFrame(() => {
+    entry.renderRaf = null;
+    try {
+      renderBody(entry);
+    } catch (e) {
+      // Partial/still-incomplete markdown (an unclosed fence, an
+      // in-progress $…$ span) is normally harmless — marked/KaTeX just
+      // render it as literal text until the closing delimiter arrives a
+      // delta or two later — but if some edge case ever does throw, don't
+      // let it silently stop this bubble from ever updating again: the
+      // renderRaf flag above is already cleared, so the next delta's
+      // scheduleStreamRender() call will still schedule a fresh attempt
+      // (same defensive spirit as revealText()'s own try/catch below).
+      console.error('Error during live stream render:', e);
+    }
+    scrollBottom();
+  });
+}
+
 // ── Permission / AskUserQuestion cards ──────────────────────────────────────
 // entry.rawText is JSON: {kind: 'permission'|'question', toolName, toolInput}.
 // entry.resolved/resolvedText are set locally once acted on — there's no
@@ -1828,6 +1864,12 @@ function connect() {
       // authoritative final text for the same bubble, not new content to
       // reveal again. Render it instantly instead of re-animating.
       entry.liveStreamed = false;
+      // A stream_delta's throttled render (see scheduleStreamRender) may
+      // still have a frame pending — cancel it since we're about to render
+      // the authoritative final text synchronously right here; the stale
+      // frame would otherwise fire a redundant (harmless, but wasted) extra
+      // render right after this one.
+      if (entry.renderRaf) { cancelAnimationFrame(entry.renderRaf); entry.renderRaf = null; }
       entry.rawText = text;
       entry.el.classList.remove('streaming', 'raw');
       renderBody(entry);
@@ -1897,31 +1939,46 @@ function connect() {
     // near-always collapsed anyway).
     if (s.type === 'stream_start') {
       const entry = getOrCreate(s.id, s.role);
+      // See the stream_delta seq check just below for the full story — a
+      // stream_start always begins a fresh id, so it sets the baseline
+      // rather than ever being dropped.
+      if (typeof s.seq === 'number') entry.lastSeq = s.seq;
       entry.liveStreamed = true;
       if (s.role !== 'thinking') entry.el.classList.add('streaming');
-      entry.el.classList.add('raw');
+      // 'raw' (plain pre-wrap text) is still how a thinking bubble's
+      // verbatim chain-of-thought is displayed, permanently — renderBody()
+      // never marked.parse()s a thinking entry (see renderBody), so it needs
+      // the CSS white-space:pre-wrap to keep its line breaks. An assistant
+      // bubble does NOT get it: it's rendered as real markdown while
+      // streaming now (see scheduleStreamRender below), not dumped as raw
+      // text, so it must keep its normal (non-pre-wrap) markdown styling
+      // from the very first token.
+      if (s.role === 'thinking') entry.el.classList.add('raw');
       setTurnIndicator(null);
     }
 
     if (s.type === 'stream_delta') {
       const entry = getOrCreate(s.id, s.role);
-      entry.liveStreamed = true;
-      const full = String(s.text || '');
-      const prev = entry.rawText || '';
-      if (full.startsWith(prev)) {
-        // Clean append — cheap O(1) DOM insert, no markdown re-parse of the
-        // whole bubble per token (the old renderBody(entry) here re-ran
-        // extractMath + marked.parse on every delta, re-flowing the entire
-        // bubble and making long streams visibly choppy).
-        entry.rawText = full;
-        const add = full.slice(prev.length);
-        if (add) entry.el.insertAdjacentText('beforeend', add);
-      } else {
-        // Not a clean append (backend reset / regenerated tail) — rebuild.
-        entry.rawText = full;
-        entry.el.textContent = full;
+      // driver.mjs serializes its outbound broadcasts per session so these
+      // can't arrive out of order (see enqueueSend in driver.mjs) — this
+      // check is cheap extra insurance against any other reordering source
+      // (a dropped/replayed SSE connection, some future broadcast path that
+      // forgets to go through that queue). Each stream_start/stream_delta
+      // carries a `seq` assigned in true production order; a payload that
+      // doesn't move a bubble's sequence forward is stale and gets dropped
+      // outright rather than trusted. This is the ONLY guard against
+      // out-of-order delivery now (see scheduleStreamRender below for why
+      // there's no more prefix/rebuild check to fall back on) — confirmed
+      // necessary by comparing a raw opencode /event capture, perfectly
+      // monotonic, against the driver-relayed copy of the same turn, which
+      // was not.
+      if (typeof s.seq === 'number') {
+        if (typeof entry.lastSeq === 'number' && s.seq <= entry.lastSeq) return;
+        entry.lastSeq = s.seq;
       }
-      scrollBottom();
+      entry.liveStreamed = true;
+      entry.rawText = String(s.text || '');
+      scheduleStreamRender(entry);
     }
 
     // Context-window usage — both backends broadcast this (Claude Code from
@@ -2642,6 +2699,7 @@ let lastSessionsResult = null; // cached {sessions} from the last fetch
 function clearFeed() {
   for (const m of Object.values(msgs)) {
     if (m.revealTimer) clearInterval(m.revealTimer);
+    if (m.renderRaf) cancelAnimationFrame(m.renderRaf);
   }
   for (const k of Object.keys(msgs)) delete msgs[k];
   feedOrder.length = 0;
@@ -3242,10 +3300,34 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// Wait for KaTeX to load before connecting
-window.addEventListener('load', () => {
+// Wait for KaTeX to load before connecting.
+//
+// loadDriverConfig() must resolve first (it sets driverBase, which
+// refreshSessionsList() needs — see its own `if (!driverBase) return;`
+// guard), and refreshSessionsList() must resolve before connect() so
+// backendForCurrentSession() has a real answer for currentSessionId on this
+// very first connect. Without this, the very first EventSource of any page
+// load — restoring a session from the URL/localStorage, as opposed to a
+// fresh "New chat" (which sets its own backend immediately via
+// pendingBackendForNewSession, untouched by this) — went out with no
+// &backend= at all, since sessionBackends only gets populated by
+// refreshSessionsList(), which itself was previously only ever called from
+// openSessionsPanel(). server.py would then silently default to the CLI's
+// --backend flag; if that guessed wrong for this particular session,
+// _ensure_seeded took the resulting empty history as genuinely empty and
+// permanently latched that session blank (see server.py's own
+// seeded/backend guard for the other half of this fix) until a full
+// server.py restart gave it another chance. A bounded wait keeps a slow or
+// unreachable driver from blocking the UI forever — worse to wait 3s than
+// to hang, but also worse to hang than to fall back to today's
+// occasionally-wrong unlabeled connect.
+window.addEventListener('load', async () => {
+  await loadDriverConfig();
+  await Promise.race([
+    refreshSessionsList().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ]);
   connect();
-  loadDriverConfig();
 });
 </script>
 </body>

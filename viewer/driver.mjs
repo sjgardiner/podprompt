@@ -78,28 +78,81 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-async function broadcast(sessionId, role, text, id, ts) {
-  try {
-    await fetch(VIEWER_MESSAGE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, role, text, id, ts: ts || nowIso() }),
-    });
-  } catch (e) {
-    console.error("[driver] failed to broadcast to viewer:", e.message);
-  }
+// Per-session send queue for broadcast()/broadcastStatus() below. Neither is
+// awaited by most callers (a backend's per-event handler fires several of
+// these in a tight synchronous loop — see opencode.mjs's onEvent, which can
+// process a dozen `message.part.delta`s back to back), so without this,
+// several fetch()es to server.py can be in flight at once for the same
+// session. server.py is a ThreadingHTTPServer — one thread per connection —
+// and nothing guarantees those threads enqueue onto the browser's SSE queue
+// in the order the requests were issued, only in whatever order the OS
+// scheduler happens to run them. A later, longer stream_delta can then land
+// in the browser before an earlier, shorter one, which looks exactly like
+// the bubble's text rolling backward and re-advancing (confirmed empirically:
+// a raw `opencode serve` /event capture for a turn was perfectly monotonic
+// while the driver-relayed /events copy of the SAME turn showed the
+// cumulative text length repeatedly regress — opencode's dense small-delta
+// bursts hit this far more than Claude Code's cadence does, which is why it
+// only ever showed up as "opencode rendering is choppy").
+//
+// Chaining every session's sends through one tail Promise makes the race
+// impossible rather than just unlikely: send N+1's fetch is never even
+// issued until send N's has settled, so there is never more than one
+// in-flight request per session for server.py's threads to reorder. A
+// failure in one send can't wedge the chain for later ones (the `.catch`
+// below swallows it — broadcast()/broadcastStatus() already log their own
+// fetch failures).
+const sendQueues = new Map(); // sessionId -> tail Promise of that session's send chain
+
+function enqueueSend(sessionId, doSend) {
+  const prev = sendQueues.get(sessionId) || Promise.resolve();
+  const next = prev.then(doSend, doSend).catch(() => {});
+  sendQueues.set(sessionId, next);
+  return next;
 }
 
+async function broadcast(sessionId, role, text, id, ts) {
+  return enqueueSend(sessionId, async () => {
+    try {
+      await fetch(VIEWER_MESSAGE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, role, text, id, ts: ts || nowIso() }),
+      });
+    } catch (e) {
+      console.error("[driver] failed to broadcast to viewer:", e.message);
+    }
+  });
+}
+
+// Monotonic counter assigned to every stream_start/stream_delta payload, in
+// the exact order broadcastStatus() was called (a plain synchronous
+// increment, so it reflects true production order regardless of anything
+// that happens to the request afterward). This is the second, independent
+// layer against the same reordering the send queue above already prevents
+// at the source: viewer.html tracks the highest seq it has applied per
+// bubble id and drops anything that doesn't move it forward. Belt and
+// suspenders — the queue above should make this redundant in practice, but
+// it's cheap insurance against any other reordering source (a dropped/
+// replayed SSE connection, or some future broadcast path that forgets to go
+// through enqueueSend).
+let streamSeq = 0;
+
 async function broadcastStatus(sessionId, payload) {
-  try {
-    await fetch(VIEWER_STATUS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, ...payload }),
-    });
-  } catch (e) {
-    console.error("[driver] failed to broadcast status:", e.message);
+  if (payload.type === "stream_start" || payload.type === "stream_delta") {
+    payload = { ...payload, seq: ++streamSeq };
   }
+  return enqueueSend(sessionId, async () => {
+    try {
+      await fetch(VIEWER_STATUS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, ...payload }),
+      });
+    } catch (e) {
+      console.error("[driver] failed to broadcast status:", e.message);
+    }
+  });
 }
 
 // ── Pending permission/question approvals, keyed by request id ────────────

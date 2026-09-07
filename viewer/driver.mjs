@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bidirectional, multi-session, multi-backend driver for the Claude Code
+// Bidirectional, multi-session, multi-backend driver for the PodPrompt
 // viewer.
 //
 // Backend-agnostic shell: HTTP routes, the per-session `sessions` Map, the
@@ -22,7 +22,6 @@
 //                                                          may not have touched itself yet
 //   resolveValidCwd(candidate)                          -- validate+register a browser-supplied cwd, or null
 //   listProjects()                                      -- -> {projects: [{cwd,label}], root}
-//   rescanProjects()                                     -- -> same shape + unreachableCount
 //   listSessions({includeUnreachable}, sessionsIndex, pendingKindForSession)
 //                                                        -- -> {sessions, unreachableCount, unreachableSessions}
 //   getSessionHistory(sessionId, fallbackCwd)            -- -> {role,text,id,ts}[]
@@ -837,12 +836,6 @@ const server = createServer(async (req, res) => {
     // OpenCode backend has no equivalent scan to contribute.
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getBackend(args.backend).listProjects()));
-    return;
-  }
-
-  if (req.method === "POST" && path === "/rescan-projects") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(getBackend(args.backend).rescanProjects()));
     return;
   }
 

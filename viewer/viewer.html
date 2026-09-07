@@ -322,7 +322,21 @@
     border-radius: 10px;
     box-shadow: 0 10px 30px rgba(0,0,0,.35);
     z-index: 20;
-    overflow: hidden;
+    /* Deliberately NOT overflow:hidden (was, until this comment): the panel
+       shrinks to fit however many session rows there are (down to just one
+       row on a fresh-ish install, with the rest archived) — it does not
+       reserve 70vh unconditionally. #new-chat-picker below is an
+       absolutely-positioned popover anchored to the header, and can easily
+       need more vertical room than a one-row panel actually has (its
+       backend row + project list + custom-subfolder input can run past
+       280px). With overflow:hidden here, that popover got hard-clipped at
+       the panel's actual (short) bottom edge — cutting off exactly the
+       custom-subfolder input. #sessions-list below carries its own
+       overflow-y:auto and now its own bottom-corner radius, so this
+       panel-level overflow was only ever doing corner-clipping duty, never
+       scroll duty — safe to drop.
+    */
+    overflow: visible;
     flex-direction: column;
   }
   #sessions-panel.open { display: flex; }
@@ -438,7 +452,12 @@
   }
   .sessions-tab.active { color: var(--accent); background: var(--code-bg); }
 
-  #sessions-list { overflow-y: auto; }
+  /* Bottom corners were previously rounded for free by the panel's own
+     overflow:hidden; now that the panel is overflow:visible (see comment
+     above #sessions-panel), this list — the element whose row backgrounds
+     can actually reach the panel's bottom edge — needs to self-clip its own
+     corner instead. */
+  #sessions-list { overflow-y: auto; border-radius: 0 0 10px 10px; }
   .session-item {
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);

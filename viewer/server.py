@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Claude Code Viewer Server
-=========================
-Serves a browser UI that renders Claude Code responses as rich text
-(markdown, KaTeX math, syntax-highlighted code).
+PodPrompt Viewer Server
+=======================
+Serves a browser UI that renders agent responses as rich text (markdown,
+KaTeX math, syntax-highlighted code).
 
 This server is a plain broadcast relay: driver.mjs (the Agent SDK-based
 bidirectional driver) POSTs every message the browser should see to
@@ -125,18 +125,17 @@ def _emit(session_id: str, event: str, entry: dict):
     # rebroadcast with the decision baked in once it's answered) under the
     # same id. Replacing in place means a late-joining tab only ever sees
     # the final state for that id, not a stale copy followed by the real
-    # one — both would render fine in order, but this avoids doubling it up
-    # in /history and the Markdown export.
+    # one — both would render fine in order, but this avoids a duplicate in
+    # the replayed log and the Markdown export.
     s = _get_session(session_id)
     entry_id = entry.get("id")
     with sessions_lock:
         replaced = False
-        if entry_id is not None:
-            for i, existing in enumerate(s["log"]):
-                if existing.get("id") == entry_id:
-                    s["log"][i] = entry
-                    replaced = True
-                    break
+        for i, existing in enumerate(s["log"]):
+            if existing.get("id") == entry_id:
+                s["log"][i] = entry
+                replaced = True
+                break
         if not replaced:
             s["log"].append(entry)
     broadcast_to(session_id, event, json.dumps(entry))
@@ -397,16 +396,6 @@ class Handler(BaseHTTPRequestHandler):
                     if q in meta_clients:
                         meta_clients.remove(q)
 
-        elif path == "/history":
-            log = _get_session(session_id)["log"] if session_id else []
-            body = json.dumps(log).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_cors()
-            self.end_headers()
-            self.wfile.write(body)
-
         elif path == "/config":
             body = json.dumps({"driverPort": DRIVER_PORT}).encode()
             self.send_response(200)
@@ -471,6 +460,16 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get("type") in ("turn_start", "turn_end"):
                 broadcast_meta(session_id, payload["type"])
 
+        elif path in ("/message", "/status"):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_cors()
@@ -484,7 +483,7 @@ def main():
 
     global DRIVER_PORT
 
-    parser = argparse.ArgumentParser(description="Claude Code viewer server")
+    parser = argparse.ArgumentParser(description="PodPrompt viewer server")
     parser.add_argument("--port", type=int, default=7843,
                         help="Port to listen on (default: 7843)")
     parser.add_argument("--driver-port", type=int, default=7844,

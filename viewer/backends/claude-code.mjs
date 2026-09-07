@@ -8,7 +8,7 @@
 // Exposes the shared Backend contract (see backends/README in driver.mjs's
 // header comment for the full interface list): runTurn, listSessions,
 // getSessionHistory, archiveSession, unarchiveSession, deleteSession,
-// renameSession, abort, listProjects, rescanProjects, resolveValidCwd,
+// renameSession, abort, listProjects, resolveValidCwd,
 // cwdForSession, getKnownCommands. Every method that needs to reach the
 // browser goes through the `broadcast`/`broadcastStatus`/`requestApproval`
 // hooks passed in at construction — this module never talks to server.py or
@@ -153,11 +153,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   }
 
   let knownProjects = discoverProjects(cwdRoot);
-
-  function rescanProjectsInternal() {
-    knownProjects = discoverProjects(cwdRoot);
-    return knownProjects;
-  }
 
   function projectLabelFor(cwd) {
     if (cwd === cwdRoot) return "(root)";
@@ -469,11 +464,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     return matches[0].value;
   }
 
-  async function derivedCurrentForSession(sessionId, fallbackCwd) {
+  async function derivedCurrentForSession(sessionId) {
     if (derivedModelCache.has(sessionId)) return derivedModelCache.get(sessionId);
     let resolved = null;
     try {
-      const raw = await getSessionMessages(sessionId, { dir: cwdForSession(sessionId, fallbackCwd) });
+      const raw = await getSessionMessages(sessionId, { dir: cwdForSession(sessionId) });
       resolved = lastAssistantModel(raw);
     } catch (e) {
       // Session not reachable / no transcript — no derivation possible; same
@@ -564,9 +559,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
   // ── Session history conversion ───────────────────────────────────────────
   // Converting getSessionMessages() results into our {role, text, id, ts}
-  // shape mirrors the parsing logic the retired transcript tailer used to do
-  // against raw JSONL lines (preserved in git history) — same shapes, just fed
-  // from this cleaner SDK function instead. One known gap: SessionMessage
+  // shape — deliberately the same shape the live broadcast path produces, so
+  // history replays and live bubbles render identically. One known gap: SessionMessage
   // carries no per-entry timestamp, so historically-loaded messages get
   // ts: null (formatTs() in viewer.html already renders that as blank, not an
   // error). Another: unlike the live path, this doesn't distinguish a
@@ -775,7 +769,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // `uuid` for this turn (same property already confirmed for assistant
   // messages) — so broadcasting it immediately, before query() even starts,
   // gives correct chronological ordering with no risk of a mismatched-id
-  // duplicate, now that nothing else (no tailer) will ever independently
+  // duplicate, now that nothing else will ever independently
   // re-emit this same content.
   //
   // Bootstrap ambiguity: the first time this process is asked to run a turn
@@ -1064,15 +1058,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       return { projects: [...knownProjects.reachable.keys()].map((cwd) => ({ cwd, label: projectLabelFor(cwd) })), root: cwdRoot };
     },
 
-    rescanProjects() {
-      rescanProjectsInternal();
-      return {
-        projects: [...knownProjects.reachable.keys()].map((cwd) => ({ cwd, label: projectLabelFor(cwd) })),
-        root: cwdRoot,
-        unreachableCount: knownProjects.unreachable.size,
-      };
-    },
-
     // `sessionsIndex` is the shared driver.mjs `sessions` Map (sessionId ->
     // {turnInFlight, ...}) — needed here only to report inFlight/pendingKind
     // per listed session, kept as a plain param rather than a constructor
@@ -1116,7 +1101,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       if (includeUnreachable) {
         unreachableSessions = [];
         for (const [cwd, folder] of knownProjects.unreachable) {
-          if (!folder) continue;
           const folderPath = nodePath.join(PROJECTS_DIR, folder);
           let files = [];
           try {
@@ -1210,7 +1194,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // the derived value is actually selectable right now — false means "this
       // session's model isn't in the currently-known lineup", the signal for
       // its "model unavailable" state.
-      const derivedResolved = sessionId ? await derivedCurrentForSession(sessionId, null) : null;
+      const derivedResolved = sessionId ? await derivedCurrentForSession(sessionId) : null;
       const derivedAlias = aliasForResolvedModel(derivedResolved);
       const current = derivedAlias || null;
       const currentConfirmed = !!current && available.some((m) => m.id === current);

@@ -418,6 +418,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // the delta path can't check userMessageIDs itself — it mirrors that
     // guard via these part ids, captured when part.updated detects the echo.
     const userPartIDs = new Set();
+    // When a tool part first reports "running", record its start time so the
+    // tool_progress status can carry elapsedSeconds (the browser renders that
+    // in its "Running `tool`… (Ns)" indicator; opencode parts don't expose a
+    // start timestamp directly). Cleared once the part completes or errors.
+    const toolStartedAt = new Map(); // partID -> Date.now()
 
     // part.type values that carry a model's chain-of-thought (older opencode
     // calls it "reasoning", newer "thinking"); anything else streaming on a
@@ -511,8 +516,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           // backend's "one bubble per finished tool call" shape rather than
           // spamming a new bubble per lifecycle transition.
           if (status === "running") {
-            broadcastStatus(sessionId, { type: "tool_progress", toolName: part.tool, output: part.state?.metadata?.output });
+            if (!toolStartedAt.has(part.id)) toolStartedAt.set(part.id, Date.now());
+            broadcastStatus(sessionId, { type: "tool_progress", toolName: part.tool, elapsedSeconds: (Date.now() - toolStartedAt.get(part.id)) / 1000 });
           } else if (status === "completed" || status === "error") {
+            toolStartedAt.delete(part.id);
             const msgModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
             broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
           }
@@ -597,7 +604,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           }).catch(() => {});
         }
         // Track model for this message (providerID/modelID composite)
-        if (info.role === "assistant" && info.id && info.providerID && info.modelID) {
+        if (info.id && info.providerID && info.modelID) {
           messageModelByRealId.set(info.id, `${info.providerID}/${info.modelID}`);
         }
         // Per-message completion: the terminal message.updated for an
@@ -606,7 +613,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         // exactly that message's parts the moment they're done — same
         // effect as the terminal part.state.status path above, reached by a
         // different signal for robustness. Idempotent via sentMessage.
-        if (info.role === "assistant" && info.id && info.time?.completed) {
+        if (info.id && info.time?.completed) {
           for (const [partId, entry] of liveText) {
             if (entry.messageID === info.id) finalizeEntry(entry, partId);
           }
@@ -934,10 +941,6 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // filesystem scan the Claude backend does. Left minimal (just the
       // root) until multi-project discovery is generalized across backends.
       return { projects: [{ cwd: cwdRoot, label: "(root)" }], root: cwdRoot };
-    },
-
-    rescanProjects() {
-      return { projects: [{ cwd: cwdRoot, label: "(root)" }], root: cwdRoot, unreachableCount: 0 };
     },
 
     async listSessions({ includeUnreachable }, sessionsIndex, pendingKindForSession) {

@@ -8,8 +8,14 @@
 // how sessions/history are listed, how permissions are asked — is delegated
 // to a `Backend` object (see backends/claude-code.mjs for the reference
 // implementation). A session picks its backend once, at creation, and keeps
-// it for its whole lifetime; `--backend` (or per-request `backend` field on
-// a brand-new session) chooses the default for new sessions.
+// it for its whole lifetime — either explicitly (the new-chat picker's own
+// backend row, or per-request `backend` field on a brand-new session) or, for
+// a pre-existing session this process hasn't touched yet, resolved from
+// sessionIdToBackend (never guessed — see the comment above that Map).
+// There is no more CLI-level "default backend" for --viewer: defaultBackendId()
+// below just remembers whichever backend the new-chat picker was last used
+// with, for its own pre-selected radio button, falling back to the first
+// registered backend on a fresh install with no history yet.
 //
 // Backend contract (an object with these methods/fields; all async methods
 // may be sync — always awaited either way):
@@ -66,7 +72,7 @@ import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
 function parseArgs(argv) {
   const args = {
-    port: 7844, viewerPort: 7843, cwd: "/workspace", backend: "claude-code",
+    port: 7844, viewerPort: 7843, cwd: "/workspace",
     opencodePort: 7845,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -74,14 +80,19 @@ function parseArgs(argv) {
     if (a === "--port") args.port = Number(argv[++i]);
     else if (a === "--viewer-port") args.viewerPort = Number(argv[++i]);
     else if (a === "--cwd") args.cwd = argv[++i];
-    else if (a === "--backend") args.backend = argv[++i];
-    else if (a === "--opencode") args.backend = "opencode";
     else if (a === "--opencode-port") args.opencodePort = Number(argv[++i]);
   }
   return args;
 }
 
 const args = parseArgs(process.argv.slice(2));
+// PodPrompt's own bookkeeping directory (podprompt.sh's PODPROMPT_STATE_DIR)
+// — deliberately NOT under either backend's own config directory (see
+// MODEL_PICKS_FILE/LAST_BACKEND_FILE/SESSION_HOSTS_FILE below), since those
+// are shared with native, non-Docker installs on the same host and should
+// never gain PodPrompt-internal files.
+const PODPROMPT_STATE_DIR = process.env.PODPROMPT_STATE_DIR
+  || nodePath.join(os.homedir(), ".local", "state", "podprompt");
 const VIEWER_MESSAGE_URL = `http://127.0.0.1:${args.viewerPort}/message`;
 const VIEWER_STATUS_URL = `http://127.0.0.1:${args.viewerPort}/status`;
 
@@ -258,6 +269,97 @@ function getBackend(id) {
   if (b) return b;
   console.error(`[driver] unknown backend "${id}", falling back to claude-code`);
   return backends["claude-code"];
+}
+
+// ── Default backend for a brand-new session's picker only ───────────────
+// There is no more CLI-level "default backend" for --viewer (podprompt.sh's
+// --claude/--opencode only ever govern the non-viewer direct-TUI launch
+// path now — see its own header comment). Every *session* either already
+// has a fixed backend (existing/resumed — resolved via sessionIdToBackend
+// below, never guessed) or gets one explicitly from the new-chat picker's
+// backend row. The only thing left needing an answer with no session in
+// play at all is that picker's pre-selected radio button, and the two
+// backend-agnostic /commands, /projects fallbacks (no session to resolve
+// from) — both just want "whichever backend the user was using last,"
+// which this remembers across restarts, falling back to the first
+// registered backend (claude-code) on a fresh install with no history yet.
+const LAST_BACKEND_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-last-backend.json");
+
+function loadLastBackend() {
+  try {
+    return JSON.parse(readFileSync(LAST_BACKEND_FILE, "utf8"))?.backend || null;
+  } catch {
+    return null; // missing or corrupt — no persisted choice yet
+  }
+}
+
+// Written exactly once per genuinely brand-new session (see getSessionState
+// below) — never for a pre-existing session this process is merely
+// resolving the backend of for the first time this run, which would corrupt
+// this into reflecting resume order instead of deliberate new-chat choices.
+function persistLastBackend(backendId) {
+  try {
+    writeFileSync(`${LAST_BACKEND_FILE}.tmp`, JSON.stringify({ backend: backendId }));
+    renameSync(`${LAST_BACKEND_FILE}.tmp`, LAST_BACKEND_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write last-backend file:", e.message);
+  }
+}
+
+// Read lazily rather than cached in memory: written rarely (only on a new
+// session) and read rarely (picker pre-selection, two fallback routes), so
+// there's no hot path here worth optimizing a file read away from.
+function defaultBackendId() {
+  const last = loadLastBackend();
+  if (last && backends[last]) return last;
+  return Object.keys(backends)[0];
+}
+
+// ── Which host path a session was last touched from ─────────────────────
+// podprompt.sh threads its own $(pwd) at launch through as HOST_WORKSPACE_PATH
+// — nothing inside the container can otherwise ever learn the host-side path
+// a Docker bind mount came from. Generic across both backends (stamped once
+// per turn from the shared runTurn() wrapper below, not per-backend) since
+// the concept — "where do I need to point the launch script to get back to
+// this" — has nothing backend-specific about it. Two things read this:
+// buildUnreachableItem's "relaunch from X" hint in viewer.html (a session
+// already known unreachable by the plain path-resolvability check), and the
+// hostMismatch check in the /sessions handler below, which catches sessions
+// that check does NOT: CLAUDE_CONFIG_DIR/OPENCODE_DATA_DIR are both single,
+// global-per-user host directories, and every container run mounts whatever
+// host directory is current at the *same* container path (cwdRoot, normally
+// /workspace) — so a session recorded at exactly cwdRoot from a totally
+// unrelated host checkout can never fail a realpath check (cwdRoot always
+// resolves to *something*) and would otherwise look like a perfectly normal,
+// current session. Comparing the host path actually catches that, at the
+// cost of also firing when you've simply relocated your own checkout to a
+// new folder and relaunched from there — deliberately surfaced as a soft
+// `hostMismatch` flag on an otherwise-ordinary (still reachable, still
+// resumable) session rather than folded into the harder `unreachable`
+// bucket, since "might be a different project" is a heads-up, not a block.
+const SESSION_HOSTS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-hosts.json");
+
+function loadSessionHosts() {
+  try {
+    return JSON.parse(readFileSync(SESSION_HOSTS_FILE, "utf8"));
+  } catch {
+    return {}; // missing or corrupt — start fresh rather than fail over this
+  }
+}
+
+function stampSessionHost(sessionId, cwd) {
+  const hostPath = process.env.HOST_WORKSPACE_PATH;
+  if (!hostPath) return; // older launch script, or non-docker dev usage — nothing to record
+  const data = loadSessionHosts();
+  data[sessionId] = { hostPath, cwd, lastSeen: new Date().toISOString() };
+  try {
+    // Temp file + atomic rename so a crash mid-write can't leave a torn
+    // JSON that throws on the next read.
+    writeFileSync(`${SESSION_HOSTS_FILE}.tmp`, JSON.stringify(data));
+    renameSync(`${SESSION_HOSTS_FILE}.tmp`, SESSION_HOSTS_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write session-hosts file:", e.message);
+  }
 }
 
 // ── opencode serve process ownership + crash recovery ────────────────────
@@ -471,6 +573,77 @@ const backendSessionsFailing = new Set();
 // the life of the session.
 const sessions = new Map(); // sessionId -> SessionState
 
+// ── Session → backend resolution (no more guessing) ──────────────────────
+// A session's backend is fixed for its whole lifetime, but `sessions` above
+// only knows about sessions THIS process has itself touched since it
+// started — every pre-existing session (the common case after any container
+// restart) needs its real backend resolved some other way, or every
+// session-scoped route risks silently guessing wrong. This used to fall
+// back to the CLI's --backend default when neither the in-memory state nor
+// the caller's request happened to know better — exactly the bug behind the
+// "restarted container, existing session shows the wrong backend" reports:
+// a resumed session could get permanently mis-pinned to that guess the
+// moment anything (e.g. /prompt racing the browser's own not-yet-loaded
+// /sessions data) called getSessionState() before ever passing an explicit
+// backend, with no way to correct it short of a full container restart.
+//
+// Fixed by resolving instead of guessing: every backend's listSessions()
+// already tags each session with its real owning backend (that's how
+// /sessions merges them for the browser's own sessionBackends map) — this
+// is just a cache of that same data, so a session's backend is *known*, not
+// inferred, the moment it's ever been listed once. Warmed eagerly at
+// startup below and refreshed on every real /sessions poll, so it's
+// normally populated well before the first request that needs it —
+// including through opencode's several-second cold start, the likeliest
+// real trigger for the old bug. A session id that's in neither `sessions`
+// nor this cache is either brand new (always arrives with an explicit
+// backend from the new-chat picker — see getSessionState) or has never once
+// been listed by anything this driver has done — the only remaining case
+// that still falls through to defaultBackendId().
+const sessionIdToBackend = new Map(); // sessionId -> backend id
+
+// Shared by the /sessions route and the cache warm-up/refresh below — one
+// place that fans out to every backend's listSessions() and folds the
+// per-backend-failure bookkeeping (backendSessionsFailing) in, so neither
+// caller has to duplicate it.
+async function gatherAllSessions(includeUnreachable) {
+  const backendIds = Object.keys(backends);
+  const settled = await Promise.allSettled(
+    Object.values(backends).map((backend) =>
+      backend.listSessions({ includeUnreachable }, sessions, pendingKindForSession)
+    )
+  );
+  const perBackend = [];
+  settled.forEach((r, i) => {
+    const id = backendIds[i];
+    if (r.status === "fulfilled") {
+      perBackend.push(r.value);
+      // Only worth a line when it flips back from failing — a backend
+      // that's simply never had a problem stays silent, same as before.
+      if (backendSessionsFailing.delete(id)) {
+        console.log(`[driver] /sessions: backend "${id}" recovered`);
+      }
+    } else if (!backendSessionsFailing.has(id)) {
+      backendSessionsFailing.add(id);
+      console.error(`[driver] /sessions: backend "${id}" failed:`, r.reason?.message);
+    }
+  });
+  const allSessions = perBackend.flatMap((r) => r.sessions);
+  for (const s of allSessions) sessionIdToBackend.set(s.sessionId, s.backend);
+  const unreachableCount = perBackend.reduce((sum, r) => sum + (r.unreachableCount || 0), 0);
+  const unreachableSessions = includeUnreachable
+    ? perBackend.flatMap((r) => r.unreachableSessions || [])
+    : undefined;
+  return { allSessions, unreachableCount, unreachableSessions };
+}
+
+// Eager warm-up so the cache is populated before the first browser-driven
+// /sessions call, not just after it — closes the exact race the old bug
+// lived in. Unawaited: a slow/failing backend at startup must not delay the
+// server binding its port; gatherAllSessions already treats a failing
+// backend as a normal, self-healing, log-once condition.
+gatherAllSessions(false).catch((e) => console.error("[driver] startup session-backend warm-up failed:", e.message));
+
 // Pre-prompt picker changes for sessions that have no driver state yet (the
 // "new chat" case, or a session this process hasn't touched this run). A
 // real SessionState must never be created just to remember a model/mode
@@ -503,16 +676,13 @@ const preSeeds = new Map(); // sessionId -> { model?, mode? }
 // restart, with no turn run yet to record it, is exactly the same kind of
 // fact this exists to not lose regardless of backend.
 //
-// Lives in PodPrompt's own XDG state directory, NOT under CLAUDE_CONFIG_DIR
-// (see podprompt.sh's PODPROMPT_STATE_DIR) — this is PodPrompt's own
-// bookkeeping, not Claude Code's, and CLAUDE_CONFIG_DIR now points at the
-// user's real, shared ~/.claude (also used by any native install on the
-// host), which should never end up with PodPrompt-internal files in it.
-// Same reasoning as backends/claude-code.mjs's SESSION_HOSTS_FILE.
-const MODEL_PICKS_FILE = nodePath.join(
-  process.env.PODPROMPT_STATE_DIR || nodePath.join(os.homedir(), ".local", "state", "podprompt"),
-  "viewer-model-picks.json"
-);
+// Lives in PodPrompt's own XDG state directory (PODPROMPT_STATE_DIR above),
+// NOT under CLAUDE_CONFIG_DIR — this is PodPrompt's own bookkeeping, not
+// Claude Code's, and CLAUDE_CONFIG_DIR points at the user's real, shared
+// ~/.claude (also used by any native install on the host), which should
+// never end up with PodPrompt-internal files in it. Same reasoning as
+// LAST_BACKEND_FILE/SESSION_HOSTS_FILE below.
+const MODEL_PICKS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-model-picks.json");
 
 function loadPersistedModelPicks() {
   try {
@@ -547,9 +717,22 @@ for (const [seedSessionId, seedModel] of Object.entries(loadPersistedModelPicks(
 function getSessionState(sessionId, explicitCwd, explicitBackendId) {
   let s = sessions.get(sessionId);
   if (!s) {
-    const backend = getBackend(explicitBackendId || args.backend);
+    // Resolve, don't guess: an explicit backend from the caller wins, else
+    // this session's real backend if it's ever been listed before (see
+    // sessionIdToBackend above), else — genuinely never seen anywhere —
+    // defaultBackendId(). That last case should only ever be reached for a
+    // session this driver has never listed AND that arrived with no
+    // explicit backend, which the new-chat picker never does.
+    const backendId = explicitBackendId || sessionIdToBackend.get(sessionId) || defaultBackendId();
+    const backend = getBackend(backendId);
     const cwd = explicitCwd || backend.cwdForSession(sessionId, null);
     s = { bootstrapped: false, turnInFlight: false, abortController: null, cwd, backend };
+    // Remember this as the new-chat picker's next pre-selected choice — but
+    // only when this really is a brand-new session (explicitCwd is the
+    // established signal for that; see /prompt) with a deliberate backend
+    // pick, not a pre-existing session whose backend this call merely
+    // resolved for the first time this run via sessionIdToBackend above.
+    if (explicitCwd && explicitBackendId) persistLastBackend(explicitBackendId);
     const pre = preSeeds.get(sessionId);
     if (pre) {
       if (pre.model) s.model = pre.model;
@@ -574,15 +757,18 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
 }
 
 // Backend resolution for routes that must NOT create session state (pure
-// reads like /modes & /models, and session-management calls): the pinned
-// state backend wins once a session has been touched this run, otherwise an
-// explicit backend from the caller (the viewer relays what it learned from
-// /sessions), otherwise the CLI default. Crucially this never creates a
-// SessionState, so a resumed session can't get its cwd/backend pinned by a
-// mere /models or /session-history call.
+// reads like /modes, /models & /commands, and session-management calls):
+// the pinned state backend wins once a session has been touched this run,
+// otherwise an explicit backend from the caller, otherwise this session's
+// real backend from sessionIdToBackend if it's ever been listed, otherwise
+// defaultBackendId(). Crucially this never creates a SessionState, so a
+// resumed session can't get its cwd/backend pinned by a mere /models or
+// /session-history call.
 function backendFor(sessionId, explicitBackendId) {
   const state = sessionId ? sessions.get(sessionId) : null;
-  return state?.backend || getBackend(explicitBackendId || args.backend);
+  if (state) return state.backend;
+  const backendId = explicitBackendId || (sessionId && sessionIdToBackend.get(sessionId)) || defaultBackendId();
+  return getBackend(backendId);
 }
 
 // ── Account-wide plan/usage polling (backend-agnostic; currently only
@@ -648,6 +834,10 @@ setInterval(pollAccountUsageForAllBackends, PLAN_USAGE_POLL_INTERVAL_MS);
 // generic enough to live here once instead of duplicated in every backend.
 async function runTurn(sessionId, promptText) {
   const state = getSessionState(sessionId);
+  // Generic across both backends (see stampSessionHost's own comment) —
+  // every turn, any session, any backend, records which host path was
+  // actually backing /workspace just now.
+  stampSessionHost(sessionId, state.cwd);
   try {
     await state.backend.runTurn(sessionId, promptText, state);
   } catch (e) {
@@ -699,12 +889,17 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   if (req.method === "GET" && path === "/commands") {
-    // Deliberately reads from the DEFAULT backend's known-commands, not any
-    // one session's — matches the pre-refactor behavior (this was already a
-    // single shared module-level value, not per-session) and is good enough
-    // until a per-backend commands panel is worth building.
+    // Session-scoped, same as /modes & /models below — an opencode session's
+    // palette must show opencode's own commands, not whichever backend
+    // happens to be "the default" (this used to be pinned to a single
+    // shared default regardless of which session was open, which was
+    // silently wrong for any session on the non-default backend). Falls
+    // back to backendFor()'s own default-backend answer only when no
+    // sessionId is given at all.
+    const sessionId = url.searchParams.get("sessionId");
+    const backend = backendFor(sessionId, url.searchParams.get("backend"));
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(getBackend(args.backend).getKnownCommands()));
+    res.end(JSON.stringify(backend.getKnownCommands()));
     return;
   }
 
@@ -764,41 +959,30 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/sessions") {
     try {
       const includeUnreachable = url.searchParams.get("includeUnreachable") === "1";
-      // allSettled, not all: each backend is queried independently (e.g. an
-      // opencode backend hits a separate `opencode serve` process that may
-      // simply not be running if the user never opted into it), so one
-      // unreachable/misbehaving backend must not take down the whole
-      // response for every other backend that's working fine.
-      const backendIds = Object.keys(backends);
-      const settled = await Promise.allSettled(
-        Object.values(backends).map((backend) =>
-          backend.listSessions({ includeUnreachable }, sessions, pendingKindForSession)
-        )
-      );
-      const perBackend = [];
-      settled.forEach((r, i) => {
-        const id = backendIds[i];
-        if (r.status === "fulfilled") {
-          perBackend.push(r.value);
-          // Only worth a line when it flips back from failing — a backend
-          // that's simply never had a problem stays silent, same as before.
-          if (backendSessionsFailing.delete(id)) {
-            console.log(`[driver] /sessions: backend "${id}" recovered`);
-          }
-        } else if (!backendSessionsFailing.has(id)) {
-          // First failure for this backend since it last worked (or since
-          // startup) — log it once, then stay quiet on every subsequent poll
-          // for as long as it keeps failing the same way (see
-          // backendSessionsFailing above).
-          backendSessionsFailing.add(id);
-          console.error(`[driver] /sessions: backend "${id}" failed:`, r.reason?.message);
-        }
-      });
-      const allSessions = perBackend.flatMap((r) => r.sessions);
-      const unreachableCount = perBackend.reduce((sum, r) => sum + (r.unreachableCount || 0), 0);
-      const unreachableSessions = includeUnreachable
-        ? perBackend.flatMap((r) => r.unreachableSessions || [])
-        : undefined;
+      // gatherAllSessions also refreshes sessionIdToBackend as a side effect
+      // (see its own comment) — every real /sessions poll opportunistically
+      // keeps that cache current, on top of the one-time startup warm-up.
+      const { allSessions, unreachableCount, unreachableSessions } = await gatherAllSessions(includeUnreachable);
+
+      // Annotate every session (reachable or not) with what's known about
+      // the host path it was last touched from — one bulk read of
+      // SESSION_HOSTS_FILE rather than a re-read per session. lastKnownHostPath
+      // powers viewer.html's "relaunch from X" hint on unreachable sessions
+      // (unchanged); hostMismatch is the new signal, only ever set true when
+      // BOTH the current and recorded host paths are actually known and
+      // disagree — see SESSION_HOSTS_FILE's own comment for why this is a
+      // soft, informational flag on an otherwise-normal session rather than
+      // folded into `unreachable`.
+      const sessionHosts = loadSessionHosts();
+      const currentHostPath = process.env.HOST_WORKSPACE_PATH || null;
+      const annotateHost = (s) => {
+        const rec = sessionHosts[s.sessionId];
+        s.lastKnownHostPath = rec?.hostPath || null;
+        s.hostMismatch = !!(currentHostPath && rec?.hostPath && rec.hostPath !== currentHostPath);
+        return s;
+      };
+      allSessions.forEach(annotateHost);
+      if (unreachableSessions) unreachableSessions.forEach(annotateHost);
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
@@ -820,22 +1004,32 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "GET" && path === "/backends") {
     // Lets the browser's "+ New chat" picker offer a real backend choice
-    // (see viewer.html's openNewChatPicker) instead of silently always
-    // using args.backend — every registered backend is always a valid
-    // explicit choice for a new session (see /prompt's body.backend),
-    // regardless of which one is the default.
+    // (see viewer.html's openNewChatPicker) and pre-select one — every
+    // registered backend is always a valid explicit choice for a new
+    // session (see /prompt's body.backend), regardless of which one
+    // defaultBackendId() currently answers.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ available: Object.keys(backends), default: args.backend }));
+    res.end(JSON.stringify({ available: Object.keys(backends), default: defaultBackendId() }));
     return;
   }
 
   if (req.method === "GET" && path === "/projects") {
-    // Multi-project discovery is currently Claude-Code-only (see
-    // backends/claude-code.mjs) — reported against the default backend
-    // until it's generalized. Deliberately not per-backend-merged yet: an
-    // OpenCode backend has no equivalent scan to contribute.
+    // Driven by an explicit ?backend= from the new-chat picker's own
+    // currently-selected radio button (see viewer.html's openNewChatPicker/
+    // loadAndRenderProjects), not a single global default — each backend's
+    // project discovery differs (Claude Code scans its own multi-project
+    // session history; OpenCode's is a similar scan against its own /session
+    // API — see backends/opencode.mjs's listProjects), so the picker must
+    // re-fetch this whenever its selected backend changes, or it'd show one
+    // backend's project list while the other is selected. Only falls back to
+    // defaultBackendId() when no explicit backend is given at all (e.g. a
+    // stale/older client).
+    const backend = getBackend(url.searchParams.get("backend") || defaultBackendId());
+    // Awaited: OpenCode's listProjects() is now genuinely async (a real
+    // GET /session fetch, not a stub) — Claude Code's stays sync and just
+    // resolves immediately either way.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(getBackend(args.backend).listProjects()));
+    res.end(JSON.stringify(await backend.listProjects()));
     return;
   }
 
@@ -1185,7 +1379,7 @@ const server = createServer(async (req, res) => {
     // session quietly landing somewhere the user didn't ask for.
     let explicitCwd;
     if (body.cwd) {
-      const backend = getBackend(body.backend || args.backend);
+      const backend = getBackend(body.backend || defaultBackendId());
       explicitCwd = backend.resolveValidCwd(body.cwd);
       if (!explicitCwd) {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -1289,6 +1483,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(args.port, "0.0.0.0", () => {
   console.log(`[driver] listening on port ${args.port}, forwarding to viewer at ${VIEWER_MESSAGE_URL}`);
-  console.log(`[driver] default backend: ${args.backend}`);
+  console.log(`[driver] new-chat default backend: ${defaultBackendId()}`);
   console.log("[driver] multi-session — no pinned session id; each request names its own target");
 });

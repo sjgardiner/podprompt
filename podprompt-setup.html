@@ -468,11 +468,13 @@
         <p>
           This guide covers the Claude Code provider/authentication flow in
           detail (subscription OAuth, direct API, LiteLLM). PodPrompt also
-          supports an OpenCode backend (<code>--backend opencode</code> /
-          <code>--viewer-backend opencode</code>), configured entirely through
-          OpenCode's own standard config, auth, and data directories — see
-          <code>podprompt.sh</code>'s own comments for the current mount
-          details until this guide is expanded to cover it fully.
+          supports an OpenCode backend (<code>--opencode</code> for its own
+          direct terminal session, or just pick it from the viewer's own
+          "+ New chat" picker — both backends are always available there),
+          configured entirely through OpenCode's own standard config, auth,
+          and data directories — see <code>podprompt.sh</code>'s own comments
+          for the current mount details until this guide is expanded to cover
+          it fully.
         </p>
       </div>
     </div>
@@ -585,13 +587,23 @@ chmod 600 ~/.podprompt.env</pre>
       <div class="callout warn">
         <div class="callout-label">First launch — authentication</div>
         <p>The first time you run the container in default (<code>--direct</code>)
-        mode, Claude Code will walk you through a browser-based OAuth login with
-        your claude.ai account. Follow the prompts in the terminal. Your credentials
-        are saved into <code>~/.claude/</code> and reused on all subsequent
-        runs — you will not be prompted again unless the credentials expire.</p>
+        mode <strong>with a terminal attached</strong> (<code>--claude</code> or
+        <code>--opencode</code>), Claude Code will walk you through a
+        browser-based OAuth login with your claude.ai account. Follow the
+        prompts in the terminal. Your credentials are saved into
+        <code>~/.claude/</code> and reused on all subsequent runs — you will
+        not be prompted again unless the credentials expire.</p>
+        <p><strong>Do this via <code>--claude</code> once before your first
+        plain <code>./podprompt.sh</code> (viewer) run</strong> — the viewer
+        drives Claude through the Agent SDK directly, with no terminal
+        attached to <code>claude</code> at all, so there is nowhere for an
+        interactive OAuth prompt to appear if you've never logged in yet.
+        Once <code>~/.claude/</code> holds valid credentials (from any prior
+        <code>--claude</code> run), the viewer reuses them like any other
+        Claude Code session.</p>
         <p>If you use <code>--direct-api</code> instead, no interactive login is
         needed — Claude Code authenticates using your <code>ANTHROPIC_API_KEY</code>
-        directly.</p>
+        directly, regardless of interface.</p>
       </div>
     </section>
 
@@ -722,27 +734,30 @@ Small model: openai/gpt-oss-120b</pre>
           <span class="code-block-label">bash — common invocations</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre># claude.ai subscription (OAuth), terminal UI — default
+        <pre># claude.ai subscription (OAuth), browser viewer — default (no
+# terminal UI is attached in this mode; both Claude Code and OpenCode
+# are available per-session from the viewer's own "+ New chat" picker)
 ./podprompt.sh
 
 # Anthropic API key billing instead of subscription
 ./podprompt.sh --direct-api
 
-# LiteLLM — interactive model picker runs automatically
-./podprompt.sh --litellm
+# LiteLLM — interactive model picker runs automatically (Claude Code
+# terminal UI only; see --claude below)
+./podprompt.sh --claude --litellm
 
-# Any provider + browser viewer (no terminal UI is attached in this mode)
-./podprompt.sh --viewer
-./podprompt.sh --litellm --viewer
+# Claude Code's own terminal UI instead of the viewer
+./podprompt.sh --claude
 
 # Viewer on a non-default port
-./podprompt.sh --viewer --viewer-port 7844
+./podprompt.sh --viewer-port 7844
 
 # List available LiteLLM models without launching
 ./podprompt.sh --list-models
 
-# Pass a flag through to claude (see Pass-through options below)
-./podprompt.sh --dangerously-skip-permissions</pre>
+# Pass a flag through to claude (only meaningful with --claude — see
+# Pass-through options below)
+./podprompt.sh --claude --dangerously-skip-permissions</pre>
       </div>
       <p>
         Run from whichever directory you want Claude to work in — it is mounted
@@ -792,33 +807,62 @@ Small model: openai/gpt-oss-120b</pre>
         available models without launching.
       </p>
 
-      <h3>Utility</h3>
+      <h3>Interface (mutually exclusive; --viewer is the default)</h3>
       <table class="option-table">
         <thead><tr><th>Flag</th><th>Description</th></tr></thead>
         <tbody>
           <tr>
-            <td>--viewer</td>
-            <td>Start the bidirectional browser viewer instead of the
-            terminal UI. Opens <code>http://localhost:VIEWER_PORT</code>
-            with Claude's responses rendered as markdown/math/
-            syntax-highlighted code and streamed live as they're generated.
-            The browser's own input box drives Claude directly through a
-            small Agent-SDK-based driver — no terminal session is attached
-            at all. Requires <code>viewer/</code> to be installed (with
-            dependencies) in <code>~/.local/share/podprompt/viewer/</code> — see
-            <a href="#step-5">step 5</a>.</td>
+            <td>(default) / --viewer</td>
+            <td>Start the bidirectional browser viewer. Opens
+            <code>http://localhost:VIEWER_PORT</code> with Claude's responses
+            rendered as markdown/math/syntax-highlighted code and streamed
+            live as they're generated. The browser's own input box drives
+            either backend directly through a small Agent-SDK-based driver —
+            no terminal session is attached at all. Requires
+            <code>viewer/</code> to be installed (with dependencies) in
+            <code>~/.local/share/podprompt/viewer/</code> — see
+            <a href="#step-5">step 5</a>. <code>--viewer</code> only ever
+            needs to be typed explicitly (e.g. in a script) — it's the
+            default either way, and is mutually exclusive with
+            <code>--claude</code>/<code>--opencode</code> below.</td>
+          </tr>
+          <tr>
+            <td>--claude, --claude-code</td>
+            <td>Skip the viewer and drop straight into Claude Code's own
+            terminal UI (<code>claude</code>) instead.</td>
+          </tr>
+          <tr>
+            <td>--opencode</td>
+            <td>Skip the viewer and drop straight into OpenCode's own
+            terminal UI (<code>opencode</code>) instead. OpenCode manages its
+            own provider/model credentials separately from
+            <code>--direct</code>/<code>--direct-api</code> above — see
+            <code>opencode auth login</code>, or just use this flag once.</td>
           </tr>
           <tr>
             <td>--viewer-port PORT</td>
             <td>Host port for the viewer's browser page and SSE feed.
-            Default: <code>7843</code>. Only meaningful with <code>--viewer</code>.</td>
+            Default: <code>7843</code>. Only meaningful with the viewer.</td>
           </tr>
           <tr>
             <td>--viewer-driver-port PORT</td>
             <td>Host port for the bidirectional driver, which accepts
             prompts and permission responses from the browser. Default:
-            <code>7844</code>. Only meaningful with <code>--viewer</code>.</td>
+            <code>7844</code>. Only meaningful with the viewer.</td>
           </tr>
+          <tr>
+            <td>--opencode-port PORT</td>
+            <td>Loopback-only port <code>opencode serve</code> listens on
+            inside the container. Never published to the host. Default:
+            <code>7845</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Utility</h3>
+      <table class="option-table">
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
           <tr>
             <td>--help, -h</td>
             <td>Print a full usage summary and exit.</td>
@@ -828,10 +872,13 @@ Small model: openai/gpt-oss-120b</pre>
 
       <h3>Pass-through options</h3>
       <p>
-        Any flag not listed above is passed directly to the <code>claude</code>
-        binary inside the container. Pass-through arguments are forwarded after
-        all recognised flags have been consumed, so they can be freely mixed
-        with the above. Examples:
+        Any flag not listed above is passed directly to whichever binary
+        <code>--claude</code>/<code>--opencode</code> selects
+        (<code>claude</code> or <code>opencode</code>) — only meaningful
+        alongside one of those two flags, since the viewer (the default)
+        never execs either binary directly. Pass-through arguments are
+        forwarded after all recognised flags have been consumed, so they can
+        be freely mixed with the above. Examples:
       </p>
       <table class="option-table">
         <thead><tr><th>Flag</th><th>Description</th></tr></thead>
@@ -947,10 +994,12 @@ Small model: openai/gpt-oss-120b</pre>
       <h2>Viewer</h2>
       <p>
         The viewer is a full browser-based interface for Claude Code — not a
-        read-only mirror of a terminal session. It's an optional add-on (the
-        run script works fine without it), but when enabled with
-        <code>--viewer</code>, the browser <em>is</em> the interface: no
-        terminal UI is launched at all.
+        read-only mirror of a terminal session. It's the run script's default
+        interface (a bare <code>./podprompt.sh</code> starts it); the browser
+        <em>is</em> the interface, no terminal UI is launched at all. Pass
+        <code>--claude</code>/<code>--claude-code</code> or
+        <code>--opencode</code> instead if you'd rather skip the browser and
+        get a direct terminal session with one specific backend.
       </p>
 
       <h3>How it works</h3>

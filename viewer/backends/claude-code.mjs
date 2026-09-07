@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  existsSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync,
+  existsSync, readdirSync, readFileSync, realpathSync, statSync,
 } from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
@@ -34,15 +34,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // below lives here rather than anywhere under /workspace itself.
   const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude");
   const PROJECTS_DIR = nodePath.join(CLAUDE_CONFIG_DIR, "projects");
-  // Deliberately NOT under CLAUDE_CONFIG_DIR: this is PodPrompt's own
-  // bookkeeping, not Claude Code's — since CLAUDE_CONFIG_DIR now points at
-  // the user's real, shared ~/.claude (see above), writing our own files in
-  // there would leak into a native install's config directory too. Lives in
-  // its own XDG state directory instead (see podprompt.sh's
-  // PODPROMPT_STATE_DIR), independent of both backends' own directories.
-  const PODPROMPT_STATE_DIR = process.env.PODPROMPT_STATE_DIR
-    || nodePath.join(os.homedir(), ".local", "state", "podprompt");
-  const SESSION_HOSTS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-hosts.json");
 
   // ── Multi-project discovery ─────────────────────────────────────────────
   // A launch of --viewer is pinned to one root cwd (cwdRoot, normally just
@@ -190,46 +181,15 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     return fallbackCwd || knownProjects.sessionIdToCwd.get(sessionId) || cwdRoot;
   }
 
-  // ── Per-turn host-path bookkeeping ──────────────────────────────────────
-  // Records, per session, which host directory was backing /workspace the
-  // last time a turn actually started for it — the one piece of state that
-  // needs the *launch script* itself to cooperate (HOST_WORKSPACE_PATH is
-  // exported by podprompt.sh; nothing inside the container otherwise
-  // has any way to know the host-side path at all — Docker bind mounts don't
-  // carry that information across the boundary on their own). Lives in the
-  // same config directory session storage does, so it survives container
-  // relaunches independent of whatever /workspace currently points at —
-  // which is exactly the point: it's meant to answer "where do I need to
-  // point the launch script to get back to this" for a session that's since
-  // become unreachable.
-  function stampSessionHost(sessionId, cwd) {
-    const hostPath = process.env.HOST_WORKSPACE_PATH;
-    if (!hostPath) return; // older launch script, or non-docker dev usage — nothing to record
-    let data = {};
-    try {
-      data = JSON.parse(readFileSync(SESSION_HOSTS_FILE, "utf8"));
-    } catch {
-      // missing or corrupt — start fresh rather than fail the turn over this
-    }
-    data[sessionId] = { hostPath, cwd, lastSeen: new Date().toISOString() };
-    try {
-      // Temp file + atomic rename so a crash mid-write can't leave a torn
-      // JSON that throws on the next read.
-      writeFileSync(`${SESSION_HOSTS_FILE}.tmp`, JSON.stringify(data));
-      renameSync(`${SESSION_HOSTS_FILE}.tmp`, SESSION_HOSTS_FILE);
-    } catch (e) {
-      console.error("[claude-code] failed to write session-hosts file:", e.message);
-    }
-  }
-
-  function lastKnownHostPath(sessionId) {
-    try {
-      const data = JSON.parse(readFileSync(SESSION_HOSTS_FILE, "utf8"));
-      return data[sessionId]?.hostPath || null;
-    } catch {
-      return null;
-    }
-  }
+  // Per-turn host-path bookkeeping (which host directory was backing
+  // /workspace the last time a turn ran for a session) now lives in
+  // driver.mjs — stampSessionHost() there is called generically from the
+  // shared runTurn() wrapper for every backend, not per-backend, and the
+  // hostMismatch check it feeds is used by /sessions regardless of which
+  // backend a session belongs to. See driver.mjs's own comment above
+  // SESSION_HOSTS_FILE for the full explanation (including why this used to
+  // live here, Claude-Code-only, and why that no longer made sense once
+  // OpenCode needed the same "here's where to relaunch from" hint).
 
   // Lightweight, SDK-independent session summary for the unreachable bucket
   // (listSessions()/getSessionMessages() need a `dir` that actually resolves,
@@ -789,7 +749,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // already needs `turnInFlight`/`abortController` for its own /abort and
   // /prompt-busy-check routes regardless of which backend is active.
   async function runTurn(sessionId, promptText, state) {
-    stampSessionHost(sessionId, state.cwd);
+    // Host-path stamping now happens generically in driver.mjs's own
+    // runTurn() wrapper, once for every backend — see its comment.
     state.turnInFlight = true;
     broadcastStatus(sessionId, { type: "turn_start" });
 
@@ -1126,7 +1087,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
               projectLabel: projectLabelFor(cwd),
               createdAt: createdAt,
               unreachable: true,
-              lastKnownHostPath: lastKnownHostPath(sessionId),
+              // lastKnownHostPath/hostMismatch are attached centrally by
+              // driver.mjs's /sessions handler now (see its own comment) —
+              // not backend-specific, so no longer computed here.
               ...lightweightSessionSummary(filePath),
             });
           }

@@ -3325,7 +3325,14 @@ async function openPalette() {
   paletteDropdown.innerHTML = '<div class="palette-empty">Loading…</div>';
   paletteDropdown.classList.add('show');
   try {
-    const res = await fetch(`${driverBase}/commands`);
+    // Session-scoped now, same as /modes & /models — an opencode session's
+    // palette must show opencode's own commands, not whichever backend
+    // used to be "the default" (this was previously fetched with no session
+    // context at all, so it silently showed the wrong backend's commands
+    // for any session on the non-default backend).
+    const backendUsed = resolvedBackendForIndicator();
+    const res = await fetch(`${driverBase}/commands?sessionId=${encodeURIComponent(currentSessionId)}`
+      + (backendUsed ? `&backend=${encodeURIComponent(backendUsed)}` : ''));
     const cmds = await res.json();
     const visible = (cmds.slash_commands || [])
       .filter((name) => !(cmds.terminal_slash_commands || []).includes(name))
@@ -3483,7 +3490,18 @@ function buildSessionItem(s, wantArchived) {
   // projects can sit right next to each other.
   const metaParts = [formatSessionWhen(s.lastModified)];
   if (settings.sessionsLayout !== 'grouped' && s.projectLabel) metaParts.push(s.projectLabel);
+  // Soft heads-up, not a block (this session is still perfectly reachable
+  // and resumable) — driver.mjs only ever sets this when it actually knows
+  // both the current and last-recorded host paths and they disagree, which
+  // can mean either "you relocated this same checkout" (harmless, ignore)
+  // or "this session actually belongs to an unrelated project that happened
+  // to record the same in-container path" (see driver.mjs's own comment
+  // above SESSION_HOSTS_FILE for the full explanation).
+  if (s.hostMismatch) metaParts.push('⚠ different host path');
   metaEl.textContent = metaParts.filter(Boolean).join(' · ');
+  if (s.hostMismatch) {
+    metaEl.title = `Last used from ${s.lastKnownHostPath}, not the host path this container is currently running from. If you relocated this same project, ignore this — otherwise it may be a session from an unrelated project.`;
+  }
 
   const actions = document.createElement('div');
   actions.className = 'session-actions';
@@ -3947,6 +3965,48 @@ function updateBackendIndicator() {
 // to create the session.
 let newChatSelectedBackend = null;
 
+// Fetches /projects for one specific backend and (re-)renders just the
+// project-item list + custom-subdirectory row into `section` — pulled out
+// of openNewChatPicker so the backend-row buttons below can call this again
+// on click without disturbing the backend row itself. Each backend's own
+// project discovery is genuinely different (Claude Code's is a real
+// multi-project scan; OpenCode's is a similar scan against its own session
+// history, but can differ in what it's ever seen — see backends/
+// opencode.mjs's listProjects), so switching the picker's selected backend
+// without re-fetching would show one backend's list while the other is
+// selected right above it.
+async function loadAndRenderProjects(backend, section, currentCwd) {
+  section.innerHTML = '<div class="palette-empty">Loading…</div>';
+  try {
+    const res = await fetch(`${driverBase}/projects?backend=${encodeURIComponent(backend)}`);
+    const data = await res.json();
+    section.innerHTML = '';
+    for (const p of data.projects || []) {
+      const item = document.createElement('div');
+      const isCurrent = p.cwd === currentCwd;
+      item.className = 'new-chat-project-item' + (isCurrent ? ' current' : '');
+      item.textContent = isCurrent ? `${p.label} (current)` : p.label;
+      item.addEventListener('click', () =>
+        startNewChatInProject(p.cwd === data.root ? undefined : p.cwd, newChatSelectedBackend));
+      section.appendChild(item);
+    }
+
+    const customRow = document.createElement('div');
+    customRow.className = 'new-chat-custom-row';
+    const input = document.createElement('input');
+    input.placeholder = 'Or type a subdirectory path…';
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim(), newChatSelectedBackend);
+    });
+    customRow.appendChild(input);
+    section.appendChild(customRow);
+  } catch (e) {
+    section.innerHTML = '<div class="palette-empty">Failed to load projects.</div>';
+    console.error('Failed to load /projects:', e);
+  }
+}
+
 async function openNewChatPicker() {
   if (newChatPicker.classList.contains('show')) {
     dismissNewChatPicker();
@@ -3956,13 +4016,13 @@ async function openNewChatPicker() {
   newChatPicker.innerHTML = '<div class="palette-empty">Loading…</div>';
   newChatPicker.classList.add('show');
   try {
-    const [projRes, backendsRes] = await Promise.all([
-      fetch(`${driverBase}/projects`),
-      // Tolerate an older driver.mjs without this route — falls back to a
-      // single implicit claude-code choice, same as before this existed.
-      fetch(`${driverBase}/backends`).catch(() => null),
-    ]);
-    const data = await projRes.json();
+    // Backend choice needs to be known before the first /projects fetch
+    // (which now depends on it) rather than fired in parallel with it —
+    // negligible added latency (loopback), and correctness beats shaving
+    // one round trip here.
+    // Tolerate an older driver.mjs without this route — falls back to a
+    // single implicit claude-code choice, same as before this existed.
+    const backendsRes = await fetch(`${driverBase}/backends`).catch(() => null);
     let backendsData = { available: ['claude-code'], default: 'claude-code' };
     if (backendsRes && backendsRes.ok) backendsData = await backendsRes.json();
     newChatSelectedBackend = backendsData.default;
@@ -3973,6 +4033,9 @@ async function openNewChatPicker() {
     const currentCwd = lastSessionsResult?.sessions?.find((s) => s.sessionId === currentSessionId)?.cwd;
 
     newChatPicker.innerHTML = '';
+
+    const projectSection = document.createElement('div');
+    projectSection.className = 'new-chat-project-section';
 
     // Backend row — only worth showing a choice at all when more than one
     // backend is actually registered (a single-backend deployment just
@@ -3987,38 +4050,22 @@ async function openNewChatPicker() {
         btn.textContent = BACKEND_LABELS[b] || b;
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
+          if (newChatSelectedBackend === b) return;
           newChatSelectedBackend = b;
           backendRow.querySelectorAll('.new-chat-backend-btn')
             .forEach((el) => el.classList.toggle('selected', el === btn));
+          loadAndRenderProjects(b, projectSection, currentCwd);
         });
         backendRow.appendChild(btn);
       }
       newChatPicker.appendChild(backendRow);
     }
 
-    for (const p of data.projects || []) {
-      const item = document.createElement('div');
-      const isCurrent = p.cwd === currentCwd;
-      item.className = 'new-chat-project-item' + (isCurrent ? ' current' : '');
-      item.textContent = isCurrent ? `${p.label} (current)` : p.label;
-      item.addEventListener('click', () =>
-        startNewChatInProject(p.cwd === data.root ? undefined : p.cwd, newChatSelectedBackend));
-      newChatPicker.appendChild(item);
-    }
-
-    const customRow = document.createElement('div');
-    customRow.className = 'new-chat-custom-row';
-    const input = document.createElement('input');
-    input.placeholder = 'Or type a subdirectory path…';
-    input.addEventListener('click', (e) => e.stopPropagation());
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim(), newChatSelectedBackend);
-    });
-    customRow.appendChild(input);
-    newChatPicker.appendChild(customRow);
+    newChatPicker.appendChild(projectSection);
+    await loadAndRenderProjects(newChatSelectedBackend, projectSection, currentCwd);
   } catch (e) {
     newChatPicker.innerHTML = '<div class="palette-empty">Failed to load projects.</div>';
-    console.error('Failed to load /projects:', e);
+    console.error('Failed to load new-chat picker:', e);
   }
 }
 

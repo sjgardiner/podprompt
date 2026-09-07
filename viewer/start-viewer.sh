@@ -11,13 +11,13 @@
 # to is NOT started here anymore — driver.mjs owns and supervises that child
 # process itself (spawn + crash/wedge detection + backoff restart; see the
 # opencode process-ownership block in driver.mjs). It is started
-# unconditionally at driver startup, regardless of $VIEWER_BACKEND — the
-# driver registers BOTH backends and any session can request either one
-# explicitly (the browser's "+ New chat" picker does this), so the opencode
-# backend needs to be reachable even when claude-code is the default. This
-# used to be the missing piece: nothing ever started `opencode serve` inside
-# the container, so --viewer-backend opencode assumed a process that never
-# existed. Loopback-only (127.0.0.1) and not published to the host —
+# unconditionally at driver startup — the driver registers BOTH backends and
+# any session can request either one explicitly (the browser's "+ New chat"
+# picker does this), so the opencode backend needs to be reachable
+# regardless of which backend is currently preselected there. This used to
+# be the missing piece: nothing ever started `opencode serve` inside the
+# container, so picking opencode from the new-chat picker assumed a process
+# that never existed. Loopback-only (127.0.0.1) and not published to the host —
 # driver.mjs is the only thing that talks to it, and they share this
 # container's network namespace.
 #
@@ -26,7 +26,7 @@
 # and ~/.cache/opencode directly onto opencode's own real default paths
 # inside the container (see `opencode debug paths`), so credentials/config/
 # sessions created via `opencode auth login` (either through that serve
-# instance, or through `./podprompt.sh --backend opencode`'s own TUI, which
+# instance, or through `./podprompt.sh --opencode`'s own TUI, which
 # gets the identical mounts) persist across container restarts in their own
 # standard host locations — independent of Claude Code's own ~/.claude and
 # of PodPrompt's own ~/.local/{share,state}/podprompt, not nested inside
@@ -61,11 +61,20 @@ python3 "$HOME/.local/share/podprompt/viewer/server.py" --port "${VIEWER_PORT:-7
 # `./podprompt.sh --viewer --resume <id>`) is simply irrelevant now — those
 # flags only ever meant anything to the TUI process this script used to
 # also launch, which doesn't exist in viewer mode at all anymore.
+#
+# No --backend flag anymore either: podprompt.sh's own --claude/--opencode
+# now only ever select a direct TUI launch (a different, mutually exclusive
+# interface from --viewer, which this script is the entrypoint for) — there
+# is no more command-line "default backend" for the viewer. driver.mjs
+# resolves each session's own real, fixed backend itself (see its
+# sessionIdToBackend cache) and remembers whichever backend the new-chat
+# picker was last used with for its own pre-selected radio button
+# (defaultBackendId(), backed by viewer-last-backend.json) — neither needs
+# anything from this launch script.
 node "$HOME/.local/share/podprompt/viewer/driver.mjs" \
     --port "${VIEWER_DRIVER_PORT:-7844}" \
     --viewer-port "${VIEWER_PORT:-7843}" \
     --cwd "$(pwd)" \
-    --backend "${VIEWER_BACKEND:-claude-code}" \
     --opencode-port "${OPENCODE_PORT:-7845}" &
 
 # Foreground is a plain `wait` on both background jobs, so the container's

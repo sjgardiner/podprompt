@@ -16,8 +16,9 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN npm install -g opencode-ai
 
 # Username is deliberately "agent", not "claude" — this container runs either
-# backend (Claude Code or OpenCode) depending on --backend, so the OS user
-# shouldn't be branded to just one of them. See podprompt.sh's CONFIG_DIR /
+# backend (Claude Code or OpenCode, or both at once under --viewer) depending
+# on --claude/--opencode/--viewer, so the OS user shouldn't be branded to just
+# one of them. See podprompt.sh's CONFIG_DIR /
 # PODPROMPT_STATE_DIR / PODPROMPT_DATA_DIR for how the two backends' host-side
 # state gets mounted onto this user's $HOME.
 RUN useradd -m -s /bin/bash agent \

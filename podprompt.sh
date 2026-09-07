@@ -40,39 +40,40 @@ PROVIDER OPTIONS (mutually exclusive; --direct is the default):
                     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
                     DISABLE_TELEMETRY=1
 
-BACKEND OPTIONS (which coding agent actually runs; --backend claude-code is
-the default):
+INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
 
-  --backend BACKEND
-                  "claude-code" (default) or "opencode". Selects which coding
-                  agent's own interactive terminal UI is launched when
-                  --viewer is NOT given (claude-code's `claude`, or
-                  opencode's `opencode`, both plain pass-through binaries —
-                  see PASS-THROUGH ARGUMENTS below). Also supplies the
-                  default for --viewer-backend when --viewer IS given and
-                  --viewer-backend isn't passed explicitly, so
-                  `--backend opencode --viewer` just works without needing
-                  both flags. OpenCode manages its own provider/model
+  (default)       Start PodPrompt's browser-based viewer/driver UI (see
+  --viewer        --viewer below) — a bare ./podprompt.sh with no interface
+                  flag now gives you this, not a terminal session.
+
+  --claude, --claude-code
+                  Skip the viewer and drop straight into Claude Code's own
+                  interactive terminal UI (`claude`) inside the container
+                  instead — a plain terminal session with no browser
+                  involved. Mutually exclusive with --viewer and with
+                  --opencode: pick exactly one interface per launch.
+
+  --opencode      Same, but OpenCode's own terminal UI (`opencode`) instead
+                  of Claude Code's. OpenCode manages its own provider/model
                   credentials entirely separately from --direct/--direct-api
-                  above (see `opencode auth login`/its TUI's own /connect,
-                  or just use `--backend opencode`'s own TUI once — its
-                  first-run login flow persists to this host's own standard
-                  config/data directories, e.g. ~/.config/opencode/,
-                  independent of ~/.claude/ — see PERSISTENT STATE
-                  below).
+                  above (see `opencode auth login`, or just use this flag
+                  once — its first-run login flow persists to this host's
+                  own standard config/data directories, e.g.
+                  ~/.config/opencode/, independent of ~/.claude/ — see
+                  PERSISTENT STATE below).
 
-                  --litellm IS meaningful with --backend opencode, though —
+                  --litellm IS meaningful with --opencode, though —
                   LiteLLM's default wire protocol is OpenAI-compatible,
                   which is a first-class, arguably simpler fit for OpenCode
                   than for Claude Code (which needs the Anthropic-shaped env
                   vars documented under --litellm above; OpenCode has no use
-                  for those). `--backend opencode --litellm` skips Claude
-                  Code's interactive model picker (nothing here would ever
-                  read its result) and instead passes LITELLM_URL/
-                  LITELLM_API_KEY into the container as plain env vars, for
-                  a custom provider block in opencode.jsonc to pick up via
-                  OpenCode's own {env:LITELLM_URL}/{env:LITELLM_API_KEY}
-                  config substitution:
+                  for those). `--opencode --litellm` skips Claude Code's
+                  interactive model picker (nothing here would ever read
+                  its result) and instead passes LITELLM_URL/LITELLM_API_KEY
+                  into the container as plain env vars, for a custom
+                  provider block in opencode.jsonc to pick up via OpenCode's
+                  own {env:LITELLM_URL}/{env:LITELLM_API_KEY} config
+                  substitution:
 
                     { "$schema": "https://opencode.ai/config.json",
                       "provider": { "litellm": {
@@ -87,6 +88,46 @@ the default):
                   versions), store the key via the TUI's /connect flow under
                   the same provider id instead and drop apiKey from the
                   config entirely.
+
+  --viewer        Start PodPrompt, the browser-based viewer/driver UI — the
+                  default (this flag only ever needs to be explicit, e.g.
+                  from a script). Opens a rendered view of the agent's
+                  responses (markdown, math, syntax-highlighted code) at
+                  http://localhost:VIEWER_PORT, with a bidirectional driver
+                  (built on the Claude Agent SDK) so the browser drives
+                  prompts directly — no terminal UI is attached at all.
+                  Requires the viewer/ directory (server.py, viewer.html,
+                  start-viewer.sh, driver.mjs, backends/, package.json +
+                  installed node_modules) to be copied into
+                  ~/.local/share/podprompt/viewer/ first (see
+                  --deploy-viewer below). Both the claude-code and opencode
+                  backends are always available to pick per-session from
+                  the browser's "+ New chat" picker — this also starts a
+                  headless `opencode serve` instance inside the container
+                  for you, so nothing needs to be started by hand first.
+                  There is no command-line flag for "the default backend"
+                  anymore: the new-chat picker just remembers whichever
+                  backend you started your last new chat with, falling back
+                  to Claude Code on a fresh install with no history yet.
+
+  --viewer-port PORT
+                  Port for the viewer server (browser page + SSE feed).
+                  Default: 7843.
+
+  --viewer-driver-port PORT
+                  Port for the bidirectional driver (accepts prompts/
+                  permission responses from the browser). Default: 7844.
+
+  --opencode-port PORT
+                  Loopback-only port `opencode serve` listens on inside the
+                  container, and that driver.mjs's opencode backend connects
+                  to. Never published to the host (driver.mjs and
+                  `opencode serve` talk to each other inside the container's
+                  own network namespace) — only worth changing if something
+                  else inside the image ever collides with the default.
+                  Relevant whenever `opencode serve` might run at all: under
+                  --viewer (always) or under a plain --opencode launch.
+                  Default: 7845.
 
 UTILITY OPTIONS:
 
@@ -107,67 +148,24 @@ UTILITY OPTIONS:
                   Only the app payload is copied; node_modules, bytecode
                   caches, and scratch/notes are never carried over.
 
-  --viewer        Start PodPrompt, the browser-based viewer/driver UI,
-                  instead of launching an interactive terminal session. Opens
-                  a rendered view of the agent's responses (markdown, math,
-                  syntax-highlighted code) at http://localhost:VIEWER_PORT,
-                  with a bidirectional driver (built on the Claude Agent SDK)
-                  so the browser drives prompts directly — no terminal UI is
-                  attached at all. Requires the viewer/ directory (server.py,
-                  viewer.html, start-viewer.sh, driver.mjs, backends/,
-                  package.json + installed node_modules) to be copied into
-                  ~/.local/share/podprompt/viewer/ first. Both the
-                  claude-code and opencode backends are always available to
-                  pick per-session from the browser's "+ New chat" picker
-                  regardless of --viewer-backend's default — this also
-                  starts a headless `opencode serve` instance inside the
-                  container for you (see --viewer-backend below), so nothing
-                  needs to be started by hand first.
-
-  --viewer-port PORT
-                  Port for the viewer server (browser page + SSE feed).
-                  Default: 7843.
-
-  --viewer-driver-port PORT
-                  Port for the bidirectional driver (accepts prompts/
-                  permission responses from the browser). Default: 7844.
-
-  --viewer-backend BACKEND
-                  Which coding agent driver.mjs talks to by default:
-                  "claude-code" or "opencode". Only affects new sessions
-                  started with no explicit backend of their own; existing
-                  sessions always keep whichever backend created them, and a
-                  session can also request either backend explicitly (the
-                  browser's "+ New chat" picker does this). Defaults to
-                  whatever --backend is set to. --viewer itself already
-                  starts `opencode serve` inside the container, so this needs
-                  no separate setup either way.
-
-  --opencode-port PORT
-                  Loopback-only port `opencode serve` listens on inside the
-                  container, and that driver.mjs's opencode backend connects
-                  to. Never published to the host (driver.mjs and
-                  `opencode serve` talk to each other inside the container's
-                  own network namespace) — only worth changing if something
-                  else inside the image ever collides with the default.
-                  Default: 7845.
-
   --help, -h      Show this message and exit.
 
 PASS-THROUGH ARGUMENTS:
 
   Any option not listed above is passed directly to whichever binary
-  --backend selects (`claude` by default, or `opencode` with
-  --backend opencode) — only meaningful when --viewer is NOT given, since
-  --viewer never execs either binary directly. For --backend claude-code,
-  this includes Claude Code's own flags, for example:
+  --claude/--opencode selects (`claude` or `opencode`) — only meaningful
+  alongside one of those two flags, since --viewer (the default) never
+  execs either binary directly; passthrough args given alongside --viewer
+  are ignored, with a warning, rather than silently dropped. For
+  --claude/--claude-code, this includes Claude Code's own flags, for
+  example:
 
     --dangerously-skip-permissions   Disable Claude Code's permission prompts.
                                      Only use this against repos you trust fully.
     --print "some prompt"            Run non-interactively and print output.
     --agent AGENT_NAME               Launch a specific subagent at startup.
 
-  For --backend opencode, these are opencode's own flags instead (see
+  For --opencode, these are opencode's own flags instead (see
   `opencode --help`), for example:
 
     --continue                       Continue the last session.
@@ -176,8 +174,8 @@ PASS-THROUGH ARGUMENTS:
   Pass-through args are forwarded after all recognised flags have been consumed,
   so you can freely mix them:
 
-    ./podprompt.sh --litellm --dangerously-skip-permissions
-    ./podprompt.sh --backend opencode --continue
+    ./podprompt.sh --claude --litellm --dangerously-skip-permissions
+    ./podprompt.sh --opencode --continue
 
 ENVIRONMENT VARIABLES:
 
@@ -206,15 +204,16 @@ PERSISTENT STATE:
   ~/.local/state/opencode/, and ~/.cache/opencode/ is bind-mounted straight
   onto the identical default path inside the container (no XDG_*_HOME
   redirection needed — that's already where a plain `opencode` looks; see
-  `opencode debug paths`). A login done via `--backend opencode`'s TUI is
+  `opencode debug paths`). A login done via `--opencode`'s TUI is
   what --viewer's headless `opencode serve` then uses too, and vice versa,
   since both get the same four mounts.
 
   PodPrompt's own state — the deployed viewer app (server.py, viewer.html,
   driver.mjs, etc.) and its bookkeeping files (viewer-session-hosts.json,
-  viewer-model-picks.json) — lives in its own XDG-style directories,
-  independent of both of the above, so neither Claude Code's nor OpenCode's
-  own config directory gets polluted with PodPrompt-internal files:
+  viewer-model-picks.json, viewer-last-backend.json) — lives in its own
+  XDG-style directories, independent of both of the above, so neither Claude
+  Code's nor OpenCode's own config directory gets polluted with
+  PodPrompt-internal files:
   ~/.local/share/podprompt/viewer/ (the deployed app, --viewer only) and
   ~/.local/state/podprompt/ (bookkeeping). ~/.config/podprompt/ is reserved
   for future use; nothing reads it yet.
@@ -228,36 +227,36 @@ EXAMPLES:
   # First-time setup: build the image
   docker build -t podprompt .
 
-  # Normal interactive session (subscription OAuth, default)
+  # Normal session — browser viewer, both backends available (default)
   ./podprompt.sh
 
-  # API-key billing instead of subscription
+  # Claude Code's own terminal UI instead of the viewer
+  ./podprompt.sh --claude
+
+  # OpenCode's own terminal UI instead of the viewer
+  ./podprompt.sh --opencode
+
+  # API-key billing instead of subscription (viewer, or --claude)
   ./podprompt.sh --direct-api
 
-  # LiteLLM — interactive model picker runs automatically
-  ./podprompt.sh --litellm
+  # LiteLLM — interactive model picker runs automatically (Claude Code TUI
+  # only; skipped for --opencode, meaningless for --viewer — see --litellm
+  # above)
+  ./podprompt.sh --claude --litellm
 
   # List available LiteLLM models without launching
   ./podprompt.sh --list-models
 
-  # Any mode + rendered browser viewer (markdown, math, syntax highlighting)
-  ./podprompt.sh --viewer
-  ./podprompt.sh --litellm --viewer
-  ./podprompt.sh --viewer --viewer-port 7900
+  # Viewer on a different port
+  ./podprompt.sh --viewer-port 7900
 
-  # OpenCode's own terminal UI instead of Claude Code's
-  ./podprompt.sh --backend opencode
+  # OpenCode's own terminal UI against your LiteLLM instance
+  # (LITELLM_URL/LITELLM_API_KEY passed through for opencode.jsonc's own
+  # custom-provider config)
+  ./podprompt.sh --opencode --litellm
 
-  # OpenCode against your LiteLLM instance (LITELLM_URL/LITELLM_API_KEY
-  # passed through for opencode.jsonc's own custom-provider config)
-  ./podprompt.sh --backend opencode --litellm
-
-  # Viewer defaulting new chats to the OpenCode backend (either backend is
-  # still pickable per-session from the browser's "+ New chat" picker)
-  ./podprompt.sh --viewer --backend opencode
-
-  # Pass a flag through to claude
-  ./podprompt.sh --dangerously-skip-permissions
+  # Pass a flag through to claude (only meaningful with --claude)
+  ./podprompt.sh --claude --dangerously-skip-permissions
 USAGE
 }
 
@@ -582,21 +581,11 @@ remove_stale_viewer_hooks() {
 
 remove_stale_viewer_hooks   # self-heal settings.json regardless of flags used this run
 
-validate_backend() {
-    # Shared by --backend and --viewer-backend — both name the same pair of
-    # coding-agent backends registered in driver.mjs.
-    local flag_name="$1" value="$2"
-    if [ "$value" != "claude-code" ] && [ "$value" != "opencode" ]; then
-        echo "Error: $flag_name must be \"claude-code\" or \"opencode\" (got \"$value\")." >&2
-        exit 1
-    fi
-}
-
 PROVIDER="direct"
 PROVIDER_EXPLICIT=0
-BACKEND="claude-code"
-VIEWER_ENABLED=0
-VIEWER_BACKEND=""   # empty = "not explicitly set"; resolved to $BACKEND below
+TUI_BACKEND=""      # "" (viewer, the default), "claude-code", or "opencode"
+VIEWER_ENABLED=1    # the viewer is now the default interface; --claude/--opencode flip this off below
+VIEWER_EXPLICIT=0   # did the user actually type --viewer, vs it just being the default
 OPENCODE_PORT=7845
 PASSTHROUGH_ARGS=()
 while [ $# -gt 0 ]; do
@@ -628,13 +617,27 @@ while [ $# -gt 0 ]; do
             PROVIDER_EXPLICIT=1
             shift
             ;;
-        --backend)
-            BACKEND="$2"
-            validate_backend "--backend" "$BACKEND"
-            shift 2
+        --claude|--claude-code)
+            if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ]; then
+                echo "Error: --claude/--claude-code and --opencode are mutually exclusive — pick one interface." >&2
+                exit 1
+            fi
+            TUI_BACKEND="claude-code"
+            VIEWER_ENABLED=0
+            shift
+            ;;
+        --opencode)
+            if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "opencode" ]; then
+                echo "Error: --claude/--claude-code and --opencode are mutually exclusive — pick one interface." >&2
+                exit 1
+            fi
+            TUI_BACKEND="opencode"
+            VIEWER_ENABLED=0
+            shift
             ;;
         --viewer)
             VIEWER_ENABLED=1
+            VIEWER_EXPLICIT=1
             shift
             ;;
         --viewer-port)
@@ -643,11 +646,6 @@ while [ $# -gt 0 ]; do
             ;;
         --viewer-driver-port)
             VIEWER_DRIVER_PORT="$2"
-            shift 2
-            ;;
-        --viewer-backend)
-            VIEWER_BACKEND="$2"
-            validate_backend "--viewer-backend" "$VIEWER_BACKEND"
             shift 2
             ;;
         --opencode-port)
@@ -661,19 +659,38 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# --viewer-backend defaults to whatever --backend was set to, so a single
-# --backend opencode covers both "launch opencode's own TUI" (no --viewer)
-# and "default new viewer chats to opencode" (with --viewer) without having
-# to pass the same choice twice.
-VIEWER_BACKEND="${VIEWER_BACKEND:-$BACKEND}"
+# --viewer and --claude/--claude-code/--opencode are two different launch
+# modes entirely — the browser viewer, with both backends live per session,
+# vs. a direct single-backend terminal session — and combining them doesn't
+# mean anything sensible (there's only one foreground process in the
+# container to hand to either interface). --claude/--opencode already flip
+# VIEWER_ENABLED off above; this only needs to catch an *explicit* --viewer
+# alongside one of them, which would otherwise look like --viewer was just
+# silently ignored rather than actively rejected.
+if [ "$VIEWER_EXPLICIT" = 1 ] && [ -n "$TUI_BACKEND" ]; then
+    echo "Error: --viewer is mutually exclusive with --claude/--claude-code/--opencode — the viewer already supports both backends live, per session; pick one interface." >&2
+    exit 1
+fi
+
+# Passthrough args only ever mean anything to the binary --claude/--opencode
+# execs directly — --viewer (the default) never execs either binary at all,
+# so silently accepting them would look like they did something. Surfaced as
+# a warning rather than a hard error, since this used to be the unconditional
+# default behavior (bare `./podprompt.sh --dangerously-skip-permissions` used
+# to work) and a warning is enough to catch the now-missing --claude/--opencode
+# without breaking anything further.
+if [ "$VIEWER_ENABLED" = 1 ] && [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+    echo "Warning: ignoring passthrough argument(s) (${PASSTHROUGH_ARGS[*]}) — they only apply to --claude/--opencode's direct terminal session; --viewer never execs either binary directly." >&2
+fi
 
 # --direct-api only ever configures Claude Code's own credentials
 # (ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL below) — meaningless, not just
-# unused, for a plain `--backend opencode` TUI launch, which execs `opencode`
-# directly and never reads those env vars at all. Only checked when --viewer
-# is NOT set: with --viewer, a claude-code-backed session can still exist
-# alongside opencode ones and would legitimately use this config, since both
-# backends are always registered regardless of --viewer-backend's default.
+# unused, for a plain `--opencode` TUI launch, which execs `opencode`
+# directly and never reads those env vars at all. Only checked for that
+# direct-TUI case: under --viewer, a claude-code-backed session can still
+# exist alongside opencode ones and would legitimately use this config,
+# since both backends are always registered regardless of which one any
+# given session picks.
 #
 # --litellm is deliberately NOT included here: LiteLLM is a perfectly good
 # (arguably easier, since it's plain OpenAI-compatible) backend for OpenCode
@@ -683,10 +700,10 @@ VIEWER_BACKEND="${VIEWER_BACKEND:-$BACKEND}"
 # model picker is skipped for a plain opencode launch (see below) and
 # LITELLM_URL/LITELLM_API_KEY are passed through as plain env vars instead,
 # for opencode.jsonc's own {env:...} substitution to use.
-if [ "$VIEWER_ENABLED" != 1 ] && [ "$BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
+if [ "$TUI_BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
    && [ "$PROVIDER" = "direct-api" ]; then
-    echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --backend opencode." >&2
-    echo "OpenCode manages its own provider auth — run './podprompt.sh --backend opencode' and use its" >&2
+    echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --opencode." >&2
+    echo "OpenCode manages its own provider auth — run './podprompt.sh --opencode' and use its" >&2
     echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
     echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude/." >&2
     exit 1
@@ -710,8 +727,8 @@ if [ "$PROVIDER" = "litellm" ]; then
         echo "LiteLLM server OK (HTTP $status)."
     fi
 
-    if [ "$VIEWER_ENABLED" != 1 ] && [ "$BACKEND" = "opencode" ]; then
-        # Plain `--backend opencode --litellm`: opencode picks its own
+    if [ "$TUI_BACKEND" = "opencode" ]; then
+        # Plain `--opencode --litellm`: opencode picks its own
         # model via its own config (or its TUI's own /models, /connect),
         # not Claude Code's ANTHROPIC_MODEL env var — so skip Claude Code's
         # interactive model picker here, since a launch that never execs
@@ -786,8 +803,8 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     # what actually drives either backend and is what the browser will talk
     # to once it has an input box; start-viewer.sh also launches a headless
     # `opencode serve` alongside them, loopback-only, so the opencode backend
-    # is always usable regardless of --viewer-backend's default. All three
-    # start inside the container.
+    # is always usable regardless of which backend any given session picks.
+    # All three start inside the container.
     echo "Viewer: opening http://localhost:$VIEWER_PORT in your browser once it's up..."
     wait_and_open_viewer "$VIEWER_PORT" &
     VIEWER_OPEN_PID=$!
@@ -805,7 +822,7 @@ ENTRYPOINT_FLAG=()   # empty = use image default (Node, which runs claude/openco
 if [ "$VIEWER_ENABLED" = 1 ]; then
     ENTRYPOINT_FLAG=(--entrypoint /home/agent/.local/share/podprompt/viewer/start-viewer.sh)
     RUN_CMD=("${PASSTHROUGH_ARGS[@]}")
-elif [ "$BACKEND" = "opencode" ]; then
+elif [ "$TUI_BACKEND" = "opencode" ]; then
     RUN_CMD=(opencode "${PASSTHROUGH_ARGS[@]}")
 else
     RUN_CMD=(claude "${PASSTHROUGH_ARGS[@]}")
@@ -816,13 +833,13 @@ fi
 # straight onto opencode's identical default paths inside the container —
 # no XDG_*_HOME override needed, since that's already where a plain
 # `opencode` looks. Populated whenever opencode might actually run in this
-# container: --viewer always starts a headless `opencode serve` regardless
-# of --backend's default (so both backends stay reachable per-session), and
-# a plain `--backend opencode` launch runs its TUI directly. A container
-# that's neither doesn't touch opencode at all, so skip the mounts rather
-# than exposing host directories it'll never use.
+# container: --viewer (the default) always starts a headless `opencode
+# serve` regardless of which backend any given session picks, and a plain
+# --opencode launch runs its TUI directly. A container that's neither
+# (--claude) doesn't touch opencode at all, so skip the mounts rather than
+# exposing host directories it'll never use.
 OPENCODE_MOUNT_FLAGS=()
-if [ "$VIEWER_ENABLED" = 1 ] || [ "$BACKEND" = "opencode" ]; then
+if [ "$VIEWER_ENABLED" = 1 ] || [ "$TUI_BACKEND" = "opencode" ]; then
     OPENCODE_MOUNT_FLAGS+=(
         -v "${OPENCODE_CONFIG_DIR}:/home/agent/.config/opencode:z"
         -v "${OPENCODE_DATA_DIR}:/home/agent/.local/share/opencode:z"
@@ -850,7 +867,7 @@ fi
 # DISABLE_TELEMETRY stops telemetry pings to Anthropic's servers.
 # These ANTHROPIC_* vars are Claude-Code-specific and only make sense when
 # EFFECTIVE_BASE_URL/EFFECTIVE_TOKEN are actually set — which the block
-# above deliberately leaves empty for a plain `--backend opencode --litellm`
+# above deliberately leaves empty for a plain `--opencode --litellm`
 # launch, so none of this is emitted into a container that never execs
 # `claude` at all.
 LITELLM_ENV_FLAGS=()
@@ -880,7 +897,7 @@ fi
 # hardcoding the key into a file. (That substitution has had reliability
 # issues for some custom-provider fields in some OpenCode versions — if it
 # doesn't seem to take, store the key via the TUI's /connect flow instead
-# and drop apiKey from opencode.jsonc entirely; see --backend doc above.)
+# and drop apiKey from opencode.jsonc entirely; see --opencode doc above.)
 OPENCODE_LITELLM_ENV_FLAGS=()
 if [ "$PROVIDER" = "litellm" ]; then
     OPENCODE_LITELLM_ENV_FLAGS+=(
@@ -900,7 +917,6 @@ docker run -it --rm \
   -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
   -e VIEWER_PORT="$VIEWER_PORT" \
   -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
-  -e VIEWER_BACKEND="$VIEWER_BACKEND" \
   -e OPENCODE_PORT="$OPENCODE_PORT" \
   -e HOST_WORKSPACE_PATH="$(pwd)" \
   ${EFFECTIVE_TOKEN:+-e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"} \

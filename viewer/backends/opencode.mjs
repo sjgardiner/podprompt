@@ -920,6 +920,14 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     return created.id;
   }
 
+  // Same string-based boundary check backends/claude-code.mjs's
+  // discoverProjects() uses for its own subproject filter — duplicated
+  // rather than shared for the same "not worth a cross-backend helper yet"
+  // reason resolveValidCwd's own comment gives.
+  function isUnderRoot(candidate, root) {
+    return candidate === root || candidate.startsWith(root + nodePath.sep);
+  }
+
   return {
     id: "opencode",
 
@@ -969,18 +977,66 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       return candidate;
     },
 
-    listProjects() {
-      // OpenCode's own /project endpoint is a single entry per directory it
-      // has ever been run against — not the same multi-sub-project
-      // filesystem scan the Claude backend does. Left minimal (just the
-      // root) until multi-project discovery is generalized across backends.
-      return { projects: [{ cwd: cwdRoot, label: "(root)" }], root: cwdRoot };
+    // Mirrors Claude Code's own multi-project discovery once framed the same
+    // way: "which directories under root have ever had a session," not a
+    // filesystem/git scan. Claude Code derives that by scanning its own
+    // ~/.claude/projects/*.jsonl for each session's recorded cwd; GET
+    // /session already hands back the identical primitive for OpenCode —
+    // every session's own `directory` field, the same one listSessions()
+    // below already reads — so no new discovery mechanism was actually
+    // needed here, just applying the same idea to OpenCode's own data. This
+    // used to be left as a permanent root-only stub "until multi-project
+    // discovery is generalized across backends" — it turned out OpenCode
+    // already exposes the primitive for free, so there was nothing to
+    // generalize, just to wire up.
+    async listProjects() {
+      const fallback = { projects: [{ cwd: cwdRoot, label: "(root)" }], root: cwdRoot };
+      let raw;
+      try {
+        raw = await api("/session", { timeoutMs: 8000 });
+      } catch (e) {
+        // `opencode serve` unreachable or still on its several-second cold
+        // start after a container restart — degrade to the root-only view
+        // rather than fail the new-chat picker open entirely; it'll show
+        // the real list next time the picker's asked once the server's up.
+        console.error("[opencode] listProjects: /session fetch failed, falling back to root-only:", e.message);
+        return fallback;
+      }
+      const dirs = new Set([cwdRoot]); // root always offered, same convention as Claude Code's seeded root
+      for (const s of raw || []) {
+        if (!s.directory || !isUnderRoot(s.directory, cwdRoot)) continue;
+        try {
+          // Drop directories that no longer exist on disk — mirrors Claude
+          // Code's own reachable/unreachable split for subprojects, just
+          // without a distinct "unreachable projects" bucket of its own
+          // (out of scope here — nothing offers a dead path either way).
+          realpathSync(s.directory);
+          dirs.add(s.directory);
+        } catch {
+          // gone — silently excluded
+        }
+      }
+      return {
+        projects: [...dirs].map((cwd) => ({
+          cwd,
+          label: cwd === cwdRoot ? "(root)" : (nodePath.relative(cwdRoot, cwd) || "(root)"),
+        })),
+        root: cwdRoot,
+      };
     },
 
     async listSessions({ includeUnreachable }, sessionsIndex, pendingKindForSession) {
       const raw = await api("/session", { timeoutMs: 8000 });
       const list = (raw || [])
         .filter((s) => !s.parentID) // subtask/child sessions aren't shown as their own top-level entry
+        // OPENCODE_DATA_DIR is a single, global-per-user host directory (see
+        // podprompt.sh), not scoped per project — GET /session can return
+        // sessions recorded under a directory with nothing to do with this
+        // launch's root at all (an unrelated repo mounted at this same
+        // container path on some earlier run). Claude Code's own
+        // discoverProjects() already filters exactly this way; this backend
+        // never did, so a foreign session could leak straight into the list.
+        .filter((s) => s.directory && isUnderRoot(s.directory, cwdRoot))
         .map((s) => {
           // sessionsIndex/pendingKindForSession are keyed by the client id
           // the driver's own state Map uses, not OpenCode's real ses_...

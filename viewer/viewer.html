@@ -1451,6 +1451,16 @@ const autoApproveToggle = document.getElementById('auto-approve-toggle');
 // retries would just be pinging for an answer that isn't going to change.
 let modelsResolved = false;
 let modesResolved = false;
+// Which backend each picker's last successful resolution was fetched for —
+// `null` until it resolves, else the exact backend id sent in the request.
+// When `undefined` it means the request went out WITHOUT a backend param
+// (sessionBackends didn't know it yet at fetch time), i.e. driver.mjs served
+// the CLI-default backend for that session — indistinguishable from the
+// "wrong backend" bug, so the mismatch resolver below treats it as a
+// mismatch too. Compared against backendForCurrentSession() on every
+// refreshSessionsList() tick; see resyncPickersIfNeeded().
+let modelsResolvedBackend = null;
+let modesResolvedBackend = null;
 
 // Open-ended, capped-backoff auto-retry for the empty-available/unavailable/
 // unreachable cases below. Retrying solely on turn_end (es.onopen can also
@@ -1518,6 +1528,8 @@ function resetBackendControlsDisplay() {
   modeSelect.innerHTML = '';
   modelsResolved = false;
   modesResolved = false;
+  modelsResolvedBackend = null;
+  modesResolvedBackend = null;
   clearTimeout(modelsRetryTimer); modelsRetryTimer = null;
   clearTimeout(modesRetryTimer); modesRetryTimer = null;
   modelsRetryCount = 0;
@@ -2846,6 +2858,46 @@ function backendForCurrentSession() {
   return sessionBackends.get(currentSessionId) || undefined;
 }
 
+// Re-resolve pickers if the current session's backend is, or has since
+// become, different from the backend the pickers were fetched for. The bug
+// this kills: on a cold page load, loadModels()/loadModes() can fire (from
+// loadDriverConfig's boot path) before refreshSessionsList() ever populates
+// sessionBackends, so the request goes out with NO backend param and
+// driver.mjs resolves the CLI default (claude-code) — the pickers latch that
+// wrong answer permanently. Once /sessions lands and names the real backend
+// (opencode), this catches the mismatch and re-fetches with the right
+// backend. Deliberately runs from refreshSessionsList() (the one place that
+// learns the backend late) rather than anywhere on the picker path itself,
+// which is exactly the path that fires too early.
+function resyncPickersIfNeeded() {
+  // Same precedence the pickers resolved under (see resolvedBackendForIndicator:
+  // a pending new-chat backend for a session the driver hasn't seen yet, else
+  // what /sessions has taught us). If that answer has since *changed* from what
+  // the pickers were fetched for, they latched the wrong one and must re-fetch.
+  const backend = resolvedBackendForIndicator();
+  if (modelsResolved && modelsResolvedBackend !== backend) {
+    modelsResolved = false;
+    modelsResolvedBackend = null;
+    clearTimeout(modelsRetryTimer); modelsRetryTimer = null;
+    modelsRetryCount = 0;
+    modelSelect.classList.remove('show');
+    modelSelect.innerHTML = '';
+    setModelBlockReason(null);
+    modelsFetchSeq++;
+    loadModels();
+  }
+  if (modesResolved && modesResolvedBackend !== backend) {
+    modesResolved = false;
+    modesResolvedBackend = null;
+    clearTimeout(modesRetryTimer); modesRetryTimer = null;
+    modesRetryCount = 0;
+    modeSelect.classList.remove('show');
+    modeSelect.innerHTML = '';
+    modesFetchSeq++;
+    loadModes();
+  }
+}
+
 const promptInput  = document.getElementById('prompt-input');
 const sendBtn       = document.getElementById('send-btn');
 const stopBtn       = document.getElementById('stop-btn');
@@ -2956,8 +3008,13 @@ async function loadModes() {
   if (!driverBase || modesResolved) return;
   const seq = ++modesFetchSeq;
   const targetSessionId = currentSessionId;
+  // Capture the backend THIS request goes out with — resyncPickersIfNeeded()
+  // compares against this, so it must be the exact value baked into the URL
+  // below (undefined when sessionBackends didn't know it yet → driver.mjs
+  // served its CLI default, which the resolver treats as a mismatch).
+  const backendUsed = resolvedBackendForIndicator();
   try {
-    const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
+    const res = await fetch(`${driverBase}/modes?sessionId=${encodeURIComponent(currentSessionId)}` + (backendUsed ? `&backend=${encodeURIComponent(backendUsed)}` : ''));
     const data = await res.json();
     // Drop stale responses: a newer call has started, or the viewed session
     // changed while this was in flight. Never apply a foreign/stale result
@@ -2967,8 +3024,10 @@ async function loadModes() {
       // Definitive: this backend has no mode/agent concept at all — never
       // going to change mid-session, stop asking.
       modesResolved = true;
+      modesResolvedBackend = backendUsed;
       modeSelect.classList.remove('show');
       modeSelect.innerHTML = '';
+      resyncPickersIfNeeded();
       return;
     }
     if (!data.available || !data.available.length) {
@@ -2987,6 +3046,8 @@ async function loadModes() {
     modeSelect.value = data.current || data.available[0].id;
     modeSelect.classList.add('show');
     modesResolved = true;
+    modesResolvedBackend = backendUsed;
+    resyncPickersIfNeeded();
   } catch (e) {
     console.error('Failed to load /modes:', e);
   }
@@ -2998,7 +3059,7 @@ modeSelect.addEventListener('change', async () => {
     await fetch(`${driverBase}/set-mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId, mode: modeSelect.value, backend: backendForCurrentSession() }),
+      body: JSON.stringify({ sessionId: currentSessionId, mode: modeSelect.value, backend: resolvedBackendForIndicator() }),
     });
   } catch (e) {
     console.error('Failed to set mode:', e);
@@ -3009,8 +3070,12 @@ async function loadModels() {
   if (!driverBase || modelsResolved) return;
   const seq = ++modelsFetchSeq;
   const targetSessionId = currentSessionId;
+  // Same backend-identity capture as loadModes(): the exact value baked into
+  // the URL, so resyncPickersIfNeeded() can tell a CLI-default resolution
+  // (no backend yet known) apart from a correctly-targeted one.
+  const backendUsed = resolvedBackendForIndicator();
   try {
-    const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}` + (backendForCurrentSession() ? `&backend=${encodeURIComponent(backendForCurrentSession())}` : ''));
+    const res = await fetch(`${driverBase}/models?sessionId=${encodeURIComponent(currentSessionId)}` + (backendUsed ? `&backend=${encodeURIComponent(backendUsed)}` : ''));
     const data = await res.json();
     // Drop stale responses: a newer call has started, or the viewed session
     // changed while this was in flight. Never apply a foreign/stale result
@@ -3021,6 +3086,7 @@ async function loadModels() {
       // Definitive: no model concept for this backend — never going to
       // change mid-session, stop asking.
       modelsResolved = true;
+      modelsResolvedBackend = backendUsed;
       modelSelect.classList.remove('show');
       modelSelect.innerHTML = '';
       setModelBlockReason(null);
@@ -3080,6 +3146,7 @@ async function loadModels() {
     modelSelect.value = data.current || data.available[0].id;
     modelSelect.classList.add('show');
     modelsResolved = true;
+    modelsResolvedBackend = backendUsed;
     setModelBlockReason(null);
   } catch (e) {
     console.error('Failed to load /models:', e);
@@ -3098,7 +3165,7 @@ modelSelect.addEventListener('change', async () => {
     await fetch(`${driverBase}/set-model`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId, model: modelSelect.value, backend: backendForCurrentSession() }),
+      body: JSON.stringify({ sessionId: currentSessionId, model: modelSelect.value, backend: resolvedBackendForIndicator() }),
     });
   } catch (e) {
     console.error('Failed to set model:', e);
@@ -3604,8 +3671,12 @@ async function refreshSessionsList({ full = true } = {}) {
     // comment above window.addEventListener('load', ...)), or this refresh
     // may be the thing that first gives backendForCurrentSession() any
     // answer at all. Either way, keep the header dot/badge/placeholder in
-    // sync rather than waiting for the next viewSession() switch.
+    // sync rather than waiting for the next viewSession() switch — and, in
+    // the same late-learning situation, re-resolve the model/mode pickers if
+    // they latched themselves to the wrong (CLI-default or unknown) backend
+    // before /sessions could stamp this session's real one.
     updateBackendIndicator();
+    resyncPickersIfNeeded();
     renderSessionsList();
   } catch (e) {
     if (seq !== sessionsFetchSeq) return;

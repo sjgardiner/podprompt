@@ -423,6 +423,34 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // in its "Running `tool`… (Ns)" indicator; opencode parts don't expose a
     // start timestamp directly). Cleared once the part completes or errors.
     const toolStartedAt = new Map(); // partID -> Date.now()
+    // Tools currently mid-run (partID -> tool name), re-broadcast on a 1s
+    // ticker while they run. Unlike Claude Code — whose SDK re-emits
+    // tool_progress every couple of seconds with a fresh elapsed —
+    // opencode sends one part.updated per lifecycle transition, so the
+    // browser's "Running … (Ns)" indicator would otherwise freeze at its
+    // first (≈0s) value for the whole duration of a long tool call. Driving
+    // the re-broadcast client-side from the recorded start time gives the
+    // opencode backend the same live tick.
+    const runningTools = new Map(); // partID -> tool name
+    let toolTicker = null;
+    const startToolTicker = () => {
+      if (toolTicker) return;
+      toolTicker = setInterval(() => {
+        for (const [partId, toolName] of runningTools) {
+          broadcastStatus(sessionId, {
+            type: "tool_progress",
+            toolName,
+            elapsedSeconds: (Date.now() - toolStartedAt.get(partId)) / 1000,
+          });
+        }
+      }, 1000);
+    };
+    const stopToolTickerFor = (partId) => {
+      runningTools.delete(partId);
+      toolStartedAt.delete(partId);
+      // Keep the shared ticker alive for any other still-running tool; it's
+      // torn down wholesale at turn end (see `finally` below).
+    };
 
     // part.type values that carry a model's chain-of-thought (older opencode
     // calls it "reasoning", newer "thinking"); anything else streaming on a
@@ -517,9 +545,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           // spamming a new bubble per lifecycle transition.
           if (status === "running") {
             if (!toolStartedAt.has(part.id)) toolStartedAt.set(part.id, Date.now());
+            runningTools.set(part.id, part.tool);
             broadcastStatus(sessionId, { type: "tool_progress", toolName: part.tool, elapsedSeconds: (Date.now() - toolStartedAt.get(part.id)) / 1000 });
+            startToolTicker();
           } else if (status === "completed" || status === "error") {
-            toolStartedAt.delete(part.id);
+            stopToolTickerFor(part.id);
             const msgModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
             broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
           }
@@ -742,6 +772,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // listModels() re-reads the new final assistant message.
       derivedModelIdCache.delete(sessionId);
       state.turnInFlight = false;
+      clearInterval(toolTicker);
+      toolTicker = null;
+      runningTools.clear();
+      toolStartedAt.clear();
       broadcastStatus(sessionId, { type: "turn_end" });
     }
   }

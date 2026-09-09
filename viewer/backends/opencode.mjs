@@ -391,7 +391,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   async function runTurn(sessionId, realId, promptText, state) {
     await ensureSse();
     state.turnInFlight = true;
-    broadcastStatus(sessionId, { type: "turn_start" });
+    // `backend` here lets server.py's /status handler seed this session's
+    // history from disk (if it hasn't already) before this turn's own
+    // broadcasts start landing — see the comment on server.py's turn_start
+    // handling for why that has to happen here, not only on a browser's
+    // GET /events, and why the backend hint is required.
+    broadcastStatus(sessionId, { type: "turn_start", backend: "opencode" });
 
     const userMsgUuid = randomUUID();
     broadcast(sessionId, "user", promptText, userMsgUuid, null, null);

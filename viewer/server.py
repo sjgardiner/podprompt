@@ -228,7 +228,24 @@ def _ensure_seeded(session_id: str, backend: str | None = None):
     with sessions_lock:
         # Prepend: historical entries always logically precede anything
         # that could have arrived live while this fetch was in flight.
-        s["log"] = entries + s["log"]
+        # Deduped by id rather than blind concatenation: turn_start's own
+        # seed-before-broadcast call (see do_POST's /status handling) is
+        # meant to make this fetch always land against an empty log in the
+        # common case, but this stays a plain list either way — a session
+        # not driven through runTurn at all (e.g. the manual `curl -d
+        # '{"sessionId":...}' /message` path this file's docstring
+        # mentions) skips that trigger entirely, so a late reconnect could
+        # still race a fetch against a non-empty log here. Entries whose id
+        # already appears live are skipped rather than re-added — for
+        # anything the live path minted using the transcript's own id
+        # (plain user prompts, tool calls — see convertSessionMessages'
+        # comment in backends/claude-code.mjs for which roles that covers)
+        # this is an exact match; for anything else it's simply a no-op
+        # (the fetched copy is kept, appearing once, in its prepended
+        # position) rather than a second, duplicate bubble.
+        existing_ids = {e.get("id") for e in s["log"]}
+        new_entries = [e for e in entries if e.get("id") not in existing_ids]
+        s["log"] = new_entries + s["log"]
         s["seeding"] = False
         # An empty result fetched WITHOUT an explicit backend (backend is
         # None — this connect's caller couldn't resolve it, e.g. the
@@ -452,6 +469,27 @@ class Handler(BaseHTTPRequestHandler):
         # 2026-09-06 after exactly that was reported: the bar showed once,
         # then a refresh alone made it disappear.
         elif path == "/status" and session_id:
+            if payload.get("type") == "turn_start":
+                # Seed this session's history from disk now, before this
+                # turn's own broadcasts (starting with the user prompt
+                # right after this in driver.mjs) can land in s["log"] —
+                # closing the race where a session that nobody's browser
+                # tab had opened yet (so _ensure_seeded was never triggered
+                # by GET /events) could otherwise accumulate a full turn,
+                # or several, of live content before the *next* reconnect
+                # finally seeds it, at which point the fetch would splice
+                # against an already-populated log instead of an empty one.
+                # driver.mjs's per-session send queue (see enqueueSend)
+                # guarantees this /status POST's response — and therefore
+                # this call — is fully settled before the next enqueued
+                # send (the user-message broadcast) is even issued, so
+                # there's no separate synchronization to add here beyond
+                # what _ensure_seeded's own seeded/seeding guards already
+                # provide. `backend` is required (not optional) precisely
+                # because this is the FIRST time this session may ever be
+                # seen by this process — there's no prior /events call to
+                # have already resolved it from.
+                _ensure_seeded(session_id, payload.get("backend"))
             if payload.get("type") in GAUGE_STATUS_TYPES:
                 s = _get_session(session_id)
                 with sessions_lock:

@@ -1,6 +1,12 @@
 #!/bin/bash
 # Source ~/.podprompt.env (or export the required variables in your shell)
 # before running. Run with --help for full usage information.
+#
+# Must stay bash-3.2-compatible: macOS ships bash 3.2 as /bin/bash by
+# default (last GPLv2 release; Apple hasn't updated it) and this script's
+# shebang runs under whatever /bin/bash actually is, regardless of any
+# newer bash a user may have on PATH via Homebrew. Avoid mapfile/readarray,
+# declare -A, and ${var,,}/${var^^} — none of those exist before bash 4.
 
 usage() {
     cat <<'USAGE'
@@ -96,13 +102,15 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   http://localhost:VIEWER_PORT, with a bidirectional driver
                   (built on the Claude Agent SDK) so the browser drives
                   prompts directly — no terminal UI is attached at all.
-                  Requires the viewer/ directory (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, backends/, package.json +
-                  installed node_modules) to be copied into
+                  Requires the viewer/ app files (server.py, viewer.html,
+                  start-viewer.sh, driver.mjs, backends/) to be copied into
                   ~/.local/share/podprompt/viewer/ first (see
-                  --deploy-viewer below). Both the claude-code and opencode
-                  backends are always available to pick per-session from
-                  the browser's "+ New chat" picker — this also starts a
+                  --deploy-viewer below). The viewer's Node dependency (the
+                  Claude Agent SDK) is baked into the Docker image itself,
+                  not part of this copy — see --deploy-viewer. Both the
+                  claude-code and opencode backends are always available to
+                  pick per-session from the browser's "+ New chat" picker —
+                  this also starts a
                   headless `opencode serve` instance inside the container
                   for you, so nothing needs to be started by hand first.
                   There is no command-line flag for "the default backend"
@@ -135,18 +143,21 @@ UTILITY OPTIONS:
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
 
-  --deploy-viewer Copy this repo's viewer/ directory (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, backends/, package.json,
-                  package-lock.json) into ~/.local/share/podprompt/viewer/
-                  and refresh its node_modules there when the dependency
-                  manifests have changed (which npm reconciles incrementally
-                  against the lockfile; no reinstall is triggered if they
-                  haven't). This is
-                  the supported way to deploy the viewer — run it after
-                  pulling updated viewer code, then start with --viewer
-                  (which restarts the container and serves the fresh files).
-                  Only the app payload is copied; node_modules, bytecode
-                  caches, and scratch/notes are never carried over.
+  --deploy-viewer Copy this repo's viewer/ app files (server.py, viewer.html,
+                  start-viewer.sh, driver.mjs, backends/) into
+                  ~/.local/share/podprompt/viewer/. This is the supported
+                  way to deploy the viewer's app code — run it after pulling
+                  updated viewer code, then start with --viewer (which
+                  restarts the container and serves the fresh files). A pure
+                  file copy: bytecode caches and scratch/notes are never
+                  carried over. Does NOT install or touch node_modules —
+                  the viewer's Node dependency is baked into the Docker
+                  image at build time instead (see the Dockerfile), so it's
+                  always installed for the image's own actual platform
+                  rather than whichever platform runs this script. If
+                  viewer/package.json's dependency changes, rebuild the
+                  image (docker build -t podprompt .); --deploy-viewer alone
+                  won't pick that up.
 
   --help, -h      Show this message and exit.
 
@@ -394,15 +405,25 @@ list_models() {
 }
 
 deploy_viewer() {
-    # The supported way to get the viewer deployed: copy this repo's viewer/
-    # app into PodPrompt's own data directory and (re)install its one
-    # dependency, so the mounted ~/.local/share/podprompt/viewer is always a
-    # fresh mirror of this checkout rather than whatever a hand-copied
-    # deploy last put there. Run it after pulling updated viewer code; then
-    # start with --viewer, which restarts the container around the new files.
-    # Deliberately copies only the canonical app payload — node_modules,
-    # __pycache__, and scratch/notes never migrate, so a re-deploy can't
-    # resurrect stale state.
+    # The supported way to get the viewer's app code deployed: copy this
+    # repo's viewer/ app files into PodPrompt's own data directory, so the
+    # mounted ~/.local/share/podprompt/viewer is always a fresh mirror of
+    # this checkout rather than whatever a hand-copied deploy last put
+    # there. Run it after pulling updated viewer code; then start with
+    # --viewer, which restarts the container around the new files.
+    #
+    # This is a pure file copy now — no dependency install happens here.
+    # The viewer's one Node dependency (the Claude Agent SDK) is baked into
+    # the Docker image at build time instead (see Dockerfile), specifically
+    # so it's always installed for the image's own actual platform rather
+    # than whatever platform happens to run this script (a real difference
+    # on macOS, where `npm install` would otherwise fetch darwin binaries
+    # into a container that needs linux ones). package.json/package-lock.json
+    # are therefore not copied here either — they only matter to the
+    # Dockerfile's own build-time npm install now. If you've changed
+    # viewer/package.json's dependency, rebuild the image
+    # (docker build -t podprompt .) — --deploy-viewer alone won't pick that
+    # up.
     local src_dir target_dir
     src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/viewer"
     target_dir="${PODPROMPT_DATA_DIR}/viewer"
@@ -413,7 +434,7 @@ deploy_viewer() {
         exit 1
     fi
 
-    local required=(server.py viewer.html start-viewer.sh driver.mjs package.json package-lock.json backends)
+    local required=(server.py viewer.html start-viewer.sh driver.mjs backends)
     local missing=()
     local f
     for f in "${required[@]}"; do
@@ -427,44 +448,17 @@ deploy_viewer() {
 
     mkdir -p "$target_dir"
 
-    # npm install already reconciles node_modules against the shipped
-    # package-lock.json: it installs what's missing, upgrades what drifted,
-    # and prunes what's extraneous. So we only invoke it when node_modules is
-    # absent/incomplete, or when the dependency manifests are changing in
-    # THIS deploy — which we must detect against the target's pre-copy state,
-    # since we overwrite the manifests with the source's a moment later. A
-    # deploy that only touched app code (viewer.html, driver.mjs, ...) never
-    # pays for a reinstall, and a stale hand-copy of the lockfile tree is
-    # caught by the missing .package-lock.json marker rather than trusted
-    # sight-unseen.
-    local needs_npm_install=false
-    if [ ! -d "$target_dir/node_modules" ] \
-       || [ ! -f "$target_dir/node_modules/.package-lock.json" ]; then
-        needs_npm_install=true
-    elif ! cmp -s "$src_dir/package.json" "$target_dir/package.json" \
-      || ! cmp -s "$src_dir/package-lock.json" "$target_dir/package-lock.json"; then
-        needs_npm_install=true
-    fi
-
     for f in "${required[@]}"; do
         cp -r "$src_dir/$f" "$target_dir/"
     done
     chmod +x "$target_dir/start-viewer.sh"
 
-    if [ "$needs_npm_install" = true ]; then
-        if ! (cd "$target_dir" && npm install); then
-            echo "Error: npm install failed in $target_dir." >&2
-            exit 1
-        fi
-    else
-        echo "Dependencies already up to date in $target_dir (skipping npm install)."
-    fi
-
     if grep -q '<title>PodPrompt</title>' "$target_dir/viewer.html"; then
-        echo "Viewer deployed to $target_dir."
+        echo "Viewer app files deployed to $target_dir."
+        echo "Dependencies live in the Docker image, not here — rebuild it (docker build -t podprompt .) if viewer/package.json changed."
         echo "Start it with --viewer (container restart happens automatically); hard-refresh the browser tab if you were already connected."
     else
-        echo "Viewer deployed to $target_dir." >&2
+        echo "Viewer app files deployed to $target_dir." >&2
         echo "Warning: deployed viewer.html title is not 'PodPrompt' — source checkout may be out of date." >&2
         exit 1
     fi
@@ -474,7 +468,12 @@ pick_model() {
     local models_json
     models_json=$(fetch_litellm_models)
     local model_list
-    mapfile -t model_list < <(echo "$models_json" | jq -r '.data[].id' | sort)
+    # Portable bash-3.2 equivalent of `mapfile -t` (macOS's default
+    # /bin/bash predates mapfile/readarray, added in bash 4.0).
+    model_list=()
+    while IFS= read -r line; do
+        model_list+=("$line")
+    done < <(echo "$models_json" | jq -r '.data[].id' | sort)
 
     if [ ${#model_list[@]} -eq 0 ]; then
         echo "Error: no models returned from LiteLLM." >&2
@@ -782,18 +781,17 @@ CONNECT_CONFIG="${CONFIG_DIR}:/home/agent/.claude:z"
 VIEWER_PORT_FLAGS=()
 
 if [ "$VIEWER_ENABLED" = 1 ]; then
-    for f in server.py viewer.html start-viewer.sh driver.mjs package.json; do
+    # node_modules is deliberately not checked here: it's baked into the
+    # Docker image at build time now (see Dockerfile), not deployed to the
+    # host by --deploy-viewer, so it's never something that can be missing
+    # from $PODPROMPT_DATA_DIR/viewer.
+    for f in server.py viewer.html start-viewer.sh driver.mjs; do
         if [ ! -f "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
             echo "Error: $PODPROMPT_DATA_DIR/viewer/$f not found."
             echo "Run './podprompt.sh --deploy-viewer' from this repo to install/update the viewer there."
             exit 1
         fi
     done
-    if [ ! -d "$PODPROMPT_DATA_DIR/viewer/node_modules" ]; then
-        echo "Error: $PODPROMPT_DATA_DIR/viewer/node_modules not found."
-        echo "Run './podprompt.sh --deploy-viewer' from this repo (it reinstalls node_modules for driver.mjs's Agent SDK dependency)."
-        exit 1
-    fi
 
     VIEWER_PORT_FLAGS=(-p "127.0.0.1:${VIEWER_PORT}:${VIEWER_PORT}" -p "127.0.0.1:${VIEWER_DRIVER_PORT}:${VIEWER_DRIVER_PORT}")
     free_host_port "$VIEWER_PORT" || exit 1
@@ -906,9 +904,22 @@ if [ "$PROVIDER" = "litellm" ]; then
     )
 fi
 
+# No --platform flag: this deliberately lets both `docker build` and this
+# `docker run` default to the host's own native architecture, on Linux
+# x86_64 and macOS (Intel or Apple Silicon) alike. Every dependency this
+# image actually installs (Claude Code CLI, OpenCode, the viewer's Claude
+# Agent SDK — see Dockerfile/viewer/package-lock.json) ships native arm64
+# builds already, so there's nothing here that needs amd64 specifically. An
+# explicit linux/amd64 pin used to be forced here; on Apple Silicon that
+# meant a plain, undocumented `docker build -t podprompt .` (which builds
+# natively for arm64) no longer matched what `docker run` asked for, which
+# is unreliable across Docker Desktop versions — either a hard "platform
+# does not match" error, or silent forced emulation of an image that was
+# never actually built for amd64. Pass --platform explicitly on the command
+# line yourself (both to `docker build` and here) if you ever need to force
+# a specific architecture regardless of host.
 docker run -it --rm \
   --name podprompt \
-  --platform linux/amd64 \
   --user "$(id -u):$(id -g)" \
   --security-opt label=disable \
   --init \

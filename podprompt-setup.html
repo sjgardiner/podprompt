@@ -422,6 +422,7 @@
     <div class="nav-group">
       <div class="nav-group-label">Setup</div>
       <a class="nav-link" href="#files">Files in this package</a>
+      <a class="nav-link" href="#prerequisites">Prerequisites</a>
       <a class="nav-link" href="#step-1">1. Get the files</a>
       <a class="nav-link" href="#step-2">2. Set up credentials</a>
       <a class="nav-link" href="#step-3">3. Make script executable</a>
@@ -466,18 +467,47 @@
       <div class="callout info">
         <div class="callout-label">Scope of this guide</div>
         <p>
-          This guide covers the Claude Code provider/authentication flow in
-          detail (subscription OAuth, direct API, LiteLLM). PodPrompt also
-          supports an OpenCode backend (<code>--opencode</code> for its own
-          direct terminal session, or just pick it from the viewer's own
-          "+ New chat" picker — both backends are always available there),
-          configured entirely through OpenCode's own standard config, auth,
-          and data directories — see <code>podprompt.sh</code>'s own comments
-          for the current mount details until this guide is expanded to cover
-          it fully.
+          This guide covers Claude Code's provider/authentication flow
+          (subscription OAuth, direct API, LiteLLM) end to end, since that's
+          where most setup decisions are made. OpenCode is a fully supported
+          second backend — <code>--opencode</code> for its own direct
+          terminal session, or pick it per-session from the viewer's
+          "+ New chat" picker — configured through OpenCode's own standard
+          config/auth/data directories rather than anything provider-specific
+          here; see <code>podprompt.sh --help</code> for its exact mount
+          details.
         </p>
       </div>
     </div>
+
+    <!-- ── Prerequisites ── -->
+    <section id="prerequisites">
+      <h2>Prerequisites</h2>
+      <p>
+        Install these before starting. Commands differ by platform;
+        PodPrompt itself runs identically on both once these are in place.
+      </p>
+      <table class="option-table">
+        <thead><tr><th>Tool</th><th>macOS</th><th>Linux</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Docker</td>
+            <td><a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener">Docker Desktop</a></td>
+            <td>Docker Engine (e.g. <code>apt install docker.io</code> / <code>dnf install docker</code>)</td>
+          </tr>
+          <tr>
+            <td>jq</td>
+            <td><code>brew install jq</code></td>
+            <td><code>apt install jq</code> / <code>dnf install jq</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        <code>curl</code> and <code>lsof</code> are also required, but come
+        preinstalled on essentially every macOS and Linux desktop system —
+        nothing to do unless you're on an unusually minimal install.
+      </p>
+    </section>
 
     <!-- ── Step 1 ── -->
     <section id="step-1">
@@ -621,29 +651,40 @@ chmod 600 ~/.podprompt.env</pre>
         syntax-highlighted diffs for file edits, and full markdown/KaTeX math.
       </p>
       <p>
-        Copy the whole <code>viewer/</code> directory into PodPrompt's own
-        data directory and install its one dependency (the Agent SDK):
+        Deploy the viewer's app files into PodPrompt's own data directory:
       </p>
       <div class="code-block">
         <div class="code-block-header">
           <span class="code-block-label">bash</span>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
-        <pre>mkdir -p ~/.local/share/podprompt/viewer
-cp -r viewer/. ~/.local/share/podprompt/viewer/
-(cd ~/.local/share/podprompt/viewer && npm install)</pre>
+        <pre>./podprompt.sh --deploy-viewer</pre>
       </div>
       <p>
-        That's all — no image rebuild required. The run script bind-mounts
-        <code>~/.local/share/podprompt/viewer</code> into the container, so
-        the viewer files (and the <code>node_modules</code> the SDK needs)
-        are available immediately at
-        <code>/home/agent/.local/share/podprompt/viewer/</code>. This is
-        PodPrompt's own directory, kept separate from <code>~/.claude/</code>
-        (Claude Code's own, standard config directory — see
-        <a href="#state">Persistent state</a>) and from OpenCode's own
-        standard config directories.
+        This copies <code>server.py</code>, <code>viewer.html</code>,
+        <code>driver.mjs</code>, <code>start-viewer.sh</code>, and
+        <code>backends/</code> into
+        <code>~/.local/share/podprompt/viewer/</code>, which the run script
+        bind-mounts into the container at
+        <code>/home/agent/.local/share/podprompt/viewer/</code> — kept
+        separate from <code>~/.claude/</code> (Claude Code's own config
+        directory — see <a href="#state">Persistent state</a>) and from
+        OpenCode's own config directories. Run it again any time you pull
+        updated viewer code, then start with <code>--viewer</code> (which
+        restarts the container and serves the fresh files).
       </p>
+      <div class="callout info">
+        <div class="callout-label">Dependencies live in the image, not here</div>
+        <p>
+          The viewer's one Node dependency (the Claude Agent SDK) is
+          installed into the Docker image itself at build time (see
+          <a href="#step-4">step 4</a>), not copied by this step — so the
+          image needs to be built at least once before
+          <code>--viewer</code> will work. If you change
+          <code>viewer/package.json</code>'s dependency, rebuild the image;
+          re-running <code>--deploy-viewer</code> alone won't pick that up.
+        </p>
+      </div>
       <div class="callout info">
         <div class="callout-label">How it works</div>
         <p>
@@ -656,16 +697,26 @@ cp -r viewer/. ~/.local/share/podprompt/viewer/
           Server-Sent Events and replays history for tabs that join late.
         </p>
       </div>
-      <div class="callout warn">
-        <div class="callout-label">Re-copy after editing</div>
-        <p>
-          If you ever modify the viewer files yourself, re-copy the directory
-          into <code>~/.local/share/podprompt/viewer/</code> and restart the
-          container — editing your repo checkout alone has no effect on an
-          already-running container, and neither Node nor the container's
-          shell entrypoint hot-reloads.
-        </p>
+      <h3>Manual alternative</h3>
+      <p>
+        Without the flag, the same copy works by hand — useful if you're
+        scripting a deploy yourself:
+      </p>
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">bash</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre>mkdir -p ~/.local/share/podprompt/viewer
+cp -r viewer/server.py viewer/viewer.html viewer/driver.mjs \
+      viewer/start-viewer.sh viewer/backends \
+      ~/.local/share/podprompt/viewer/</pre>
       </div>
+      <p>
+        Either way, re-deploy after editing any viewer app file and restart
+        the container — editing your repo checkout alone has no effect on
+        an already-running container.
+      </p>
     </section>
 
     <!-- ── Step 6 ── -->
@@ -800,11 +851,8 @@ Small model: openai/gpt-oss-120b</pre>
 
       <h3>Model selection (--litellm)</h3>
       <p>
-        When using <code>--litellm</code>, an interactive model picker runs
-        automatically before launch — no flag needed. You are prompted first
-        for the primary model, then for an optional small/fast model for
-        background tasks. Use <code>--list-models</code> to preview the
-        available models without launching.
+        See <a href="#step-6">step 6</a> for the interactive model picker
+        that runs automatically whenever <code>--litellm</code> is used.
       </p>
 
       <h3>Interface (mutually exclusive; --viewer is the default)</h3>
@@ -818,8 +866,8 @@ Small model: openai/gpt-oss-120b</pre>
             rendered as markdown/math/syntax-highlighted code and streamed
             live as they're generated. The browser's own input box drives
             either backend directly through a small Agent-SDK-based driver —
-            no terminal session is attached at all. Requires
-            <code>viewer/</code> to be installed (with dependencies) in
+            no terminal session is attached at all. Requires the viewer's
+            app files to be deployed to
             <code>~/.local/share/podprompt/viewer/</code> — see
             <a href="#step-5">step 5</a>. <code>--viewer</code> only ever
             needs to be typed explicitly (e.g. in a script) — it's the
@@ -1046,10 +1094,11 @@ Small model: openai/gpt-oss-120b</pre>
 
       <h3>Installation</h3>
       <p>
-        See <a href="#step-5">step 5</a> — copy the whole <code>viewer/</code>
-        directory into <code>~/.local/share/podprompt/viewer/</code> and run
-        <code>npm install</code> there once, for the Agent SDK dependency.
-        No Docker image rebuild is needed either way.
+        See <a href="#step-5">step 5</a> — <code>./podprompt.sh
+        --deploy-viewer</code> copies the app files into
+        <code>~/.local/share/podprompt/viewer/</code>. The Agent SDK
+        dependency itself is baked into the Docker image at build time, not
+        installed by that step.
       </p>
 
       <h3>Sessions and the terminal UI</h3>
@@ -1060,15 +1109,15 @@ Small model: openai/gpt-oss-120b</pre>
         to it — this reloads that session's full history into the page.
       </p>
       <div class="callout warn">
-        <div class="callout-label">Pinning a session at launch doesn't work yet</div>
+        <div class="callout-label">Pinning a session at launch has no effect</div>
         <p>
           Passing <code>--session-id</code>, <code>--resume</code>/<code>-r</code>,
           <code>--continue</code>/<code>-c</code>, or <code>--fork-session</code>
           alongside <code>--viewer</code> starts the browser page but leaves it
-          with no way to submit a prompt — the bidirectional driver isn't wired
-          up for a session it didn't generate itself, and there's no terminal
-          fallback to fall back to anymore. Use the sessions panel to switch
-          sessions from within the browser instead of pinning one at launch.
+          with no way to submit a prompt — the bidirectional driver only ever
+          drives sessions it generates itself, and there's no terminal to
+          fall back to. Use the sessions panel to switch sessions from within
+          the browser instead of pinning one at launch.
         </p>
       </div>
     </section>

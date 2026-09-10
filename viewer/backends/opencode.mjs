@@ -245,75 +245,121 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   const permissionSessionOf = new Map(); // requestID -> sessionID
 
   let sseReady = null;
+  let sseReconnectDelay = 1000;
+
+  // Called whenever the shared event connection (GET /global/event, see
+  // ensureSse) can no longer deliver events — a thrown read error, a clean
+  // end-of-stream, or a failed initial connect all land here. `opencode serve`
+  // keeps that stream open indefinitely (it emits
+  // `server.connected` immediately and a `server.heartbeat` every 10s), so an
+  // EOF is never a healthy idle state: it means the stream is gone. A dead
+  // stream MUST NOT leave `sseReady` as a resolved promise pointing at
+  // nothing — that was the bug where a single dropped connection (serve
+  // restart, the respawn gap after a crash, a connection opened during cold
+  // start and then closed) silently killed every later turn's streaming,
+  // thinking, finalization AND `session.idle` while turn_start/user
+  // broadcasts kept working, leaving the browser stuck on "Thinking…" until
+  // the 15s grace timeout fired and the turn ended with no response rendered.
+  function scheduleSseReconnect(message) {
+    if (message) console.error(`[opencode] ${message}`);
+    // Real gap closed: a turn in flight when the shared stream dies gets an
+    // immediate signal instead of decaying into runTurn's slower 15s grace
+    // timeout with the browser sitting on a live typing cursor. Same shape of
+    // orphan-cleanup as driver.mjs's expirePendingApprovals — reject each
+    // registered waiter now (the reject was captured into the waiter entry by
+    // runTurn), let that turn's own try/catch broadcast a clear error
+    // promptly, then clear the map so runTurn's finally-block delete()s are
+    // harmless no-ops.
+    if (turnWaiters.size) {
+      const err = new Error("OpenCode SSE connection lost mid-turn; will reconnect");
+      for (const [, waiter] of turnWaiters) {
+        if (typeof waiter.reject === "function") waiter.reject(err);
+      }
+      turnWaiters.clear();
+    }
+    sseReady = null;
+    setTimeout(ensureSse, sseReconnectDelay);
+    sseReconnectDelay = Math.min(sseReconnectDelay * 2, 10000);
+  }
+
   function ensureSse() {
     if (sseReady) return sseReady;
     sseReady = (async () => {
-      // /event (not /global/event) is scoped to a single directory/"project"
-      // instance server-side — empirically confirmed live (and matching
-      // upstream reports, e.g. anomalyco/opencode#46733): a session created
-      // under the server's own default directory streamed real
-      // message.part.*/message.updated events over /event just fine, but an
-      // otherwise-identical session created one directory level down
-      // (cwdRoot's own subdirectories, e.g. the project the browser's
-      // "+ New chat" picker actually lets you choose) got NOTHING but
-      // server.connected/server.heartbeat on that same connection — the
-      // turn still ran and persisted correctly server-side (confirmed via
-      // the plain REST API), it just never reached this process live. Since
-      // this one shared connection already has to span every session
-      // regardless of which project directory it lives in (driver.mjs
-      // dispatches purely by sessionID — see dispatchEvent below — not by
-      // directory), /global/event's lack of directory filtering is exactly
-      // what's wanted here, not a loss of isolation: an event for a session
-      // nobody's turnWaiters currently cover (a different project, or even a
-      // session driven by a native `opencode` CLI entirely outside this
-      // podprompt instance) is still just silently ignored below, same as
-      // today.
-      const res = await fetch(`${BASE}/global/event`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      (async function pump() {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buf.indexOf("\n\n")) !== -1) {
-              const chunk = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-              const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
-              if (!dataLine) continue;
-              let evt;
-              try {
-                evt = JSON.parse(dataLine.slice("data: ".length));
-              } catch {
-                continue;
-              }
-              dispatchEvent(evt);
-            }
-          }
-        } catch (e) {
-          console.error("[opencode] SSE stream ended unexpectedly, reconnecting:", e.message);
-          // Real gap closed: a turn in flight when the shared stream dies now
-          // gets an immediate signal instead of decaying into runTurn's slower
-          // 15s grace timeout with the browser sitting on a live typing
-          // cursor. Same shape of orphan-cleanup as driver.mjs's
-          // expirePendingApprovals — reject each registered waiter now (the
-          // reject was captured into the waiter entry by runTurn), let that
-          // turn's own try/catch broadcast a clear error promptly, then clear
-          // the map so runTurn's finally-block delete()s are harmless no-ops.
-          if (turnWaiters.size) {
-            const err = new Error("OpenCode SSE connection lost mid-turn; will reconnect");
-            for (const [, waiter] of turnWaiters) {
-              if (typeof waiter.reject === "function") waiter.reject(err);
-            }
-            turnWaiters.clear();
-          }
-          sseReady = null;
-          setTimeout(ensureSse, 1000);
+      try {
+        // /event (not /global/event) is scoped to a single directory/"project"
+        // instance server-side — empirically confirmed live (and matching
+        // upstream reports, e.g. anomalyco/opencode#46733): a session created
+        // under the server's own default directory streamed real
+        // message.part.*/message.updated events over /event just fine, but an
+        // otherwise-identical session created one directory level down
+        // (cwdRoot's own subdirectories, e.g. the project the browser's
+        // "+ New chat" picker actually lets you choose) got NOTHING but
+        // server.connected/server.heartbeat on that same connection — the
+        // turn still ran and persisted correctly server-side (confirmed via
+        // the plain REST API), it just never reached this process live. Since
+        // this one shared connection already has to span every session
+        // regardless of which project directory it lives in (driver.mjs
+        // dispatches purely by sessionID — see dispatchEvent below — not by
+        // directory), /global/event's lack of directory filtering is exactly
+        // what's wanted here, not a loss of isolation: an event for a session
+        // nobody's turnWaiters currently cover (a different project, or even a
+        // session driven by a native `opencode` CLI entirely outside this
+        // podprompt instance) is still just silently ignored below, same as
+        // today.
+        //
+        // Accept mirrors what opencode's own SDK sends (application/json,
+        // text/event-stream): undici's flat default `*/*` gets a 200 from
+        // Effect's stream route, but advertising the event-stream content
+        // type removes any negotiation ambiguity across serving layers.
+        const res = await fetch(`${BASE}/global/event`, {
+          headers: { Accept: "application/json, text/event-stream" },
+        });
+        if (!res.ok || !res.body) {
+          scheduleSseReconnect(`OpenCode /global/event -> ${res.status}, reconnecting`);
+          return;
         }
-      })();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        sseReconnectDelay = 1000; // a fresh live connection resets the backoff
+        (async function pump() {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              // A clean EOF is still a dead connection (see
+              // scheduleSseReconnect for why serve's stream never naturally
+              // ends) — fall through to the reconnect below rather than
+              // treating it as "stream healthy, just idle"; silently
+              // poisoning sseReady was exactly the reported bug.
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              let idx;
+              while ((idx = buf.indexOf("\n\n")) !== -1) {
+                const chunk = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
+                if (!dataLine) continue;
+                let evt;
+                try {
+                  evt = JSON.parse(dataLine.slice("data: ".length));
+                } catch {
+                  continue;
+                }
+                dispatchEvent(evt);
+              }
+            }
+            scheduleSseReconnect("OpenCode SSE stream closed (clean EOF), reconnecting");
+          } catch (e) {
+            scheduleSseReconnect(`OpenCode SSE stream ended unexpectedly, reconnecting: ${e.message}`);
+          }
+        })();
+      } catch (e) {
+        // Initial-connect failure (server still cold, port not bound yet):
+        // NEVER leave `sseReady` as a rejected promise — every subsequent
+        // await ensureSse() would rethrow and kill the turn before any
+        // broadcast, user echo included.
+        scheduleSseReconnect(`OpenCode SSE connect failed, reconnecting: ${e.message}`);
+      }
     })();
     return sseReady;
   }
@@ -439,8 +485,22 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // GET /events, and why the backend hint is required.
     broadcastStatus(sessionId, { type: "turn_start", backend: "opencode" });
 
+    // Render-fallback bookkeeping (declared before the user broadcast, which
+    // registers its bubble id below). contentDelivered flips true once an
+    // actual assistant ANSWER was broadcast (streamed start, or a whole-text
+    // reply) — intentionally NOT on thinking/tool bubbles, so that if the
+    // answer text never surfaced the POST-response fallback below still runs.
+    // emittedIds collects every content bubble id broadcast this turn (user,
+    // thinking, assistant, tool) so the fallback can never duplicate
+    // something the live path already rendered (message ids there vs part
+    // ids here, so this is a belt-and-suspenders guard, not the primary
+    // cross-check).
+    let contentDelivered = false;
+    const emittedIds = new Set();
+
     const userMsgUuid = randomUUID();
     broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
+    emittedIds.add(userMsgUuid);
 
     // partID -> accumulated text, so message.part.delta's incremental
     // {field, delta} patches can be re-broadcast as the running full text a
@@ -518,6 +578,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       entry.sentMessage = true;
       const model = entry.model || (entry.messageID ? messageModelByRealId.get(entry.messageID) : null);
       broadcast(sessionId, roleForPartType(entry.type), entry.text, partId, null, model);
+      emittedIds.add(partId);
+      if (roleForPartType(entry.type) === "assistant") contentDelivered = true;
     }
 
     const pendingApprovalPromises = [];
@@ -569,6 +631,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
               entry.started = true;
               entry.sentMessage = true;
               broadcast(sessionId, "assistant", entry.text, part.id);
+              emittedIds.add(part.id);
+              contentDelivered = true;
             }
             return;
           }
@@ -598,6 +662,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             stopToolTickerFor(part.id);
             const msgModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
             broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
+            emittedIds.add(part.id);
           }
           return;
         }
@@ -635,6 +700,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           const model = entry.messageID ? messageModelByRealId.get(entry.messageID) : null;
           if (model) entry.model = model;
           broadcastStatus(sessionId, { type: "stream_start", id: partID, role: roleForPartType(entry.type), model: model || null });
+          if (roleForPartType(entry.type) === "assistant") contentDelivered = true;
         }
         broadcastStatus(sessionId, { type: "stream_delta", id: partID, role: roleForPartType(entry.type), text: entry.text });
         return;
@@ -758,6 +824,15 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         reject,
       });
     });
+    // The turnWaiter's reject can fire while `done` has no consumer yet — the
+    // shared stream dying during the in-flight POST (see scheduleSseReconnect)
+    // rejects before runTurn's Promise.race below attaches its handler, and a
+    // handler-less rejection is an UNHANDLED rejection at the Node process
+    // level, crashing the whole driver despite runTurn's try/catch. Swallow
+    // the anticipatory rejection here; the race below still observes the
+    // rejection (it reacts to the original `done`), so the fail-fast signal
+    // survives unmodified.
+    done.catch(() => {});
 
     try {
       // state.model (set via POST /set-model, see driver.mjs) is a plain
@@ -767,7 +842,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // default model, same as an unset state.mode already falls back to
       // "build" just below.
       const model = state.model ? parseModelId(state.model) : null;
-      await api(`/session/${realId}/message`, {
+      const postResult = await api(`/session/${realId}/message`, {
         method: "POST",
         body: JSON.stringify({
           agent: state.mode || "build",
@@ -809,6 +884,33 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         if (entry.started && entry.text.trim() && !entry.sentMessage) {
           const model = entry.model || (entry.messageID ? messageModelByRealId.get(entry.messageID) : null);
           broadcast(sessionId, roleForPartType(entry.type), entry.text, partId, null, model);
+          emittedIds.add(partId);
+          if (roleForPartType(entry.type) === "assistant") contentDelivered = true;
+        }
+      }
+
+      // ── Render fallback: trust the POST response when the shared ──
+      // event stream stayed silent. If no stream event ever surfaced the
+      // assistant answer (the
+      // shared SSE stream can die just after the POST resolves, before the
+      // reconnect logic in ensureSse gets a chance to run), the browser has
+      // only the user bubble and the turn has already ended. The POST
+      // response body itself carries the finished message+parts — convert it
+      // through the same shape the seeded history uses and broadcast every
+      // content entry not already emitted (skipping the user echo). Guarded
+      // by contentDelivered so a healthy streamed turn is never re-broadcast
+      // as duplicate bubbles. Note: e.ts is the message's time.created in ms,
+      // which the browser's formatTs happily renders as a real timestamp.
+      if (!contentDelivered && postResult) {
+        const raw = Array.isArray(postResult)
+          ? postResult
+          : postResult.info || postResult.message
+            ? postResult.message ? [postResult.message] : [postResult]
+            : [];
+        for (const e of convertSessionMessages(raw)) {
+          if (e.role === "user" || emittedIds.has(e.id)) continue;
+          emittedIds.add(e.id);
+          broadcast(sessionId, e.role, e.text, e.id, e.ts, e.model);
         }
       }
     } catch (e) {

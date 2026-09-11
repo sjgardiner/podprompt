@@ -21,10 +21,13 @@ connect with.
 
 The first time any tab asks to view a session this process hasn't seen live
 traffic for yet, its persisted history is pulled on demand from driver.mjs
-(GET /session-history) and used to seed that session's log before replaying
-it — this replaces the old driver-pushed /reset broadcast, which only made
-sense when there was one shared "current" session for every tab to be reset
-onto.
+(GET /session-history) and used to seed that session's log — replacing the
+old driver-pushed /reset broadcast, which only made sense when there was one
+shared "current" session for every tab to be reset onto. Seeding is
+non-blocking: a background worker prepends the transcript (deduped against
+whatever arrived live, see _seed_worker) and pushes the merge to already-open
+tabs as a "history-batch" event, so neither a turn_start nor a connect ever
+waits on the fetch.
 
 It used to also tail the session's JSONL transcript directly and derive
 messages from it (no driver involved at all, purely mirroring an
@@ -53,8 +56,8 @@ from urllib.parse import parse_qs, urlparse
 VIEWER_HTML = Path(__file__).parent / "viewer.html"
 
 # ── Per-session shared state ────────────────────────────────────────────────────
-# sessionId -> {"log": [...], "seeded": bool, "seeding": bool, "clients": [Queue, ...],
-#               "last_status": {type: payload}}
+# sessionId -> {"log": [...], "seeded": bool, "seeding": bool, "retry_scheduled": bool,
+#               "history_ids": set, "clients": [Queue, ...], "last_status": {type: payload}}
 sessions: dict[str, dict] = {}
 sessions_lock = threading.Lock()
 DRIVER_PORT: int | None = None
@@ -71,7 +74,8 @@ def _get_session(session_id: str) -> dict:
     with sessions_lock:
         s = sessions.get(session_id)
         if s is None:
-            s = {"log": [], "seeded": False, "seeding": False, "clients": [], "last_status": {}}
+            s = {"log": [], "seeded": False, "seeding": False, "retry_scheduled": False,
+                 "history_ids": set(), "clients": [], "last_status": {}}
             sessions[session_id] = s
         return s
 
@@ -171,50 +175,46 @@ def _fetch_session_history(session_id: str, backend: str | None = None) -> list:
 
 
 def _ensure_seeded(session_id: str, backend: str | None = None):
-    # One fetch per connect, guarded by a per-session "seeding" in-progress
-    # flag so concurrent tabs don't both fetch (a double fetch would
-    # double-splice the history). The splice and the "seeded" flag are set
-    # together under the lock ONLY on a successful fetch.
+    # Non-blocking by design: seeding runs in a daemon worker thread and the
+    # result is pushed to already-connected tabs as a "history-batch" event
+    # when it lands. The old implementation fetched synchronously here (up to
+    # ~46s across _fetch_session_history's retries) whenever a turn_start
+    # arrived before any tab had connected — which held up the driver's
+    # outbound send queue (see enqueueSend in driver.mjs) and stalled that
+    # turn's own messages behind the fetch. Nothing needs the fetch to have
+    # completed BEFORE a connect or a turn_start anymore; a connect replays
+    # whatever the log already holds and is topped up by a seed-drain re-check
+    # (see /events), and a turn's live messages broadcast independently of the
+    # log's seeding state. History simply appears above the live content when
+    # it becomes available; a background retry chain (see _schedule_seed_retry)
+    # — armed by turn_start and connects too — keeps an unseeded session
+    # trying until it either lands or seals as genuinely empty.
     #
-    # Crucially, a failed fetch must NOT permanently mark the session as
-    # seeded: before this fix the flag was claimed up front and an empty
-    # result during the startup window (server.py boots before driver.mjs /
-    # the opencode serve are ready) locked in a permanently blank transcript
-    # for a session that in fact had full history — while live messages
-    # still streamed in fine, since those don't depend on the seeded log.
+    # Guarded by the per-session "seeding" single-flight flag (one fetch at a
+    # time, no double-fetch from concurrent connects) and the "seeded" latch.
+    # The latch is set ONLY on a successful fetch — a failed fetch must never
+    # permanently mark the session as seeded (details in _seed_worker).
     #
     # Note on locking: sessions_lock is a plain threading.Lock (not
     # reentrant), so every acquisition here is a standalone `with` block —
     # never nested — and _get_session is never called while holding it.
     s = _get_session(session_id)
     with sessions_lock:
-        seeded = s["seeded"]
-        seeding = s["seeding"]
-    if seeded:
-        return
-    if seeding:
-        # Another connect is mid-fetch; wait briefly for it to land so this
-        # connect's replay isn't taken from an unseeded log, then skip
-        # without fetching again.
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            with sessions_lock:
-                if not s["seeding"]:
-                    break
-            time.sleep(0.1)
-        return
-    with sessions_lock:
         if s["seeded"] or s["seeding"]:
-            return  # lost a claim race after the read above
+            return
         s["seeding"] = True
+    threading.Thread(target=_seed_worker, args=(session_id, backend), daemon=True).start()
 
+
+def _seed_worker(session_id: str, backend: str | None):
+    s = _get_session(session_id)
     try:
         history = _fetch_session_history(session_id, backend)
     except Exception as e:
+        print(f"failed to seed history for {session_id}, will retry: {e}", flush=True)
         with sessions_lock:
             s["seeding"] = False
-        print(f"failed to seed history for {session_id}, retrying on next connect: {e}",
-              flush=True)
+        _schedule_seed_retry(session_id, backend)
         return
 
     entries = []
@@ -226,53 +226,81 @@ def _ensure_seeded(session_id: str, backend: str | None = None):
                          "id": msg_id, "ts": h.get("ts"), "model": h.get("model")})
 
     with sessions_lock:
-        # Prepend: historical entries always logically precede anything
-        # that could have arrived live while this fetch was in flight.
-        # Deduped by id rather than blind concatenation: turn_start's own
-        # seed-before-broadcast call (see do_POST's /status handling) is
-        # meant to make this fetch always land against an empty log in the
-        # common case, but this stays a plain list either way — a session
-        # not driven through runTurn at all (e.g. the manual `curl -d
-        # '{"sessionId":...}' /message` path this file's docstring
-        # mentions) skips that trigger entirely, so a late reconnect could
-        # still race a fetch against a non-empty log here. Entries whose id
-        # already appears live are skipped rather than re-added — for
-        # anything the live path minted using the transcript's own id
-        # (plain user prompts, tool calls — see convertSessionMessages'
-        # comment in backends/claude-code.mjs for which roles that covers)
-        # this is an exact match; for anything else it's simply a no-op
-        # (the fetched copy is kept, appearing once, in its prepended
-        # position) rather than a second, duplicate bubble.
-        existing_ids = {e.get("id") for e in s["log"]}
-        new_entries = [e for e in entries if e.get("id") not in existing_ids]
+        # Prepend: historical entries always logically precede anything that
+        # could have arrived live while this fetch was in flight. Dedup is on
+        # the exact (id, role, text) triple — deliberately stronger than id
+        # alone (5b016a7's original rule): the two backends' live-minted ids
+        # match history's ids exactly for some roles (plain user prompts, tool
+        # calls) but only best-effort for others, and a best-effort pairing
+        # must never be able to *suppress* a real transcript message — an
+        # exact triple match is the one equality that can't be a false
+        # positive. Survivors are older than everything already in the log, so
+        # they go at the front as a contiguous block, and their ids are
+        # recorded in s["history_ids"] so a tab that connected mid-fetch can
+        # be topped up precisely (see /events' seed-drain) without ever
+        # mistaking a post-snapshot LIVE entry for history.
+        existing_triples = {(e.get("id"), e.get("role"), e.get("text")) for e in s["log"]}
+        new_entries = [e for e in entries if (e.get("id"), e.get("role"), e.get("text")) not in existing_triples]
         s["log"] = new_entries + s["log"]
+        s["history_ids"].update(e.get("id") for e in new_entries)
         s["seeding"] = False
         # An empty result fetched WITHOUT an explicit backend (backend is
-        # None — this connect's caller couldn't resolve it, e.g. the
-        # viewer's very first connect after a page load before it's learned
-        # this session's real backend tag) is indistinguishable from "asked
-        # the wrong backend, got a clean empty answer": both
-        # backends/opencode.mjs's and backends/claude-code.mjs's
-        # getSessionHistory return [] rather than erroring on a foreign id,
-        # since a genuinely brand-new, never-prompted session looks
-        # identical to a misrouted one from the backend's own point of view
-        # (so this can't be fixed by making the backends pickier — a real
+        # None — this caller couldn't resolve it, e.g. a connect before the
+        # viewer learned this session's real backend tag) is indistinguishable
+        # from "asked the wrong backend, got a clean empty answer": both
+        # backends' getSessionHistory return [] rather than erroring on a
+        # foreign id, since a genuinely brand-new, never-prompted session
+        # looks identical to a misrouted one from the backend's own point of
+        # view (so this can't be fixed by making the backends pickier — a real
         # attempt at that regressed every brand-new session's first view,
-        # since an unmapped client-minted id is normal and expected then,
-        # not just possible under a mismatch). Permanently latching
-        # `seeded=True` on an unlabeled empty guess is exactly the bug that
-        # used to blank a real session's history forever, until a full
-        # server.py restart (which wipes this whole in-memory dict) gave it
-        # another shot. Only commit to "seeded" unconditionally once a real
-        # backend was actually known, or once real content came back (which
-        # can't be a false negative regardless of which backend answered) —
-        # an inconclusive empty guess still populates *this* connect's log
-        # (so the current tab isn't left waiting on nothing) but stays
-        # eligible for a retry on the next connect, hopefully by then armed
-        # with the real backend (see viewer.html's boot sequence, which now
-        # resolves it before the first connect in the common case).
+        # since an unmapped client-minted id is normal and expected then, not
+        # just possible under a mismatch). Permanently latching `seeded=True`
+        # on an unlabeled empty guess is exactly the bug that used to blank a
+        # real session's history forever, until a full server.py restart
+        # (which wipes this whole in-memory dict) gave it another shot. Only
+        # commit to "seeded" unconditionally once a real backend was actually
+        # known, or once real content came back (which can't be a false
+        # negative regardless of which backend answered) — an inconclusive
+        # empty guess still populates *this* attempt's log (so a connected tab
+        # isn't left waiting on nothing) but stays eligible for a retry,
+        # hopefully by then armed with the real backend (viewer.html's boot
+        # sequence resolves it before the first connect in the common case).
         if entries or backend:
             s["seeded"] = True
+
+    if new_entries:
+        broadcast_to(session_id, "history-batch", json.dumps(new_entries))
+
+    with sessions_lock:
+        sealed = s["seeded"]
+    if not sealed:
+        _schedule_seed_retry(session_id, backend)
+
+
+def _schedule_seed_retry(session_id: str, backend: str | None):
+    # Background retry until first success, chained rather than a hot loop: a
+    # failed/empty attempt arms a single ~2s waiter; when it fires it clears
+    # its own "armed" flag and calls _ensure_seeded afresh, whose worker — on
+    # another miss — arms the next waiter itself. The guard
+    # (retry_scheduled/seeded/seeding) keeps at most one waiter in flight per
+    # session, and the "seeded" latch's {entries or backend} seal normally
+    # ends the chain on the first attempt. turn_start and connect still
+    # trigger _ensure_seeded directly on top of this timer, which mainly
+    # covers the case where a session's only triggering events landed before
+    # its transcript became fetchable.
+    s = _get_session(session_id)
+    with sessions_lock:
+        if s["seeded"] or s["seeding"] or s["retry_scheduled"]:
+            return
+        s["retry_scheduled"] = True
+
+    def waiter():
+        time.sleep(2.0)
+        with sessions_lock:
+            s["retry_scheduled"] = False
+        _ensure_seeded(session_id, backend)
+
+    threading.Thread(target=waiter, daemon=True).start()
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
@@ -366,6 +394,28 @@ class Handler(BaseHTTPRequestHandler):
                     payload = f"event: status\ndata: {json.dumps(status_payload)}\n\n"
                     self.wfile.write(payload.encode())
                 self.wfile.flush()
+
+                # Seed-drain: a background _seed_worker may have merged this
+                # session's history in the gap between the log_snapshot read
+                # above and this tab's queue joining the broadcast list — in
+                # that window the worker's own "history-batch" broadcast went
+                # only to clients already subscribed, so this tab would have
+                # missed the session's one history batch for its whole life.
+                # Re-scan the log for entries tagged as history-seeded
+                # (s["history_ids"]) that weren't in the snapshot and replay
+                # just those. The tag is what keeps this from catching
+                # post-snapshot LIVE entries (which stream to this tab over
+                # the queue right after anyway) and wrongly front-placing
+                # them above anything older. Any double-delivery with a
+                # worker broadcast is harmless — the client upserts by id.
+                with sessions_lock:
+                    snapshot_ids = {e.get("id") for e in log_snapshot}
+                    late_history = [e for e in s["log"]
+                                    if e.get("id") in s["history_ids"] and e.get("id") not in snapshot_ids]
+                if late_history:
+                    payload = f"event: history-batch\ndata: {json.dumps(late_history)}\n\n"
+                    self.wfile.write(payload.encode())
+                    self.wfile.flush()
 
                 while True:
                     try:
@@ -470,25 +520,19 @@ class Handler(BaseHTTPRequestHandler):
         # then a refresh alone made it disappear.
         elif path == "/status" and session_id:
             if payload.get("type") == "turn_start":
-                # Seed this session's history from disk now, before this
-                # turn's own broadcasts (starting with the user prompt
-                # right after this in driver.mjs) can land in s["log"] —
-                # closing the race where a session that nobody's browser
-                # tab had opened yet (so _ensure_seeded was never triggered
-                # by GET /events) could otherwise accumulate a full turn,
-                # or several, of live content before the *next* reconnect
-                # finally seeds it, at which point the fetch would splice
-                # against an already-populated log instead of an empty one.
-                # driver.mjs's per-session send queue (see enqueueSend)
-                # guarantees this /status POST's response — and therefore
-                # this call — is fully settled before the next enqueued
-                # send (the user-message broadcast) is even issued, so
-                # there's no separate synchronization to add here beyond
-                # what _ensure_seeded's own seeded/seeding guards already
-                # provide. `backend` is required (not optional) precisely
-                # because this is the FIRST time this session may ever be
-                # seen by this process — there's no prior /events call to
-                # have already resolved it from.
+                # Kick off seeding (non-blocking — see _ensure_seeded) so a
+                # session that nobody's browser tab had opened yet (so GET
+                # /events never triggered it) still gets its history merged
+                # over this turn. Previously this call fetched synchronously
+                # and blocked the driver's outbound send queue (enqueueSend in
+                # driver.mjs) for up to ~46s on a slow first fetch, stalling
+                # every message of the turn behind it; now it just arms the
+                # background worker and the turn's broadcasts start
+                # immediately, with history filling in above once it lands
+                # (delivered to open tabs as "history-batch"). `backend` is
+                # required (not optional) precisely because this is the FIRST
+                # time this session may ever be seen by this process — there's
+                # no prior /events call to have already resolved it from.
                 _ensure_seeded(session_id, payload.get("backend"))
             if payload.get("type") in GAUGE_STATUS_TYPES:
                 s = _get_session(session_id)

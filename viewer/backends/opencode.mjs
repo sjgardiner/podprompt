@@ -72,6 +72,17 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // the answer), so repeated /models polls don't re-fetch history each time.
   const derivedModelIdCache = new Map(); // input sessionId (client or real) -> "providerID/modelID" | null
 
+  // Best-effort live->history id pairing, kept for this process's lifetime
+  // only. A user message broadcast live by this process mints its own random
+  // id (userMsgUuid in runTurn), while the same message read back from
+  // history is keyed by opencode's real message id (info.id). Recorded when
+  // the user echo arrives (onEvent's message.updated, where runTurn's
+  // userMsgUuid is in scope) so convertSessionMessages can reuse the LIVE id
+  // when re-seeding — letting server.py's exact-triple dedup suppress the
+  // duplicate instead of rendering the prompt twice. Strictly best-effort:
+  // a miss just falls back to info.id, identical to today's behavior.
+  const userBubbleIdByRealId = new Map(); // real message id -> live broadcast uuid
+
   // Last assistant entry backward until one carries both providerID/modelID —
   // /session/{id}/message can lead with bookkeeping parts or other odd shapes,
   // so scan rather than assume the final entry.
@@ -613,6 +624,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           // Remember user message ids so the echoed user text part above can
           // be told apart from the assistant's answer parts.
           userMessageIDs.add(info.id);
+          // Best-effort pairing so a history re-seed of this same user
+          // message reuses the live broadcast's id (see userBubbleIdByRealId).
+          userBubbleIdByRealId.set(info.id, userMsgUuid);
           return;
         }
         if (info.role !== "assistant") return;
@@ -867,7 +881,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         if (!info || typeof info !== "object" || !info.id) continue;
         if (info.role === "user") {
           const text = extractTextFromParts(parts, "text");
-          if (text.trim()) out.push({ role: "user", text, id: info.id, ts: info.time?.created || null, model: null });
+          // Prefer the live broadcast's id when this message was rendered
+          // live this process life (see userBubbleIdByRealId) so server.py's
+          // exact-triple dedup suppresses the duplicate; else the real id.
+          if (text.trim()) out.push({ role: "user", text, id: userBubbleIdByRealId.get(info.id) || info.id, ts: info.time?.created || null, model: null });
         } else if (info.role === "assistant") {
           const msgModel = (info.providerID && info.modelID) ? `${info.providerID}/${info.modelID}` : null;
           // Reasoning/thinking parts first (each its own bubble, matching the
@@ -883,7 +900,16 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             }
           }
           const text = extractTextFromParts(parts, "text");
-          if (text.trim()) out.push({ role: "assistant", text, id: info.id, ts: info.time?.created || null, model: msgModel || null });
+          if (text.trim()) {
+            // Prefer the live broadcast's text-part id over info.id: the
+            // common single-text-part case then re-seeds the SAME bubble id a
+            // live turn minted (live broadcasts assistant bubbles by part.id,
+            // see finalizeEntry), and server.py's exact-triple dedup
+            // suppresses the duplicate. Multi-text-part messages keep today's
+            // one-bubble-per-message rendering (first text part's id).
+            const textPart = parts.find((p) => p?.type === "text" && p?.text) || null;
+            out.push({ role: "assistant", text, id: textPart?.id || info.id, ts: info.time?.created || null, model: msgModel || null });
+          }
           for (const p of parts) {
             if (p?.type === "tool" && (p?.state?.status === "completed" || p?.state?.status === "error")) {
               // Same timestamp source as its sibling assistant/thinking

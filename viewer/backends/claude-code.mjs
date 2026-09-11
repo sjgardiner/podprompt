@@ -26,6 +26,24 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval }) {
+  // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
+  // process's lifetime only. Filled by runTurn's consume() loop (which
+  // drains the stream tracker's announced ids per completed assistant
+  // message, keyed by msg.uuid — the transcript entry's own uuid, per the
+  // confirmed property below) and read by convertSessionMessages() when it
+  // rebuilds history ids, so a history event re-seeded from the transcript
+  // reuses the SAME bubble id a live turn already minted and server.py's
+  // exact-triple dedup can suppress the duplicate instead of rendering it
+  // twice. Strictly non-authoritative by design: the pairing is
+  // probabilistic (the live stream announces bubble ids before the uuid that
+  // completes them exists — the desync documented on makeStreamTracker), so
+  // any wrong or missing entry degrades to the fallback ids (entry.uuid /
+  // uuid-thinking-k) that already exist today. It can only improve dedup,
+  // never cause content to be merged or dropped, and it's in-memory by
+  // construction because the transcript/live-log overlap it exists to fix
+  // can only occur within one server process life.
+  const uuidToBubbleId = new Map(); // uuid -> { text: id|null, thinking: [id,...] }
+
   // Same config directory Claude Code's own session storage uses (and the
   // same real ~/.claude podprompt.sh bind-mounts — shared with any native,
   // non-Docker `claude` install on this host, not a container-only copy) —
@@ -576,14 +594,22 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // in-memory log would re-seed tool/assistant text but silently
           // drop every reasoning block on a fresh server.py connect — the
           // source of thinking bubbles vanishing across a container restart.
+          // The live bubble ids recorded under this transcript uuid (see
+          // uuidToBubbleId) are used when available — positional by index
+          // among the *visible* thinking blocks here, which is exactly the
+          // order the tracker announced them in — with the derived
+          // `uuid-thinking-k` fallback for anything the pairer missed.
           let thinkIdx = 0;
+          const knownIds = (entry.uuid && uuidToBubbleId.get(entry.uuid)) || null;
           for (const b of (Array.isArray(content) ? content : [])) {
             if (b?.type === "thinking" && b?.thinking) {
-              out.push({ role: "thinking", text: b.thinking, id: `${entry.uuid}-thinking-${thinkIdx++}`, ts: null, model: model || null });
+              const paired = knownIds?.thinking?.[thinkIdx] || null;
+              out.push({ role: "thinking", text: b.thinking, id: paired || `${entry.uuid}-thinking-${thinkIdx}`, ts: null, model: model || null });
+              thinkIdx++;
             }
           }
           const text = extractTextFromContent(content);
-          if (text.trim()) out.push({ role: "assistant", text, id: entry.uuid, ts: null, model: model || null });
+          if (text.trim()) out.push({ role: "assistant", text, id: knownIds?.text || entry.uuid, ts: null, model: model || null });
           for (const tu of toolUsesFromContent(content)) {
             out.push({ role: "tool", text: formatToolSummary(tu.name, tu.input), id: tu.id, ts: null, model: model || null });
           }
@@ -672,6 +698,18 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // dropped.
   function makeStreamTracker(sessionId) {
     const liveBlocks = new Map(); // stream index -> { id, type, text, started }
+    // Announced bubble ids per type, in streaming order. Filled when a block
+    // first announces its bubble (first non-whitespace delta); drained once
+    // per completed assistant message by consume() via takeAnnouncedIds() to
+    // build the best-effort uuid->bubble-id map for history re-seeding (see
+    // uuidToBubbleId / getSessionHistory). This is a strict one-way drain —
+    // it does NOT resurrect the old id-cross-referencing for LIVE broadcasts,
+    // which remain driven entirely by content_block_stop under each block's
+    // own id (the documented FIFO-desync bug this tracker was rewritten to
+    // avoid). Only the *smallest* answer we need is shared: "which ids got
+    // announced this turn, in stream order", keyed by type — which aligns a
+    // posteriori with convertSessionMessages' own non-empty-block ordering.
+    const announcedByType = { text: [], thinking: [] };
     let sawStreamEvents = false;
 
     function handleStreamEvent(event) {
@@ -700,6 +738,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         const role = entry.type === "thinking" ? "thinking" : "assistant";
         if (!entry.started) {
           entry.started = true;
+          // Record the bubble's id now that it actually exists (a block that
+          // never produces visible text never announces and never gets here).
+          announcedByType[entry.type].push(entry.id);
           broadcastStatus(sessionId, { type: "stream_start", id: entry.id, role });
         }
         broadcastStatus(sessionId, { type: "stream_delta", id: entry.id, role, text: entry.text });
@@ -718,6 +759,16 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     return {
       handleStreamEvent,
       get sawStreamEvents() { return sawStreamEvents; },
+      // Take (and empty) the announced ids of one type, in announced order —
+      // called once per completed assistant message so each uuid's pairing is
+      // built from exactly that message's own blocks. Best-effort: any
+      // mismatch with the transcript's block set just leaves the converter's
+      // fallback ids in place.
+      takeAnnouncedIds(type) {
+        const taken = announcedByType[type];
+        announcedByType[type] = [];
+        return taken;
+      },
     };
   }
 
@@ -941,6 +992,20 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
               const msgModel = modelByUuid.get(msg.uuid) || null;
               broadcast(sessionId, "tool", formatToolSummary(block.name, block.input), block.id, null, msgModel);
             }
+          }
+          // Best-effort pairing for history re-seeding: drain this completed
+          // message's announced bubble ids (if streaming happened at all) into
+          // the per-uuid map convertSessionMessages reads when it rebuilds
+          // history ids — so a history event re-seeded from the transcript
+          // reuses the SAME bubble id a live turn already minted, letting
+          // server.py's exact-triple dedup actually suppress the duplicate.
+          // Safe to guess at by construction: a wrong pairing just leaves the
+          // fallback (entry.uuid / uuid-thinking-k) ids in place, identical
+          // to today's behavior — it can never mis-merge or drop content.
+          if (msg.uuid && streamTracker.sawStreamEvents) {
+            const thinkingIds = streamTracker.takeAnnouncedIds("thinking");
+            const textIds = streamTracker.takeAnnouncedIds("text");
+            uuidToBubbleId.set(msg.uuid, { thinking: thinkingIds, text: textIds[0] || null });
           }
         }
         // Deliberately not re-broadcasting: system/init (no visible bubble),

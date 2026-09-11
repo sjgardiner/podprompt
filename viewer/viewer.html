@@ -1688,11 +1688,51 @@ function renderPlanUsage() {
   }
 }
 
-function getOrCreate(id, role) {
+// Feed placement helper: a late-seeded history batch (see the 'history-batch'
+// SSE handler) is OLDER than everything already in the feed, so its bubbles go
+// at the TOP via insertTop; everything else appends.
+function insertFeedItem(wrap, insertTop) {
+  if (insertTop) feed.insertBefore(wrap, feed.firstChild);
+  else feed.appendChild(wrap);
+}
+
+// Shared body behind both history replay paths: the per-entry 'history' events
+// sent on connect (insertTop=false, i.e. appended in final order) and the
+// 'history-batch' event from server.py's background seed worker
+// (insertTop=true — new ids slot above everything already rendered). Both get
+// the same ts/model/rawText/render treatment; getOrCreate upserts by id, so a
+// batch entry that this tab already rendered (exact-triple duplicate) is a
+// no-op, and a double-delivered batch (a reconnect race) is harmless.
+function applyHistoryEntry(entry, insertTop) {
+  if (!entry || entry.type !== 'message') return;
+  const m = getOrCreate(entry.id, entry.role, insertTop);
+  m.ts = entry.ts;
+  m.model = entry.model || null;
+  if (m.modelEl) {
+    const show = settings.showModelOn === 'all-bubbles' ? m.role !== 'user' : m.role === 'assistant';
+    if (show && m.model) {
+      m.modelEl.textContent = m.model;
+    } else {
+      m.modelEl.textContent = '';
+    }
+  }
+  if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
+  m.rawText = entry.text;
+  // Mark hasVisibleContent for assistant bubbles with non-whitespace text
+  if (m.role === 'assistant' && entry.text && entry.text.trim()) m.hasVisibleContent = true;
+  m.el.classList.remove('streaming');
+  renderBody(m);
+  // A late history batch is older content front-inserted above where the user
+  // is — don't yank the viewport down to it. Initial connect replays (the
+  // 'history' path) keep scrolling as before.
+  if (!insertTop) scrollBottom();
+}
+
+function getOrCreate(id, role, insertTop) {
   if (msgs[id]) return msgs[id];
 
   removeEmpty();
-  feedOrder.push(id);
+  if (insertTop) feedOrder.unshift(id); else feedOrder.push(id);
 
   const wrap = document.createElement('div');
   wrap.className = `msg ${role}`;
@@ -1710,7 +1750,7 @@ function getOrCreate(id, role) {
     bodyEl.querySelector('.agent-summary').addEventListener('click', () => {
       bodyEl.classList.toggle('expanded');
     });
-    feed.appendChild(wrap);
+    insertFeedItem(wrap, insertTop);
     msgs[id] = {
       el: bodyEl,
       rawEl: bodyEl.querySelector('.agent-raw'),
@@ -1728,7 +1768,7 @@ function getOrCreate(id, role) {
     wrap.innerHTML = `<div class="msg-label"><span class="msg-think-toggle">Thinking <span class="model"></span><span class="ts"></span></span></div>
                       <div class="msg-body"></div>`;
     wrap.querySelector('.msg-think-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
-    feed.appendChild(wrap);
+    insertFeedItem(wrap, insertTop);
     msgs[id] = {
       el: wrap.querySelector('.msg-body'),
       tsEl: wrap.querySelector('.ts'),
@@ -1747,7 +1787,7 @@ function getOrCreate(id, role) {
     wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="model"></span><span class="ts"></span></span></div>
                       <div class="msg-body"></div>`;
     wrap.querySelector('.msg-tool-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
-    feed.appendChild(wrap);
+    insertFeedItem(wrap, insertTop);
     msgs[id] = {
       el: wrap.querySelector('.msg-body'),
       tsEl: wrap.querySelector('.ts'),
@@ -1761,7 +1801,7 @@ function getOrCreate(id, role) {
   wrap.innerHTML = `<div class="msg-label">${labelFor(role)}<span class="model"></span><span class="ts"></span></div>
                     <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
                     ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
-  feed.appendChild(wrap);
+  insertFeedItem(wrap, insertTop);
 
   const body = wrap.querySelector('.msg-body');
   msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), modelEl: wrap.querySelector('.model'), rawText: '', ts: null, role, revealTimer: null, permId: id, model: null, hasVisibleContent: false };
@@ -2321,26 +2361,21 @@ function connect() {
   // History replay on reconnect
   es.addEventListener('history', e => {
     const entry = JSON.parse(e.data);
-    if (entry.type === 'message') {
-      const m = getOrCreate(entry.id, entry.role);
-      m.ts = entry.ts;
-      m.model = entry.model || null;
-      if (m.modelEl) {
-        const show = settings.showModelOn === 'all-bubbles' ? m.role !== 'user' : m.role === 'assistant';
-        if (show && m.model) {
-          m.modelEl.textContent = m.model;
-        } else {
-          m.modelEl.textContent = '';
-        }
-      }
-      if (m.tsEl) m.tsEl.textContent = formatTs(entry.ts);
-      m.rawText = entry.text;
-      // Mark hasVisibleContent for assistant bubbles with non-whitespace text
-      if (m.role === 'assistant' && entry.text && entry.text.trim()) m.hasVisibleContent = true;
-      m.el.classList.remove('streaming');
-      renderBody(m);
-      scrollBottom();
-    }
+    applyHistoryEntry(entry, false);
+  });
+
+  // Late-seeded history: a background server-side merge (see server.py's
+  // _seed_worker) landed after this tab connected, so it arrives as a single
+  // batch rather than as part of the connect replay. A session gets at most
+  // one history batch per server life and it always logically precedes
+  // everything live, so new bubbles are front-inserted at the TOP; ids this
+  // tab already rendered just update in place (getOrCreate upserts). The
+  // batch is iterated NEWEST-first because each front-insert lands its entry
+  // above everything before it — walking oldest-first would end up reversing
+  // the batch, leaving the newest past message at the very top.
+  es.addEventListener('history-batch', e => {
+    const batch = JSON.parse(e.data);
+    for (let i = batch.length - 1; i >= 0; i--) applyHistoryEntry(batch[i], true);
   });
 
   // Ephemeral turn-in-flight signal from driver.mjs (not part of message_log

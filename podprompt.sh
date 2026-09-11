@@ -784,9 +784,10 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     # node_modules is deliberately not checked here: it's baked into the
     # Docker image at build time now (see Dockerfile), not deployed to the
     # host by --deploy-viewer, so it's never something that can be missing
-    # from $PODPROMPT_DATA_DIR/viewer.
-    for f in server.py viewer.html start-viewer.sh driver.mjs; do
-        if [ ! -f "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
+    # from $PODPROMPT_DATA_DIR/viewer. backends/ is a directory, so the
+    # existence check below uses -e (exists) rather than -f (regular file).
+    for f in server.py viewer.html start-viewer.sh driver.mjs backends; do
+        if [ ! -e "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
             echo "Error: $PODPROMPT_DATA_DIR/viewer/$f not found."
             echo "Run './podprompt.sh --deploy-viewer' from this repo to install/update the viewer there."
             exit 1

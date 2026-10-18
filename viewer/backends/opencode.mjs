@@ -248,7 +248,27 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   function ensureSse() {
     if (sseReady) return sseReady;
     sseReady = (async () => {
-      const res = await fetch(`${BASE}/event`);
+      // /event (not /global/event) is scoped to a single directory/"project"
+      // instance server-side — empirically confirmed live (and matching
+      // upstream reports, e.g. anomalyco/opencode#46733): a session created
+      // under the server's own default directory streamed real
+      // message.part.*/message.updated events over /event just fine, but an
+      // otherwise-identical session created one directory level down
+      // (cwdRoot's own subdirectories, e.g. the project the browser's
+      // "+ New chat" picker actually lets you choose) got NOTHING but
+      // server.connected/server.heartbeat on that same connection — the
+      // turn still ran and persisted correctly server-side (confirmed via
+      // the plain REST API), it just never reached this process live. Since
+      // this one shared connection already has to span every session
+      // regardless of which project directory it lives in (driver.mjs
+      // dispatches purely by sessionID — see dispatchEvent below — not by
+      // directory), /global/event's lack of directory filtering is exactly
+      // what's wanted here, not a loss of isolation: an event for a session
+      // nobody's turnWaiters currently cover (a different project, or even a
+      // session driven by a native `opencode` CLI entirely outside this
+      // podprompt instance) is still just silently ignored below, same as
+      // today.
+      const res = await fetch(`${BASE}/global/event`);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -299,6 +319,16 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   }
 
   function dispatchEvent(evt) {
+    // /global/event wraps the actual event under `payload` (with sibling
+    // `directory`/`project` fields identifying which project it came from —
+    // not needed here since dispatch is purely by sessionID), unlike the
+    // single-instance /event endpoint's flat {id, type, properties} shape.
+    // Confirmed empirically against a live server: without this unwrap,
+    // evt.type/evt.properties are both undefined for every event this
+    // connection ever sees, so every event is silently dropped — looks
+    // identical to "no events arrived at all" from the dispatch side, but is
+    // really just a shape mismatch.
+    if (evt && evt.payload && typeof evt.payload === "object") evt = evt.payload;
     const props = evt.properties || {};
     const sessionID = props.sessionID
       || props.info?.sessionID

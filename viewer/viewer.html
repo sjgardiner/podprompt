@@ -3244,15 +3244,22 @@ autoApproveToggle.addEventListener('change', async () => {
     return;
   }
   try {
-    await fetch(`${driverBase}/auto-approve`, {
+    const res = await fetch(`${driverBase}/auto-approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: currentSessionId, enabled: enabling }),
     });
+    // fetch() only rejects on network failure, never on HTTP status, so
+    // without this an error response reads as success: the box would stay
+    // checked (and amber) while the driver had no record of the flag, and
+    // every tool call would still prompt. This control disables permission
+    // review — it has to fail visibly, in the safe direction.
+    if (!res.ok) throw new Error(`driver returned ${res.status}`);
     autoApproveRow.classList.toggle('active', enabling);
   } catch (e) {
     console.error('Failed to set auto-approve:', e);
     autoApproveToggle.checked = !enabling;
+    autoApproveRow.classList.toggle('active', !enabling);
   }
 });
 

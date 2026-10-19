@@ -646,14 +646,26 @@ gatherAllSessions(false).catch((e) => console.error("[driver] startup session-ba
 
 // Pre-prompt picker changes for sessions that have no driver state yet (the
 // "new chat" case, or a session this process hasn't touched this run). A
-// real SessionState must never be created just to remember a model/mode
-// choice — state creation pins cwd and backend (see /prompt), which we
-// don't want to do from a mere /set-model or /set-mode. Instead the choice
-// is parked here and merged into the state the first time something that
-// genuinely needs state (a prompt) creates it; seeded entries are consumed
-// and removed at that moment, so an abandoned pick can never leak into a
-// later session with the same id.
-const preSeeds = new Map(); // sessionId -> { model?, mode? }
+// real SessionState must never be created just to remember a model/mode/
+// auto-approve choice — state creation pins cwd and backend (see /prompt),
+// which we don't want to do from a mere /set-model, /set-mode or
+// /auto-approve. Instead the choice is parked here and merged into the state
+// the first time something that genuinely needs state (a prompt) creates it;
+// seeded entries are consumed and removed at that moment, so an abandoned
+// pick can never leak into a later session with the same id.
+//
+// autoApprove joined model/mode here as a bug fix: /auto-approve used to
+// 404 outright when no state existed, which is the overwhelmingly common
+// case for the checkbox's most natural use — tick it on a brand-new chat
+// *before* sending the first prompt (state is only ever created by /prompt),
+// or on a pre-existing session reopened after a driver restart. The browser
+// didn't check the response status, so the box stayed visibly checked while
+// the driver had no record of it, and every tool call still prompted until
+// the user unchecked and rechecked it. Unlike model picks this is
+// deliberately NOT persisted to disk across a driver restart: a bypass of
+// every tool-permission prompt should have to be re-armed by a human, not
+// silently restored by a process coming back up.
+const preSeeds = new Map(); // sessionId -> { model?, mode?, autoApprove? }
 
 // Explicit /set-model picks, persisted to disk so they survive a driver.mjs
 // restart — in-memory `state.model`/`preSeeds` alone do not, and a session's
@@ -737,6 +749,7 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     if (pre) {
       if (pre.model) s.model = pre.model;
       if (pre.mode) s.mode = pre.mode;
+      if (pre.autoApprove) s.autoApprove = true;
       preSeeds.delete(sessionId);
     }
     sessions.set(sessionId, s);
@@ -754,6 +767,17 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     }
   }
   return s;
+}
+
+// Is auto-approve on for this session, counting a still-parked pre-prompt
+// choice as on? Live state wins when it exists (it's what the backends
+// actually read), otherwise fall back to preSeeds. Never creates state, so
+// it's safe from any read-only route. `state` is an optional
+// already-looked-up SessionState, purely to save a second Map lookup.
+function effectiveAutoApprove(sessionId, state) {
+  const s = state !== undefined ? state : (sessionId ? sessions.get(sessionId) : null);
+  if (s) return !!s.autoApprove;
+  return !!(sessionId && preSeeds.get(sessionId)?.autoApprove);
 }
 
 // Backend resolution for routes that must NOT create session state (pure
@@ -913,7 +937,14 @@ const server = createServer(async (req, res) => {
     const sessionId = url.searchParams.get("sessionId");
     const state = sessionId ? sessions.get(sessionId) : null;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ inFlight: !!state?.turnInFlight, autoApprove: !!state?.autoApprove }));
+    // autoApprove falls back to the parked pre-prompt value (see preSeeds):
+    // this is the *only* thing that repopulates the browser's checkbox —
+    // resetBackendControlsDisplay() clears it on every session switch, and
+    // resyncTurnStatus() rearms it from here. Reading just `sessions` would
+    // report false for a session whose flag is still parked, silently
+    // un-ticking a box the user already ticked (and confirmed) the moment
+    // they switched away and back, or on any SSE reconnect.
+    res.end(JSON.stringify({ inFlight: !!state?.turnInFlight, autoApprove: effectiveAutoApprove(sessionId, state) }));
     return;
   }
 
@@ -1236,15 +1267,24 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"invalid json"}');
       return;
     }
-    const state = sessions.get(body.sessionId);
-    if (!state) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end('{"error":"unknown session"}');
+    if (!body.sessionId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"sessionId required"}');
       return;
     }
-    state.autoApprove = !!body.enabled;
+    const enabled = !!body.enabled;
+    const state = sessions.get(body.sessionId);
+    if (state) {
+      state.autoApprove = enabled;
+    } else {
+      // Pre-prompt (or post-restart) "new chat": park the choice for when
+      // state is created, exactly like /set-model does. This must NOT create
+      // state itself — that would pin cwd/backend from a mere checkbox click.
+      const pre = preSeeds.get(body.sessionId) || {};
+      preSeeds.set(body.sessionId, { ...pre, autoApprove: enabled });
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, autoApprove: state.autoApprove }));
+    res.end(JSON.stringify({ ok: true, autoApprove: enabled }));
     return;
   }
 

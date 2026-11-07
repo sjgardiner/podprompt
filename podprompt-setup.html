@@ -901,8 +901,30 @@ Small model: openai/gpt-oss-120b</pre>
           <tr>
             <td>--opencode-port PORT</td>
             <td>Loopback-only port <code>opencode serve</code> listens on
-            inside the container. Never published to the host. Default:
-            <code>7845</code>.</td>
+            inside the container. Never published to the host via
+            <code>-p</code> (driver.mjs and <code>opencode serve</code> talk
+            to each other inside the container's own network namespace —
+            <code>--host-network</code> below drops the <code>-p</code>
+            publishes anyway). Default: <code>7845</code>.</td>
+          </tr>
+          <tr>
+            <td>--host-network</td>
+            <td>Launch the container with Docker host networking
+            (<code>--network host</code>) instead of the default bridge
+            network, dropping all <code>-p</code> publishes. This exists for
+            one specific motivation: reaching a service the host only
+            listens on loopback — the original case was a local
+            <code>llama-server</code> bound to <code>127.0.0.1:8080</code> —
+            from inside the container, at that same
+            <code>127.0.0.1</code> address, without having to rebind the
+            host service off loopback or add an API key just so it's
+            reachable across the Docker bridge. Native and reliable on
+            Linux. On macOS this needs Docker Desktop 4.34+ with
+            Settings &gt; Resources &gt; Network &gt; "Enable host
+            networking" turned on — and even then the host-to-container
+            direction (e.g. the viewer in a browser) can be unreliable
+            there; that direction works fine on Linux. Default is off
+            (bridged container).</td>
           </tr>
         </tbody>
       </table>

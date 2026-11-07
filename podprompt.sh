@@ -129,13 +129,28 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
   --opencode-port PORT
                   Loopback-only port `opencode serve` listens on inside the
                   container, and that driver.mjs's opencode backend connects
-                  to. Never published to the host (driver.mjs and
+                  to. Never published to the host via -p (driver.mjs and
                   `opencode serve` talk to each other inside the container's
-                  own network namespace) — only worth changing if something
-                  else inside the image ever collides with the default.
+                  own network namespace; --host-network drops the -p publishes
+                  anyway) — only worth changing if something else inside the
+                  image ever collides with the default.
                   Relevant whenever `opencode serve` might run at all: under
                   --viewer (always) or under a plain --opencode launch.
                   Default: 7845.
+
+  --host-network  Launch the container with Docker host networking
+                  (--network host), sharing the host's network stack
+                  instead of the default bridge network. Lets the
+                  container reach services the host listens on
+                  loopback-only (e.g. a llama-server bound to
+                  127.0.0.1:8080) at the same 127.0.0.1 address, with no
+                  -p port publishes and no LAN exposure. Native and
+                  reliable on Linux. On macOS this needs Docker Desktop
+                  4.34+ with Settings > Resources > Network > "Enable
+                  host networking" turned on — and even then the
+                  host-to-container direction (e.g. the viewer in a
+                  browser) can be unreliable there; that direction works
+                  fine on Linux. Default is off (bridged container).
 
 UTILITY OPTIONS:
 
@@ -586,6 +601,7 @@ TUI_BACKEND=""      # "" (viewer, the default), "claude-code", or "opencode"
 VIEWER_ENABLED=1    # the viewer is now the default interface; --claude/--opencode flip this off below
 VIEWER_EXPLICIT=0   # did the user actually type --viewer, vs it just being the default
 OPENCODE_PORT=7845
+HOST_NETWORK=0
 PASSTHROUGH_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -650,6 +666,10 @@ while [ $# -gt 0 ]; do
         --opencode-port)
             OPENCODE_PORT="$2"
             shift 2
+            ;;
+        --host-network)
+            HOST_NETWORK=1
+            shift
             ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
@@ -809,6 +829,30 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     VIEWER_OPEN_PID=$!
 fi
 
+# ── Host networking ────────────────────────────────────────────────────────────
+# --host-network puts the container on the host's network stack (--network host)
+# so services the host listens on loopback-only (e.g. llama-server bound to
+# 127.0.0.1:8080) are reachable at the same 127.0.0.1 address from inside the
+# container, with no -p publishes and no LAN exposure. Native and reliable on
+# Linux; on macOS it needs Docker Desktop 4.34+ with the "Enable host
+# networking" setting in Settings > Resources > Network.
+NETWORK_FLAG=()
+if [ "$HOST_NETWORK" = 1 ]; then
+    NETWORK_FLAG=(--network host)
+    # -p publishes are discarded under host networking (Docker warns about it);
+    # drop them up front so no stale 127.0.0.1:PORT publishes linger in the
+    # command. Server-side listeners inside the container now bind into the
+    # host's own address space instead, on the same ports.
+    VIEWER_PORT_FLAGS=()
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "Warning: --host-network on macOS requires Docker Desktop 4.34+ with" >&2
+        echo "Settings > Resources > Network > 'Enable host networking' turned on." >&2
+        echo "If host services aren't reachable at 127.0.0.1 from inside the container" >&2
+        echo "(e.g. llama-server at http://127.0.0.1:8080/v1), enable that toggle," >&2
+        echo "restart Docker Desktop, and try again." >&2
+    fi
+fi
+
 # ── Interface (plain terminal) ────────────────────────────────────────────────
 # The base image's Node entrypoint execs any bare command that's actually on
 # PATH as-is (falls back to prefixing `node` only for things it can't find,
@@ -924,6 +968,7 @@ docker run -it --rm \
   --user "$(id -u):$(id -g)" \
   --security-opt label=disable \
   --init \
+  "${NETWORK_FLAG[@]}" \
   "${ENTRYPOINT_FLAG[@]}" \
   -e HOME=/home/agent \
   -e CLAUDE_CONFIG_DIR=/home/agent/.claude \

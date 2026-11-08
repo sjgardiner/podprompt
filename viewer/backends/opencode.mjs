@@ -519,7 +519,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     }
   }
 
-  const childEmitted = new Map(); // podId -> Set of part ids already broadcast
+  const childEmitted = new Map();   // podId -> Set of TOOL part ids already broadcast
+  const childMsgRole = new Map();   // real messageID -> "user" | "assistant"
 
   function childEvent(realId, evt, props) {
     const podId = childRealToPod.get(realId);
@@ -533,29 +534,40 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       updateSubAgent?.(podId, { status: "failed", awaiting: null });
       return;
     }
+    // Role lives on the message, not the part, so it is recorded here and
+    // read back when a part is broadcast.
+    if (evt.type === "message.updated") {
+      const info = props.info || {};
+      if (info.id && info.role) childMsgRole.set(info.id, info.role);
+      return;
+    }
     if (evt.type !== "message.part.updated") return;
     const part = props.part;
     if (!part || !part.id) return;
-    // Terminal parts only: a child's feed is a record to read afterwards, so
-    // it is written once per part when settled rather than streamed, which
-    // keeps this handler small and avoids a second streaming state machine.
-    const settled = !part.state || ["completed", "error"].includes(part.state?.status);
-    if (!settled) {
-      if (part.type === "tool") updateSubAgent?.(podId, { lastTool: part.tool || part.name || null });
-      return;
-    }
-    let seen = childEmitted.get(podId);
-    if (!seen) { seen = new Set(); childEmitted.set(podId, seen); }
-    if (seen.has(part.id)) return;
-    seen.add(part.id);
+
     if (part.type === "tool") {
       updateSubAgent?.(podId, { lastTool: part.tool || part.name || null });
+      // A tool one-liner is final once the call settles, and is emitted once.
+      const settled = !part.state || ["completed", "error"].includes(part.state.status);
+      if (!settled) return;
+      let seen = childEmitted.get(podId);
+      if (!seen) { seen = new Set(); childEmitted.set(podId, seen); }
+      if (seen.has(part.id)) return;
+      seen.add(part.id);
       broadcast(podId, "tool", summarizeToolPart(part), part.id, null, null);
-    } else if (part.type === "text" && part.text) {
-      broadcast(podId, "assistant", part.text, part.id, null, null);
-    } else if (part.type === "reasoning" && part.text) {
-      broadcast(podId, "thinking", part.text, part.id, null, null);
+      return;
     }
+
+    // Text and reasoning grow across updates and carry NO state field, so
+    // every update looked "settled". Emitting once and then de-duplicating
+    // by part id therefore kept the FIRST, near-empty version and discarded
+    // the real content — a child session that showed its prompt and nothing
+    // else. They are re-broadcast under the same part id instead, which the
+    // viewer upserts, so the bubble fills in as it grows.
+    if (!part.text) return;
+    const role = childMsgRole.get(part.messageID) === "user" ? "user"
+      : part.type === "reasoning" ? "thinking" : "assistant";
+    broadcast(podId, role, part.text, part.id, null, null);
   }
 
   // Optional explicit timeout (opts.timeoutMs) — some requests MUST be able to
@@ -833,6 +845,23 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             // Matches what the claude-code backend does with Task/Agent, so
             // both backends produce the same bubble for the same act.
             if (SUBAGENT_TOOL_NAMES.has(part.tool)) {
+              // The task part names its own child session in state.metadata
+              // (verified against a live server), so the Agent bubble can be
+              // tied to that child directly rather than guessed at by timing.
+              // Recording the part id as the child's toolUseId is what lets
+              // refreshTaskBubbles find this bubble and hang the sub-agent's
+              // live status and "open transcript" link on it — without it the
+              // bubble rendered empty.
+              const childReal = part.state?.metadata?.sessionId;
+              const childPod = childReal ? childRealToPod.get(childReal) : null;
+              if (childPod) {
+                registerChild?.(childPod, {
+                  parent: sessionId,
+                  backend: "opencode",
+                  childKind: "native-task",
+                  native: { toolUseId: part.id, realSessionId: childReal },
+                });
+              }
               broadcast(sessionId, "agent", subAgentTitleFromPart(part), part.id, null, msgModel || null);
             } else {
               broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);

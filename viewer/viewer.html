@@ -334,7 +334,9 @@
      collided with green-means-running elsewhere in the UI. The element is
      still laid out so rows stay aligned. */
   .roster-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: transparent; }
-  .roster-dot.running, .roster-dot.pending { background: var(--accent); animation: badge-pulse 1.4s ease-in-out infinite; }
+  /* Green for running, matching .session-badge — that is already what "a
+     turn is running" looks like everywhere else in this UI. */
+  .roster-dot.running, .roster-dot.pending { background: var(--green); animation: badge-pulse 1.4s ease-in-out infinite; }
   /* Blocked on a human: the one state that will not clear on its own, so it
      is held steady rather than pulsing like work in progress. */
   .roster-dot.waiting { background: var(--purple); }

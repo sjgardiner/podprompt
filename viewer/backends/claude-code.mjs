@@ -54,6 +54,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude");
   const PROJECTS_DIR = nodePath.join(CLAUDE_CONFIG_DIR, "projects");
 
+  // Tools whose whole purpose is to delegate to a sub-agent. Their bubbles
+  // get the 'agent' role rather than 'tool'.
+  const SUBAGENT_TOOL_NAMES = new Set(["Task", "Agent"]);
+
   // readdirSync that yields [] instead of throwing for a path that does not
   // exist — the sub-agent lookups below probe several speculative paths.
   function safeReaddir(dir) {
@@ -1337,7 +1341,18 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
               broadcast(sessionId, "thinking", block.thinking, randomUUID(), null, null);
             } else if (block.type === "tool_use") {
               const msgModel = modelByUuid.get(msg.uuid) || null;
-              broadcast(sessionId, "tool", formatToolSummary(block.name, block.input), block.id, null, msgModel);
+              // Spawning a sub-agent is not the same kind of event as running
+              // a tool, and rendering it as one made the most structurally
+              // significant thing a turn can do look like a `Grep`. It gets
+              // the dedicated 'agent' role, carrying the task's description
+              // as its title; the viewer fills in live status underneath from
+              // the roster, keyed by this same tool_use id.
+              if (SUBAGENT_TOOL_NAMES.has(block.name)) {
+                const title = (block.input && (block.input.description || block.input.prompt)) || block.name;
+                broadcast(sessionId, "agent", String(title).split("\n")[0].slice(0, 200), block.id, null, msgModel);
+              } else {
+                broadcast(sessionId, "tool", formatToolSummary(block.name, block.input), block.id, null, msgModel);
+              }
             }
           }
           // Best-effort pairing for history re-seeding: drain this completed

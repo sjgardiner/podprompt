@@ -346,9 +346,14 @@
     100% { background: transparent; }
   }
 
-  /* Live status line inside a Task tool bubble. */
-  .task-live { font-size: 12px; color: var(--muted); margin-top: 3px; }
-  .task-live .task-open { cursor: pointer; text-decoration: underline; }
+  /* The task's own title, sitting in the Agent bubble's label beside the
+     role name — "Agent  Quick roster probe  10:42 PM". */
+  .msg-label .agent-title { font-weight: 500; opacity: .95; margin-right: 6px; }
+  /* The sub-agent's live status, in the bubble body. Deliberately at normal
+     body size rather than the small muted treatment a tool one-liner gets:
+     this is the substance of the bubble, not a footnote to it. */
+  .agent-live { color: var(--muted); }
+  .agent-live .task-open { cursor: pointer; text-decoration: underline; color: var(--link); }
 
   /* Global "something is waiting on you" indicator. Hidden unless there is
      actually something, so the header is unchanged in the normal case. It
@@ -1037,23 +1042,6 @@
   }
   .msg.assistant:hover .msg-copy-btn { opacity: 1; }
   .msg-copy-btn:hover { background: var(--accent); color: #fff; }
-
-  /* agent report: raw, collapsed by default */
-  .agent-summary {
-    cursor: pointer;
-    color: var(--muted);
-    font-size: .85em;
-    user-select: none;
-  }
-  .agent-raw {
-    display: none;
-    white-space: pre-wrap;
-    font-family: var(--mono);
-    font-size: .82em;
-    color: var(--muted);
-    margin-top: 10px;
-  }
-  .agent-body.expanded .agent-raw { display: block; }
 
   .msg-body {
     background: var(--surface);
@@ -1844,19 +1832,16 @@ function getOrCreate(id, role, insertTop) {
     // Async subagent reports are raw and often long — collapsed by default,
     // click to expand. Rendered as plain text, not markdown, since the
     // content is XML-ish tool output rather than prose.
-    wrap.innerHTML = `<div class="msg-label">${labelFor(role)}<span class="model"></span><span class="ts"></span></div>
-                      <div class="msg-body agent-body">
-                        <div class="agent-summary">▸ agent report — click to expand</div>
-                        <pre class="agent-raw"></pre>
-                      </div>`;
-    const bodyEl = wrap.querySelector('.agent-body');
-    bodyEl.querySelector('.agent-summary').addEventListener('click', () => {
-      bodyEl.classList.toggle('expanded');
-    });
+    // The label carries the task's own title, so the feed reads
+    // "Agent  Quick roster probe  10:42 PM" rather than a generic header
+    // with the title buried in the body. The body is the sub-agent's live
+    // status, filled from the roster by refreshTaskBubbles().
+    wrap.innerHTML = `<div class="msg-label">${labelFor(role)} <span class="agent-title"></span><span class="model"></span><span class="ts"></span></div>
+                      <div class="msg-body agent-live"></div>`;
     insertFeedItem(wrap, insertTop);
     msgs[id] = {
-      el: bodyEl,
-      rawEl: bodyEl.querySelector('.agent-raw'),
+      el: wrap.querySelector('.agent-live'),
+      titleEl: wrap.querySelector('.agent-title'),
       tsEl: wrap.querySelector('.ts'),
       modelEl: wrap.querySelector('.model'),
       rawText: '', ts: null, role, revealTimer: null, permId: id,
@@ -1959,7 +1944,10 @@ function renderBody(entry) {
     return;
   }
   if (entry.role === 'agent') {
-    entry.rawEl.textContent = entry.rawText || '';
+    // The payload IS the title. Status lives in the body and is owned by
+    // refreshTaskBubbles(), so it is deliberately not touched here — a
+    // re-render of the title must not wipe the live line underneath it.
+    if (entry.titleEl) entry.titleEl.textContent = entry.rawText || '';
     return;
   }
   if (entry.role === 'permission') {
@@ -3065,6 +3053,27 @@ function renderRoster() {
         refreshSubAgents();
       });
       row.appendChild(stop);
+    } else {
+      // Only once it has stopped. Shaped like archiving a session, not
+      // deleting one: the transcript stays where it is, this just stops the
+      // sub-agent being tracked so it leaves the roster. Actual deletion
+      // happens only when the parent session is deleted, which cascades.
+      const forget = document.createElement('button');
+      forget.className = 'roster-stop';
+      forget.textContent = 'Forget';
+      forget.title = 'Remove from this list. The transcript is kept, and is deleted only if this session is deleted.';
+      forget.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        forget.disabled = true;
+        try {
+          await fetch(`${driverBase}/forget-sub-agent`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sa.agentId }),
+          });
+        } catch { /* the refresh below shows whatever actually happened */ }
+        refreshSubAgents();
+      });
+      row.appendChild(forget);
     }
 
     row.addEventListener('click', () => {
@@ -3102,14 +3111,8 @@ document.addEventListener('click', (e) => {
 // attaches the live status, and makes the bubble the natural way in.
 function refreshTaskBubbles() {
   for (const sa of subAgents) {
-    const el = taskBubbleFor(sa);
-    if (!el) continue;
-    let live = el.querySelector('.task-live');
-    if (!live) {
-      live = document.createElement('div');
-      live.className = 'task-live';
-      el.appendChild(live);
-    }
+    const live = taskBubbleFor(sa);
+    if (!live) continue;
     live.innerHTML = '';
     const text = document.createElement('span');
     text.textContent = subAgentMetaLine(sa) + ' · ';

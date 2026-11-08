@@ -1528,6 +1528,43 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // Forget ONE sub-agent — the per-row action in the roster, deliberately
+  // shaped like archiving a session rather than deleting one. The child's
+  // transcript is left alone on the backend; this only stops PodPrompt
+  // tracking it, so it leaves the roster. Real deletion happens only when
+  // the PARENT session is deleted, which cascades (see /delete-session).
+  if (req.method === "POST" && path === "/forget-sub-agent") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const childId = body.sessionId;
+    const rel = childId ? sessionRelations[childId] : null;
+    if (!rel || rel.rel !== "parent") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"error":"not a known sub-agent"}');
+      return;
+    }
+    // Refusing while it runs keeps the roster the only place live work is
+    // visible — forgetting a running sub-agent would hide something that is
+    // still consuming tokens and still able to raise a permission card.
+    if (isSubAgentRunning(childId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "stop this sub-agent before forgetting it", reason: "still-running" }));
+      return;
+    }
+    const parentId = rel.parent;
+    forgetSessionRelations([childId]);
+    if (parentId) broadcastStatus(parentId, { type: "sub_agents_changed" });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+    return;
+  }
+
   // Forget a session's recorded sub-agents. The relation index outlives the
   // process by design (a sub-agent's transcript is still on disk), but that
   // also means a session accumulates every sub-agent it has ever spawned,

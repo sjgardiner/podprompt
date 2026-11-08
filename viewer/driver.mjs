@@ -1042,6 +1042,39 @@ function resumePromptFor(resumable) {
     + " work that is already complete, and do not start over." + tool;
 }
 
+// Provenance survives a live turn (broadcast carries `origin`, and server.py
+// stores it on the log entry) but NOT a rebuild of that log from the backend
+// transcript — which is exactly what a restart or a reseed forces. The
+// symptom: a PEER bubble silently becomes YOU after a refresh, claiming the
+// user typed something they never typed. C10 says a transcript must never be
+// ambiguous about that, so it has to be recoverable, not just live.
+//
+// It IS recoverable, because the text the driver wrote into the transcript
+// still carries its own marker — the same "[message from @x]" prefix that
+// applyOrigin() strips in the browser, and the fixed resume wording from
+// resumePromptFor(). Inferring from those is honest: they are the artefacts
+// the driver itself produced, not a guess about user intent.
+//
+// Deliberately NOT stored as a sidecar keyed by message id: that would be a
+// second source of truth which could disagree with the transcript, and the
+// transcript is the thing the user actually reads.
+function inferOriginFromText(role, text) {
+  if (role !== "user" || typeof text !== "string") return null;
+  // Peer and delegated-result deliveries both render as "Peer" (a settled UI
+  // decision), and both are written by composeDelivery, so one pattern does
+  // for both. Multi-message deliveries open with the coalesced header, which
+  // names no single sender — honest to report as peer with no handle.
+  const m = text.match(/^\[message from ([^\]]+)\]/);
+  if (m) return `peer:${m[1]}`;
+  if (/^You have \d+ messages waiting\./.test(text)) return "peer";
+  // The three fixed openings from resumePromptFor(). Matched on the opening
+  // clause only, because each continues with a variable tool-name tail.
+  if (text.startsWith("Your previous turn was interrupted when the environment restarted.")) return "resume:restart";
+  if (text.startsWith("Your previous turn was interrupted before it finished.")) return "resume:aborted";
+  if (text.startsWith("Your previous turn was cut short by a system error")) return "resume:error";
+  return null;
+}
+
 // ── Delivery core ────────────────────────────────────────────────────────
 // One internal entry point that both surfaces sit on: `delegate` (which
 // creates its target) and `message` (which addresses an existing one). The
@@ -3149,6 +3182,17 @@ const server = createServer(async (req, res) => {
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
       return;
+    }
+    // Re-attach provenance the transcript still evidences but the converted
+    // history has dropped. Only ever ADDS an origin — an entry that already
+    // has one (a backend that learns to carry it) is left alone.
+    if (Array.isArray(history)) {
+      for (const h of history) {
+        if (h && !h.origin) {
+          const inferred = inferOriginFromText(h.role, h.text);
+          if (inferred) h.origin = inferred;
+        }
+      }
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(history));

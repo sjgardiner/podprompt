@@ -442,7 +442,11 @@
 
   /* Generated continuation text. Collapsed to a one-line marker: the point
      is that the turn resumed, not the boilerplate that made it resume. */
-  .msg.user.from-resume { background: transparent; border-color: var(--border); opacity: .75; }
+  /* opacity applies to the whole container and is the intended effect. The
+     background/border-color that used to sit here were inert for the same
+     reason as the peer rule above — .msg paints nothing — so they are gone
+     rather than left to imply they do something. The body is hidden anyway. */
+  .msg.user.from-resume { opacity: .75; }
   .msg.user.from-resume .msg-body { display: none; }
   .msg.user.from-resume .msg-label .role-name,
   .msg.user.from-resume .msg-label .agent-title { color: var(--muted); }
@@ -450,7 +454,17 @@
   /* A turn nobody typed. Tinted differently from a user bubble so it is
      obvious at a glance when scrolling back weeks later — the failure this
      prevents is silent: misremembering an agent-caused turn as your own. */
-  .msg.user.from-peer { background: var(--surface); border-color: var(--accent); }
+  /* Styled on .msg-BODY, not .msg. `.msg` is a transparent flex container
+     with no border — the visible bubble is .msg-body (see
+     `.msg.user .msg-body`), and .msg-label sits OUTSIDE it, above, on the
+     feed background. Painting .msg therefore drew a surface-coloured strip
+     behind the PEER label that no other bubble has, while `border-color`
+     did nothing at all because .msg has no border-width or border-style.
+     Tinting the body is what every other bubble variant does. */
+  .msg.user.from-peer .msg-body {
+    background: var(--surface);
+    border-color: var(--accent);
+  }
   .msg.user.from-peer .msg-label .role-name { color: var(--accent); }
   .msg.user.from-peer .msg-label .agent-title { color: var(--accent); }
 

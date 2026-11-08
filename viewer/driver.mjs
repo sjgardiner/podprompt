@@ -1576,8 +1576,36 @@ const server = createServer(async (req, res) => {
     try {
       const childState = sessions.get(childId);
       const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
-      if (childState?.turnInFlight) childState.abortRequested = true;
-      backend.abort(childId, childState);
+      // A native claude-code sub-agent has no session, process or
+      // abortController of its own — it is a Task inside its parent's
+      // query, so the only way to stop it alone is the stopTask control on
+      // that parent's live query. Everything else (an opencode child, a
+      // future delegated session) IS a real session and aborts normally.
+      // Chosen by capability, not by trying one and falling back: abort()
+      // returns nothing on either backend, so "did it work" cannot be read
+      // from it — an earlier version treated undefined as success and made
+      // the unsupported path unreachable.
+      let stopped;
+      if (typeof backend.stopSubAgent === "function" && rel.childKind === "native-task" && rel.parent) {
+        // The only mechanism that can reach a Task inside its parent's
+        // query. There is nothing to fall back to: abort() here would target
+        // a child session that does not exist and silently do nothing.
+        stopped = await backend.stopSubAgent(rel.parent, sessions.get(rel.parent), rel.native?.taskId);
+      } else {
+        // A real session of its own (an opencode child, or a delegated one),
+        // so the ordinary abort path applies.
+        if (childState?.turnInFlight) childState.abortRequested = true;
+        backend.abort(childId, childState);
+        stopped = true;
+      }
+      if (!stopped) {
+        // Said plainly rather than reporting a stop that did not happen —
+        // a roster row returning to "running" after a successful-looking
+        // click is worse than being told it is not supported here.
+        res.writeHead(501, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "this backend cannot stop a single sub-agent", reason: "unsupported" }));
+        return;
+      }
       upsertSubAgent(childId, { status: "killed" });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');

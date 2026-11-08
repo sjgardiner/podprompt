@@ -3131,15 +3131,12 @@ function renderRoster() {
     // Only a running sub-agent can be stopped, and stopping one leaves its
     // siblings and the parent turn alone — that is the whole point of a
     // per-row control rather than the turn-level Stop.
-    // Stoppable only where stopping actually works. An opencode sub-agent is
-    // a real session, so aborting it is the ordinary abort path. A
-    // claude-code one is a Task inside the parent's process with no session
-    // state and no abortController of its own — stopping it needs the SDK's
-    // stopTask control, which is not wired yet, so offering the button would
-    // be a lie. The row still shows live status; it just cannot be stopped
-    // individually, and the turn-level Stop kills it along with the turn.
-    const stoppable = sa.backend === 'opencode' || sa.childKind === 'delegated-session';
-    if ((sa.status === 'running' || sa.status === 'pending') && stoppable) {
+    // Offered for every running sub-agent now that claude-code's Task has a
+    // stop path too (the stopTask control on the parent's live query; an
+    // opencode child is a real session and aborts normally). The driver
+    // answers 501 if a backend turns out not to support it, and the button
+    // says so rather than leaving a row that looks stopped and is not.
+    if (sa.status === 'running' || sa.status === 'pending') {
       const stop = document.createElement('button');
       stop.className = 'roster-stop';
       stop.textContent = 'Stop';
@@ -3148,10 +3145,15 @@ function renderRoster() {
         e.stopPropagation();
         stop.disabled = true;
         try {
-          await fetch(`${driverBase}/abort-subagent`, {
+          const res = await fetch(`${driverBase}/abort-subagent`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionId: sa.agentId }),
           });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            stop.textContent = body.reason === 'unsupported' ? "can't stop" : 'failed';
+            stop.title = body.error || 'Could not stop this sub-agent.';
+          }
         } catch { /* the next refresh will show the real state */ }
         refreshSubAgents();
       });

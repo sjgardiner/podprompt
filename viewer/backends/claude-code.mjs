@@ -1238,6 +1238,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
     async function consume(opts) {
       const q = query({ prompt: onePrompt(), options: opts });
+      // Held for the life of the turn so a per-sub-agent stop can reach it:
+      // stopTask is a control request on the live Query, and a sub-agent has
+      // no process or abortController of its own to target. The bootstrap
+      // retry builds a second query, which replaces this — always the one
+      // actually streaming.
+      state.liveQuery = q;
       const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
         if (msg.type === "system" && msg.subtype === "init") {
@@ -1481,6 +1487,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       }
     } finally {
       if (state.abortController === abortController) state.abortController = null;
+      // The query is finished; a stopTask against it from here on would
+      // target a closed control channel.
+      state.liveQuery = null;
       state.turnInFlight = false;
       // A completed turn may have run on a different model (state.model) than
       // the session's previous one — drop the cached derivation so the next
@@ -1502,6 +1511,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
     abort(sessionId, state) {
       state?.abortController?.abort();
+    },
+
+    // Stop ONE sub-agent without touching the turn that spawned it. The
+    // parent's state and the sub-agent's task id are both needed: a
+    // claude-code sub-agent runs as a Task inside the parent's process, so
+    // there is nothing session-shaped to abort — only this control request.
+    // Returns whether the request was actually dispatched, so the caller can
+    // tell "stopped" from "this build cannot".
+    async stopSubAgent(parentSessionId, parentState, taskId) {
+      const q = parentState?.liveQuery;
+      if (!q || typeof q.stopTask !== "function" || !taskId) return false;
+      try {
+        await q.stopTask(taskId);
+        return true;
+      } catch (e) {
+        console.error(`[claude-code] stopTask(${taskId}) failed:`, e.message);
+        return false;
+      }
     },
 
     getKnownCommands() {

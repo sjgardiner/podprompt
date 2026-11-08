@@ -407,6 +407,13 @@
      icon buttons and three status widgets, and this UI has no generic panel
      menu — panels are opened BY header buttons — so a second slot for the
      same feature was not affordable. */
+  /* A turn nobody typed. Tinted differently from a user bubble so it is
+     obvious at a glance when scrolling back weeks later — the failure this
+     prevents is silent: misremembering an agent-caused turn as your own. */
+  .msg.user.from-peer { background: var(--surface); border-color: var(--accent); }
+  .msg.user.from-peer .msg-label .role-name { color: var(--accent); }
+  .msg.user.from-peer .msg-label .agent-title { color: var(--accent); }
+
   #messaging-btn { position: relative; font-size: 13px; padding: 2px 8px; }
   /* The badge counts ONLY stuck mail — never messages queued behind a busy
      target. Transient queueing resolves in seconds; a badge that counted it
@@ -878,6 +885,9 @@
     max-width: 220px;
   }
   #controls-row select.show { display: inline-block; }
+  /* The model/mode pickers stay hidden until their options load; this one's
+     options are fixed, so it is ready immediately. */
+  #controls-row select#budget-select { display: inline-block; }
   #auto-approve-row {
     display: flex;
     align-items: center;
@@ -1536,6 +1546,11 @@
       <label id="auto-approve-row" title="Automatically approve all tool permission requests for this session, until turned back off">
         <input type="checkbox" id="auto-approve-toggle"> Auto-approve
       </label>
+      <select id="budget-select" title="How far automatic work started by this session may go">
+        <option value="short">✉ Short</option>
+        <option value="normal">✉ Normal</option>
+        <option value="long">✉ Long</option>
+      </select>
     </div>
   </div>
 
@@ -1593,7 +1608,24 @@ const TOOL_NAME_RE = /^`([^`\n]+)`[ \t]*/;
 function splitToolName(text) {
   const m = TOOL_NAME_RE.exec(text || '');
   if (!m) return null;
-  return { name: m[1], rest: text.slice(m[0].length) };
+  let name = m[1];
+  const rest = text.slice(m[0].length);
+  // MCP tools arrive wire-named as mcp__<server>__<tool>. That prefix is
+  // plumbing: it says nothing a reader wants and crowds out the part that
+  // does. "mcp__podprompt__message" becomes "message".
+  const mcp = /^mcp__[^_]+(?:_[^_]+)*__(.+)$/.exec(name);
+  if (mcp) name = mcp[1];
+  // A message or delegation reads far better with its target in the title,
+  // the same reason the tool name was lifted out of the body at all —
+  // otherwise a feed full of peer traffic is a column of identical labels.
+  if (name === 'message' || name === 'delegate') {
+    try {
+      const args = JSON.parse(rest.trim());
+      const target = name === 'message' ? args.to : (args.backend ? `${args.backend}` : null);
+      if (target) name = `${name} → ${target}`;
+    } catch { /* not JSON args — leave the plain name */ }
+  }
+  return { name, rest };
 }
 
 function renderToolBody(text) {
@@ -1917,6 +1949,31 @@ function insertFeedItem(wrap, insertTop) {
 // the same ts/model/rawText/render treatment; getOrCreate upserts by id, so a
 // batch entry that this tab already rendered (exact-triple duplicate) is a
 // no-op, and a double-delivered batch (a reconnect race) is harmless.
+// A turn that began with no user input is the single most confusing thing
+// peer messaging introduces: you watch a session finish, and seconds later it
+// starts talking again. So the bubble that caused it must never look like
+// something you typed. Reuses the established label + coloured-title
+// convention (MODEL/TOOL/AGENT) rather than inventing a new one.
+//
+// Peer messages and returning delegation results deliberately read the SAME
+// ("Peer"). The distinction is preserved in storage, so splitting them later
+// needs no migration — but in a busy session a second label is just noise.
+function applyOrigin(m, origin) {
+  if (!m || !origin || m.role !== 'user') return;
+  const [kind, who] = String(origin).split(/:(.+)/);
+  if (kind !== 'peer' && kind !== 'result' && kind !== 'delegate') return;
+  if (m.wrap) m.wrap.classList.add('from-peer');
+  if (m.roleNameEl) m.roleNameEl.textContent = kind === 'delegate' ? 'Delegated' : 'Peer';
+  if (m.titleEl && who) m.titleEl.textContent = who;
+  m.fromPeer = true;
+  // The "[message from @x]" line exists for the MODEL, which has no label to
+  // read. Once the label says it, repeating it in the body is noise.
+  if (typeof m.rawText === 'string') {
+    const stripped = m.rawText.replace(/^\[(?:message|delegated) from [^\]]+\]\n+/, '');
+    if (stripped !== m.rawText) { m.rawText = stripped; renderBody(m); }
+  }
+}
+
 function applyHistoryEntry(entry, insertTop) {
   if (!entry || entry.type !== 'message') return;
   const m = getOrCreate(entry.id, entry.role, insertTop);
@@ -1936,6 +1993,7 @@ function applyHistoryEntry(entry, insertTop) {
   if (m.role === 'assistant' && entry.text && entry.text.trim()) m.hasVisibleContent = true;
   m.el.classList.remove('streaming');
   renderBody(m);
+  applyOrigin(m, entry.origin);
   // A late history batch is older content front-inserted above where the user
   // is — don't yank the viewport down to it. Initial connect replays (the
   // 'history' path) keep scrolling as before.
@@ -2011,13 +2069,15 @@ function getOrCreate(id, role, insertTop) {
     return msgs[id];
   }
 
-  wrap.innerHTML = `<div class="msg-label">${labelFor(role)}<span class="model"></span><span class="ts"></span></div>
+  wrap.innerHTML = `<div class="msg-label"><span class="role-name">${labelFor(role)}</span> <span class="agent-title"></span><span class="model"></span><span class="ts"></span></div>
                     <div class="msg-body${role === 'assistant' ? ' streaming' : ''}"></div>
                     ${role === 'assistant' ? '<button class="msg-copy-btn">copy</button>' : ''}`;
   insertFeedItem(wrap, insertTop);
 
   const body = wrap.querySelector('.msg-body');
-  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), modelEl: wrap.querySelector('.model'), rawText: '', ts: null, role, revealTimer: null, permId: id, model: null, hasVisibleContent: false };
+  msgs[id] = { el: body, tsEl: wrap.querySelector('.ts'), modelEl: wrap.querySelector('.model'),
+    titleEl: wrap.querySelector('.agent-title'), roleNameEl: wrap.querySelector('.role-name'), wrap,
+    rawText: '', ts: null, role, revealTimer: null, permId: id, model: null, hasVisibleContent: false };
 
   const copyBtn = wrap.querySelector('.msg-copy-btn');
   if (copyBtn) {
@@ -2562,7 +2622,7 @@ function connect() {
   // Complete messages, broadcast live by driver.mjs
   es.addEventListener('message', e => {
     const msg = JSON.parse(e.data);
-    const { id, role, text, ts, model } = msg;
+    const { id, role, text, ts, model, origin } = msg;
     const entry = getOrCreate(id, role);
     entry.ts = ts;
     // A message with no model must not erase one the bubble already has.
@@ -2583,6 +2643,7 @@ function connect() {
       entry.rawText = text;
       entry.el.classList.remove('streaming');
       renderBody(entry);
+      applyOrigin(entry, origin);
       scrollBottom();
       // A permission/question badge can appear or clear on this same
       // message (the initial ask, or its resolution rebroadcast) — poke
@@ -2873,6 +2934,7 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   // sub-agents in between would be wrong.
   subAgents = [];
   currentSessionIsChild = knownChild;
+  loadBudgetPreset(sessionId);
   currentSessionParent = knownParent;
   applySubAgentBanner();
   renderRoster();
@@ -3324,6 +3386,37 @@ document.addEventListener('click', (e) => {
   }
 });
 psResume.addEventListener('click', () => messagingPost('/pause', { paused: false }));
+
+// Budget preset for this session. One control, collapsed to the preset name,
+// carrying the same envelope as the panel button so it reads as part of the
+// messaging subsystem rather than another model setting.
+//
+// Deliberately quiet: it shows only the preset name, never a live counter.
+// Most turns spend no budget at all, and a number ticking during ordinary
+// chat is exactly the kind of signal people stop seeing — the same reason
+// the panel badge counts only genuinely stuck mail.
+const budgetSelect = document.getElementById('budget-select');
+
+async function loadBudgetPreset(sessionId) {
+  if (!driverBase || !sessionId) return;
+  try {
+    const d = await fetch(`${driverBase}/chains?session=${encodeURIComponent(sessionId)}`).then(r => r.json());
+    if (d.sessionPreset && d.sessionPreset.preset !== 'custom') {
+      budgetSelect.value = d.sessionPreset.preset;
+    }
+  } catch { /* a failed poll must not blank a control the user may need */ }
+}
+
+budgetSelect.addEventListener('change', async () => {
+  if (!driverBase || !currentSessionId) return;
+  try {
+    await fetch(`${driverBase}/budget-preset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, preset: budgetSelect.value }),
+    });
+  } catch { /* the next load re-reads the real value */ }
+});
 
 const rosterBtn = document.getElementById('roster-btn');
 const rosterPanel = document.getElementById('roster-panel');

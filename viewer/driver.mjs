@@ -857,8 +857,15 @@ function maybeDrainInbox(sessionId) {
   if (!sessionIsIdle(sessionId)) return false;
   const group = inbox.nextDrainGroup(sessionId);
   if (!group.length) return false;
+  // One sender gets named; several become "peer" without a handle, since no
+  // single name would be honest about a coalesced delivery.
+  const senders = new Set(group.map((e) => describeSender(e)));
+  const originLabel = senders.size === 1
+    ? `${group[0].kind === "result" ? "result" : "peer"}:${[...senders][0]}`
+    : "peer";
   const started = startTurn(sessionId, composeDelivery(group), {
     source: "peer",
+    origin: originLabel,
     chainId: group[0].chainId,
   });
   console.log(`[driver] drain -> ${sessionId}: ${group.length} msg(s), startTurn=${JSON.stringify(started)}`);
@@ -1126,6 +1133,7 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   const waiter = awaitTurnEnd(childId);
   const started = startTurn(childId, prompt, {
     source: "delegate",
+    origin: `delegate:@${peers.get(fromSessionId)?.handle || fromSessionId}`,
     chainId,
     backendId: backend,
   });
@@ -1924,7 +1932,7 @@ reportAbandonedApprovals();
 // `origin` so a transcript can say who actually asked.
 function startTurn(sessionId, promptText, {
   source = "human", explicitCwd, backendId,
-  chainId = null, preset = null, custom = null,
+  chainId = null, preset = null, custom = null, origin = null,
 } = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
   if (state.turnInFlight) {
@@ -1957,6 +1965,10 @@ function startTurn(sessionId, promptText, {
   }
   state.chainId = chain.id;
   state.fanoutThisTurn = 0;
+  // C10: who caused this turn to exist. Carried onto the user bubble so a
+  // transcript can never be ambiguous about whether a human typed something
+  // — which matters most for turns that begin with no user input at all.
+  state.turnOrigin = origin || (source === "human" ? null : source);
   // Deliberately not awaited: a turn runs for minutes and the caller (an
   // HTTP handler, a delegating tool) must not be held open for it.
   runTurn(sessionId, promptText, { source }).catch((e) =>

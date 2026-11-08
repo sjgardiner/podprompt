@@ -677,7 +677,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const emittedIds = new Set();
 
     const userMsgUuid = randomUUID();
-    broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
+    broadcast(sessionId, "user", promptText, userMsgUuid, null, null, state.turnOrigin);
     emittedIds.add(userMsgUuid);
 
     // partID -> accumulated text, so message.part.delta's incremental

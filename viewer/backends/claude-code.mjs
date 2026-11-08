@@ -1010,7 +1010,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const seed = state.pendingSeed || null;
     state.pendingSeed = null;
     const modelPrompt = seed ? `${seed}\n\n${promptText}` : promptText;
-    broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
+    broadcast(sessionId, "user", promptText, userMsgUuid, null, null, state.turnOrigin);
 
     function onePrompt() {
       // A fresh async generator per attempt: once iterated (even partially,

@@ -857,6 +857,13 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // posteriori with convertSessionMessages' own non-empty-block ordering.
     const announcedByType = { text: [], thinking: [] };
     let sawStreamEvents = false;
+    // Per-TYPE, because the fallback below needs to be per-type. A single
+    // whole-turn flag meant that if the CLI streamed text blocks but not
+    // thinking blocks, thinking was suppressed both ways: never streamed, and
+    // never re-broadcast from the complete message either, because the flag
+    // was already true. Thinking then existed on disk but never appeared
+    // live — which is exactly how it behaved.
+    const announcedStreamByType = { text: false, thinking: false };
     // The model for the message currently streaming. Captured here because
     // this is the ONLY place it is known in time: modelByUuid is filled from
     // the complete assistant message, which arrives AFTER its blocks have
@@ -902,6 +909,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // Record the bubble's id now that it actually exists (a block that
           // never produces visible text never announces and never gets here).
           announcedByType[entry.type].push(entry.id);
+          // Recorded when a bubble is genuinely created, not at
+          // content_block_start: a block that never produces visible content
+          // announces nothing, and must not suppress its own fallback.
+          announcedStreamByType[entry.type] = true;
           // Carrying the model here matches what the opencode backend
           // already does, and is what the viewer's stream_start handler
           // reads to label the bubble.
@@ -923,6 +934,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     return {
       handleStreamEvent,
       get sawStreamEvents() { return sawStreamEvents; },
+      // "Did a bubble of this type actually get streamed this turn?" — the
+      // question each fallback below needs to ask about ITS OWN type.
+      streamedType(type) { return !!announcedStreamByType[type]; },
       // Take (and empty) the announced ids of one type, in announced order —
       // called once per completed assistant message so each uuid's pairing is
       // built from exactly that message's own blocks. Best-effort: any
@@ -1353,9 +1367,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             // duplicate the bubble under a different id. Only fall back to
             // broadcasting them directly if streaming genuinely never
             // happened for this turn, so content is never silently dropped.
-            if (block.type === "text" && block.text && !streamTracker.sawStreamEvents) {
+            if (block.type === "text" && block.text && !streamTracker.streamedType("text")) {
               broadcast(sessionId, "assistant", block.text, msg.uuid, null, modelByUuid.get(msg.uuid));
-            } else if (block.type === "thinking" && block.thinking && !streamTracker.sawStreamEvents) {
+            } else if (block.type === "thinking" && block.thinking && !streamTracker.streamedType("thinking")) {
               broadcast(sessionId, "thinking", block.thinking, randomUUID(), null, null);
             } else if (block.type === "tool_use") {
               const msgModel = modelByUuid.get(msg.uuid) || null;

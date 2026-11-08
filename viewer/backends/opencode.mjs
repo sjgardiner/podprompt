@@ -793,7 +793,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // ...) — the closest OpenCode equivalent of Claude's toolName, shown
       // in the generic "Approve <toolName>?" card since these aren't
       // per-tool-call structured the way AskUserQuestion is.
-      const p = requestApproval(sessionId, "permission", perm.permission || "unknown", perm.metadata || {})
+      // Always offerable here: OpenCode's reply takes a scope ("once" |
+      // "always" | "reject"), so widening is available for every ask without
+      // the backend having to propose specific rules first.
+      const p = requestApproval(sessionId, "permission", perm.permission || "unknown", perm.metadata || {},
+        { canAlwaysAllow: true })
         .then((decision) => replyPermission(perm.id, decision));
       pendingApprovalPromises.push(p);
     }
@@ -950,9 +954,15 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
 
   async function replyPermission(requestID, decision) {
     try {
+      // OpenCode expresses "always allow" as a reply SCOPE rather than a
+      // separate rules payload: "once" | "always" | "reject". So the same
+      // user choice that becomes updatedPermissions on claude-code is just a
+      // different word here, and PodPrompt doesn't have to remember a
+      // decision the backend would be unaware of.
+      const reply = decision?.allow ? (decision.always ? "always" : "once") : "reject";
       await api(`/permission/${requestID}/reply`, {
         method: "POST",
-        body: JSON.stringify({ reply: decision?.allow ? "once" : "reject" }),
+        body: JSON.stringify({ reply }),
         timeoutMs: 5000,
       });
     } catch (e) {

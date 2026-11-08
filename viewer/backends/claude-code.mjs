@@ -661,9 +661,28 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         return { behavior: "allow", updatedInput: toolInput };
       }
 
-      const decision = await requestApproval(sessionId, "permission", toolName, toolInput);
+      // options.suggestions is the SDK's own offer of rules that would stop
+      // this ask recurring this session ("Typically if presenting the user an
+      // option 'always allow' or similar, then this full set of suggestions
+      // should be returned as the updatedPermissions in the
+      // PermissionResult"). Passed to the browser so the card can offer that
+      // third choice; returned as updatedPermissions when the user takes it.
+      const suggestions = Array.isArray(options?.suggestions) ? options.suggestions : null;
+      const decision = await requestApproval(sessionId, "permission", toolName, toolInput, {
+        suggestions,
+        // Only offerable when the SDK actually proposed rules for this call;
+        // without them there is nothing to widen and "Always allow" would be
+        // a button that quietly behaved like a plain Allow.
+        canAlwaysAllow: !!(suggestions && suggestions.length),
+      });
       if (decision && decision.allow) {
-        return { behavior: "allow", updatedInput: toolInput };
+        return {
+          behavior: "allow",
+          updatedInput: toolInput,
+          ...(decision.always && suggestions && suggestions.length
+            ? { updatedPermissions: suggestions }
+            : {}),
+        };
       }
       return { behavior: "deny", message: (decision && decision.message) || "Denied by user" };
     };

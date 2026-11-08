@@ -244,12 +244,90 @@ const pendingApprovals = new Map(); // id -> { resolve, sessionId, kind, toolNam
 // one (answer is a string, or an array of strings for a multiSelect
 // question) — OpenCode's replyQuestion uses this instead of re-parsing
 // `text`. The backend decides which half it needs.
-function requestApproval(sessionId, kind, toolName, toolInput) {
+// `suggestions` is the backend's offer of a broader rule that would stop this
+// particular ask recurring — claude-code supplies PermissionUpdate[] on
+// canUseTool's options, opencode expresses the same idea as a reply scope.
+// Passing it through is what lets the card offer "Always allow" instead of
+// forcing a choice between answering every single prompt and auto-approving
+// everything, which is the only middle ground a tool-heavy sub-agent run
+// makes bearable.
+// The two backends arrive at the same capability differently, so it is
+// declared rather than inferred: claude-code only supports it when the SDK
+// actually suggested rules for this call, while opencode supports it for
+// every ask (its reply takes a scope). Inferring from `suggestions` alone
+// would silently hide the button on every opencode permission.
+function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
+  const { suggestions = null, canAlwaysAllow = false } = opts;
   const id = randomUUID();
   return new Promise((resolve) => {
-    pendingApprovals.set(id, { resolve, sessionId, kind, toolName, toolInput });
-    broadcast(sessionId, "permission", JSON.stringify({ kind, toolName, toolInput }), id);
+    pendingApprovals.set(id, {
+      resolve, sessionId, kind, toolName, toolInput,
+      suggestions: suggestions || null,
+      canAlwaysAllow: !!canAlwaysAllow,
+      askedAt: nowIso(),
+    });
+    persistPendingApprovals();
+    // A turn parked on a human is NOT a turn that is working, and the
+    // browser has had no way to tell the two apart — both looked like
+    // turnInFlight, so the UI spun a "thinking" indicator at a session that
+    // was in fact waiting on the user. Announced explicitly so the state is
+    // visible without inferring it from the presence of a card.
+    broadcastStatus(sessionId, { type: "awaiting_input", kind, toolName });
+    broadcast(sessionId, "permission", JSON.stringify({
+      kind, toolName, toolInput,
+      ...(canAlwaysAllow ? { canAlwaysAllow: true } : {}),
+    }), id);
   });
+}
+
+// ── Pending-approval sidecar ─────────────────────────────────────────────
+// Not a resume mechanism: when the driver dies so does the promise the tool
+// call is parked on, and so does the CLI subprocess that cared about the
+// answer — neither backend can resume a turn mid-tool-call, so the turn is
+// genuinely lost. This exists so the loss is EXPLICABLE. The permission card
+// is PodPrompt-synthesized and lives only in server.py's in-memory log, so
+// without this a reloaded session shows a tool bubble that simply stops,
+// which reads as a bug rather than as "you were asked something and never
+// answered".
+const PENDING_APPROVALS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-pending-approvals.json");
+
+function persistPendingApprovals() {
+  const out = {};
+  for (const [id, p] of pendingApprovals) {
+    out[id] = { sessionId: p.sessionId, kind: p.kind, toolName: p.toolName, askedAt: p.askedAt };
+  }
+  try {
+    writeFileSync(`${PENDING_APPROVALS_FILE}.tmp`, JSON.stringify(out));
+    renameSync(`${PENDING_APPROVALS_FILE}.tmp`, PENDING_APPROVALS_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write pending-approvals file:", e.message);
+  }
+}
+
+// Read once at startup: anything still recorded belongs to a turn that died
+// with the previous process, so it is reported to the browser as abandoned
+// and then cleared. Doing this eagerly (rather than lazily on first connect)
+// keeps the file honest about the CURRENT process's state.
+function reportAbandonedApprovals() {
+  let prior;
+  try {
+    prior = JSON.parse(readFileSync(PENDING_APPROVALS_FILE, "utf8"));
+  } catch {
+    return; // nothing recorded, or unreadable — nothing to explain
+  }
+  const entries = Object.entries(prior || {});
+  if (!entries.length) return;
+  for (const [, p] of entries) {
+    if (!p?.sessionId) continue;
+    broadcast(p.sessionId, "tool",
+      `*(a ${p.kind === "question" ? "question" : "permission request"}${p.toolName ? ` for \`${p.toolName}\`` : ""} was still waiting when this session ended — the turn did not complete)*`,
+      randomUUID(), null, null);
+  }
+  console.log(`[driver] reported ${entries.length} abandoned approval(s) from a previous process`);
+  try {
+    writeFileSync(`${PENDING_APPROVALS_FILE}.tmp`, "{}");
+    renameSync(`${PENDING_APPROVALS_FILE}.tmp`, PENDING_APPROVALS_FILE);
+  } catch { /* best effort */ }
 }
 
 // Returns which *kind* of decision (if any) is waiting on the user for this
@@ -287,13 +365,22 @@ function pendingKindForSession(sessionId) {
 // agnostic: called from the shared runTurn wrapper below regardless of
 // which backend ran the turn.
 function expirePendingApprovals(sessionId) {
+  let expired = 0;
   for (const [id, pending] of pendingApprovals) {
     if (pending.sessionId !== sessionId) continue;
     pendingApprovals.delete(id);
+    expired += 1;
     broadcast(sessionId, "permission", JSON.stringify({
       kind: pending.kind, toolName: pending.toolName, toolInput: pending.toolInput,
       resolved: true, resolvedText: "This request expired (the turn ended without an answer).",
     }), id);
+  }
+  if (expired) {
+    persistPendingApprovals();
+    // Nothing is waiting on the user here any more, whatever the UI last
+    // heard. Sent unconditionally rather than only when a card was visible,
+    // so a stale "waiting on you" indicator can't outlive the turn.
+    broadcastStatus(sessionId, { type: "awaiting_input", kind: null });
   }
 }
 
@@ -1072,6 +1159,12 @@ function pollAccountUsageForAllBackends() {
 pollAccountUsageForAllBackends();
 setInterval(pollAccountUsageForAllBackends, PLAN_USAGE_POLL_INTERVAL_MS);
 
+// Anything still recorded as pending belongs to a turn that died with the
+// previous process. Reported now so a reloaded session explains itself
+// instead of showing a tool bubble that simply stops. Deliberately after the
+// backends exist, so the broadcast path is live.
+reportAbandonedApprovals();
+
 // ── Drive one turn (backend-agnostic wrapper) ───────────────────────────
 // Delegates the actual work to state.backend.runTurn — this wrapper only
 // owns the bookkeeping that must happen identically regardless of which
@@ -1221,7 +1314,38 @@ const server = createServer(async (req, res) => {
     // report false for a session whose flag is still parked, silently
     // un-ticking a box the user already ticked (and confirmed) the moment
     // they switched away and back, or on any SSE reconnect.
-    res.end(JSON.stringify({ inFlight: !!state?.turnInFlight, autoApprove: effectiveAutoApprove(sessionId, state) }));
+    // awaitingInput is reported alongside inFlight, not folded into it: a
+    // turn parked on a permission is in flight but is not working, and the
+    // browser needs to say "waiting for you" rather than spin a thinking
+    // indicator. Also the resync path for the same reason autoApprove is —
+    // awaiting_input is an ephemeral status event, so a tab that connects
+    // mid-park would otherwise never learn about it.
+    res.end(JSON.stringify({
+      inFlight: !!state?.turnInFlight,
+      awaitingInput: sessionId ? pendingKindForSession(sessionId) : null,
+      isChild: sessionId ? isChildSession(sessionId) : false,
+      parentSessionId: sessionId ? parentOfSession(sessionId) : null,
+      autoApprove: effectiveAutoApprove(sessionId, state),
+    }));
+    return;
+  }
+
+  // Every outstanding ask across every session, for a global "N waiting on
+  // you" indicator. Without it the browser can only discover a parked
+  // approval by already looking at that session — which is exactly the case
+  // that goes unnoticed, since a sub-agent's card lives in a child session
+  // the user may never have opened.
+  if (req.method === "GET" && path === "/pending-approvals") {
+    const out = [];
+    for (const [id, p] of pendingApprovals) {
+      out.push({
+        id, sessionId: p.sessionId, kind: p.kind, toolName: p.toolName,
+        askedAt: p.askedAt || null,
+        parentSessionId: parentOfSession(p.sessionId),
+      });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ pending: out, viewers: viewerLiveness.viewers }));
     return;
   }
 
@@ -1757,6 +1881,13 @@ const server = createServer(async (req, res) => {
       return;
     }
     pendingApprovals.delete(body.id);
+    persistPendingApprovals();
+    // Clear the parked-on-a-human state as soon as this session has nothing
+    // else outstanding. Checked rather than assumed because a turn can have
+    // more than one ask open at a time.
+    if (!pendingKindForSession(pending.sessionId)) {
+      broadcastStatus(pending.sessionId, { type: "awaiting_input", kind: null });
+    }
 
     // Persist the resolution server-side, not just in whichever browser tab
     // clicked the button: the original permission bubble's "resolved"/
@@ -1768,7 +1899,7 @@ const server = createServer(async (req, res) => {
     // resolved.
     const resolvedText = typeof body.answer === "string"
       ? `Answered: ${body.answer}`
-      : (body.allow ? "Allowed" : "Denied");
+      : (body.allow ? (body.always ? "Always allowed" : "Allowed") : "Denied");
     broadcast(pending.sessionId, "permission", JSON.stringify({
       kind: pending.kind, toolName: pending.toolName, toolInput: pending.toolInput,
       resolved: true, resolvedText,
@@ -1792,7 +1923,18 @@ const server = createServer(async (req, res) => {
         structured: Array.isArray(body.answers) ? body.answers : null,
       });
     } else {
-      pending.resolve({ allow: !!body.allow, message: body.message });
+      // `always` asks the backend to widen its own rules so this ask stops
+      // recurring, rather than PodPrompt remembering a decision the backend
+      // doesn't know about. Both support it natively: claude-code takes the
+      // PermissionUpdate[] it suggested back as updatedPermissions, opencode
+      // takes a reply scope of "always". The suggestions ride along so the
+      // backend doesn't have to re-derive them.
+      pending.resolve({
+        allow: !!body.allow,
+        message: body.message,
+        always: !!body.always && !!body.allow,
+        suggestions: pending.suggestions || null,
+      });
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end('{"ok":true}');

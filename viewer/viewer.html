@@ -299,6 +299,21 @@
     max-width: 100%;
     box-sizing: border-box;
   }
+  /* Global "something is waiting on you" indicator. Hidden unless there is
+     actually something, so the header is unchanged in the normal case. It
+     exists because a parked approval is otherwise only discoverable by
+     already looking at that session — and a sub-agent's card lives in a
+     child session the user may never have opened. */
+  #pending-approvals-btn {
+    display: none;
+    background: var(--warn-bg, #3a2a08);
+    border-color: var(--warn-border, #7a5200);
+    color: var(--warn-fg, #ffd980);
+    font-size: 12px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+  #pending-approvals-btn.show { display: block; }
   .settings-row.disabled label { opacity: .45; }
   /* Explains why notifications are unavailable or blocked. Hidden unless it
      has something to say, so the group stays as compact as the others when
@@ -1176,6 +1191,7 @@
       <div id="status-dot"></div>
       <span id="status-label">connecting…</span>
     </div>
+    <button id="pending-approvals-btn" title="Approvals waiting on you"></button>
     <button id="export-btn" title="Export conversation as Markdown">⬇</button>
     <button id="settings-btn" title="Settings">⚙</button>
   </header>
@@ -2138,12 +2154,34 @@ function renderPermissionCard(entry) {
       renderPermissionCard(entry);
     });
 
+    // Offered only when the backend said it can actually widen its own rules
+    // for this ask (canAlwaysAllow). Without that, the button would behave
+    // identically to Allow while implying it had done something lasting.
+    // This is the middle ground between answering every prompt and the
+    // all-or-nothing Auto-approve checkbox — the one that makes a
+    // tool-heavy sub-agent run bearable without disabling review entirely.
+    let alwaysBtn = null;
+    if (data.canAlwaysAllow) {
+      alwaysBtn = document.createElement('button');
+      alwaysBtn.className = 'perm-option-btn perm-allow';
+      alwaysBtn.textContent = 'Always allow';
+      alwaysBtn.title = 'Allow this, and stop asking for calls like it in this session';
+      alwaysBtn.addEventListener('click', async () => {
+        allowBtn.disabled = true; denyBtn.disabled = true; alwaysBtn.disabled = true;
+        const ok = await resolvePermission(entry.permId, { allow: true, always: true });
+        entry.resolved = true;
+        entry.resolvedText = ok ? 'Always allowed' : 'This request already expired.';
+        renderPermissionCard(entry);
+      });
+    }
+
     const denyBtn = document.createElement('button');
     denyBtn.className = 'perm-option-btn perm-deny';
     denyBtn.textContent = 'Deny';
     denyBtn.addEventListener('click', async () => {
       allowBtn.disabled = true;
       denyBtn.disabled = true;
+      if (alwaysBtn) alwaysBtn.disabled = true;
       const ok = await resolvePermission(entry.permId, { allow: false });
       entry.resolved = true;
       entry.resolvedText = ok ? 'Denied' : 'This request already expired.';
@@ -2151,6 +2189,7 @@ function renderPermissionCard(entry) {
     });
 
     actions.appendChild(allowBtn);
+    if (alwaysBtn) actions.appendChild(alwaysBtn);
     actions.appendChild(denyBtn);
     card.appendChild(actions);
   }
@@ -2415,8 +2454,9 @@ function connect() {
   // even if this tab reconnects mid-turn or another tab started it.
   es.addEventListener('status', e => {
     const s = JSON.parse(e.data);
+    if (s.type === 'awaiting_input') { setAwaitingInput(s.kind, s.toolName); refreshPendingApprovals(); }
     if (s.type === 'turn_start') {
-      setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen();
+      setTurnInFlight(true); setAwaitingInput(null); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen();
       // Arming here rather than in submitPrompt covers turns this tab did
       // not start itself (another tab, or a reconnect that lands mid-turn).
       armSession(currentSessionId);
@@ -2844,6 +2884,48 @@ notifySound.addEventListener('change', () => {
   settings.notifySound = notifySound.checked;
   saveSettings();
   if (notifySound.checked) primeAudio();
+});
+
+// ── Global pending-approval indicator ─────────────────────────────────────
+// Driven by the driver's /pending-approvals, refreshed on the same meta
+// pings the sessions panel uses. Clicking jumps to the oldest waiting ask —
+// switching session first if it belongs to another one, which is the common
+// case now that a sub-agent's card lives in its own child session.
+const pendingApprovalsBtn = document.getElementById('pending-approvals-btn');
+let pendingApprovalsList = [];
+
+async function refreshPendingApprovals() {
+  if (!driverBase) return;
+  try {
+    const res = await fetch(`${driverBase}/pending-approvals`);
+    if (!res.ok) return;
+    const data = await res.json();
+    pendingApprovalsList = Array.isArray(data.pending) ? data.pending : [];
+  } catch {
+    return; // transient; the next ping retries
+  }
+  renderPendingApprovals();
+}
+
+function renderPendingApprovals() {
+  const n = pendingApprovalsList.length;
+  pendingApprovalsBtn.classList.toggle('show', n > 0);
+  if (!n) return;
+  const elsewhere = pendingApprovalsList.filter((p) => p.sessionId !== currentSessionId).length;
+  pendingApprovalsBtn.textContent = n === 1 ? '1 waiting' : `${n} waiting`;
+  pendingApprovalsBtn.title = elsewhere
+    ? `${n} approval${n === 1 ? '' : 's'} waiting on you (${elsewhere} in another session) — click to go to the oldest`
+    : `${n} approval${n === 1 ? '' : 's'} waiting on you in this session`;
+}
+
+pendingApprovalsBtn.addEventListener('click', () => {
+  const oldest = pendingApprovalsList
+    .slice()
+    .sort((a, b) => String(a.askedAt || '').localeCompare(String(b.askedAt || '')))[0];
+  if (!oldest) return;
+  if (oldest.sessionId !== currentSessionId) viewSession(oldest.sessionId);
+  // Scrolling to the specific card is Phase 6's deep-link work; landing on
+  // the right session is already the hard part.
 });
 
 // ── Attention: desktop notifications, tab-title flag, sound ───────────────
@@ -3360,6 +3442,7 @@ async function loadDriverConfig() {
     resyncTurnStatus();
     loadModes();
     loadModels();
+    refreshPendingApprovals();
   } catch (e) {
     console.error('Failed to load /config:', e);
   }
@@ -3392,6 +3475,14 @@ function updateDefaultPromptPlaceholder(backend) {
 
 function updatePromptDisabled() {
   promptInput.disabled = turnInFlight || !!modelBlockReason;
+  if (awaitingInput) {
+    // Says what to DO, rather than just refusing. The card is in this feed
+    // (or, for a sub-agent, behind the pointer that links to it).
+    promptInput.placeholder = awaitingInput === 'question'
+      ? 'This turn is waiting on your answer above.'
+      : 'This turn is waiting on your approval above.';
+    return;
+  }
   if (modelBlockReason === 'unavailable') {
     promptInput.placeholder = 'Model unavailable — pick a different model, or wait for it to reconnect.';
   } else if (modelBlockReason === 'unreachable') {
@@ -3409,9 +3500,29 @@ function setModelBlockReason(reason) {
 
 function setTurnInFlight(inFlight) {
   turnInFlight = inFlight;
+  if (!inFlight) awaitingInput = null; // a finished turn cannot still be waiting on you
   updatePromptDisabled();
   sendBtn.classList.toggle('hide-for-stop', inFlight);
   stopBtn.classList.toggle('show', inFlight);
+}
+
+// "The model is working" and "the agent is parked on a human" were both just
+// turnInFlight, so a session waiting on YOU showed a thinking indicator and
+// refused new prompts with a generic message. They are different states with
+// different remedies, and only one of them resolves on its own.
+let awaitingInput = null; // null | 'permission' | 'question'
+function setAwaitingInput(kind, toolName) {
+  awaitingInput = kind || null;
+  if (awaitingInput) {
+    setTurnIndicator(kind === 'question'
+      ? 'Waiting for your answer…'
+      : `Waiting for your approval${toolName ? ` — \`${toolName}\`` : ''}…`);
+  } else if (turnInFlight) {
+    setTurnIndicator('Thinking…'); // back to actually working
+  } else {
+    setTurnIndicator(null);
+  }
+  updatePromptDisabled();
 }
 
 // Defense-in-depth: turn_start/turn_end are ephemeral SSE broadcasts, not
@@ -3429,6 +3540,10 @@ async function resyncTurnStatus() {
     // turn_end would arrive unarmed and pass silently, which is precisely
     // the long-running-turn case the notification exists for.
     if (data.inFlight) armSession(currentSessionId);
+    // awaiting_input is an ephemeral status event, so a tab that connects
+    // while a turn is already parked would never hear about it otherwise —
+    // the same reason autoApprove is resynced from here.
+    setAwaitingInput(data.awaitingInput || null);
     autoApproveToggle.checked = !!data.autoApprove;
     autoApproveRow.classList.toggle('active', !!data.autoApprove);
   } catch (e) {
@@ -4182,7 +4297,13 @@ function pokeSessionsListIfOpen() {
 let metaEventSource = null;
 let metaRetryTimer = null;
 function metaSubscriptionWanted() {
-  return sessionsPanel.classList.contains('open') || settings.notify;
+  // Now unconditional. Three subscribers depend on it — the sessions panel
+  // while open, desktop notifications when enabled, and the global
+  // pending-approval indicator, which has to be right whether or not either
+  // of the other two is active. The cost is one held connection (and one
+  // server.py thread) per tab for the page's lifetime, which is the same
+  // tradeoff the per-session /events connections already make.
+  return true;
 }
 function startMetaSubscription() {
   stopMetaSubscription();
@@ -4219,9 +4340,12 @@ function startMetaSubscription() {
 // delivered the same thing with a richer payload, and acting on both would
 // announce every turn twice.
 function handleMetaChange(e) {
-  if (!settings.notify) return;
   let m;
   try { m = JSON.parse(e.data); } catch { return; }
+  // The global indicator tracks every session, so it refreshes regardless of
+  // whether notifications are on — unlike the notification routing below.
+  if (m && m.kind === 'permission') refreshPendingApprovals();
+  if (!settings.notify) return;
   if (!m || !m.sessionId || m.sessionId === currentSessionId) return;
   if (m.kind === 'turn_start') { armSession(m.sessionId); return; }
   if (m.kind === 'turn_end') { notifyTurnEnd(m.sessionId, m.detail); return; }

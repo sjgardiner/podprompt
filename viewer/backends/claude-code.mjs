@@ -28,6 +28,32 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
+// Why this exists: Claude Code ships its own always-present SendMessage and
+// ListAgents, which address the HARNESS's agent sessions rather than
+// PodPrompt's. Two tools that both plausibly mean "message another agent" is
+// a coin flip, and live runs showed the model losing it twice — it reported
+// "No agent named worker is reachable" while our tool sat unexamined behind
+// tool search.
+//
+// Naming alone did not fix that. This does, because it names our tools
+// explicitly, which is enough for the model to go and find them.
+const PODPROMPT_SYSTEM_PROMPT =
+  "PodPrompt environment: this session runs inside PodPrompt, alongside the other PodPrompt"
+  + " sessions listed in the user's PodPrompt window. Those sessions are separate from any"
+  + " sub-agents you spawn, and separate from any agent-messaging tools your harness"
+  + " provides for its own sessions.\n\n"
+  + "When the user refers to another session or chat, mentions an @handle, or asks you to"
+  + " message, ask, tell or delegate to one, use the PodPrompt tools:"
+  + " mcp__podprompt__list_sessions to find the @handle,"
+  + " mcp__podprompt__message_session to send to it, and"
+  + " mcp__podprompt__delegate_session to create a new session on another backend.\n\n"
+  // Answers "must it look up every time?" — no. Re-listing on every message
+  // would burn a round trip per send. Caching is safe because a stale handle
+  // fails loudly and actionably: delivery returns unknown-handle, which says
+  // to list again.
+  + "You only need to look a handle up once per conversation. Reuse handles you have already"
+  + " looked up; if one stops resolving, list again to get the current set.";
+
 export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
@@ -1100,7 +1126,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // Only this one is always loaded. It is the discovery entry point
           // and its description names the other two, so one tool's worth of
           // prompt buys access to all three.
-          { alwaysLoad: true },
         ),
         tool(
           "message_session",
@@ -1183,6 +1208,19 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
     const baseOpts = {
       cwd: state.cwd,
+      // A PLAIN STRING, deliberately, not { preset: "claude_code", append }.
+      // Measured against this SDK: omitting systemPrompt does NOT give the
+      // claude_code preset — an identical question cost 19,223 input tokens
+      // omitted versus 27,644 with the preset. Adopting the preset to get an
+      // `append` would therefore add ~8,400 tokens to EVERY turn. A plain
+      // string costs only its own length (19,232 for a short one), so this
+      // is "what PodPrompt already did, plus this paragraph".
+      //
+      // Phrased as a factual description of the environment rather than a
+      // bare directive: a probe model, shown an imperative version, stopped
+      // to flag it as a suspicious injected instruction. Sounding like
+      // product configuration is not cosmetic here.
+      ...(messagingServer ? { systemPrompt: PODPROMPT_SYSTEM_PROMPT } : {}),
       ...(messagingServer ? { mcpServers: { podprompt: messagingServer } } : {}),
       permissionMode: "default",
       maxTurns: 50,

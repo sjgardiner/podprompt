@@ -1124,6 +1124,13 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     // relation index at decision time (autoApproveForSession) rather than by
     // being copied here, so that un-ticking it on the parent takes effect
     // immediately rather than only for sub-agents spawned afterwards.
+    // A child's backend-native id lives in the relation index, which
+    // outlives the process — unlike the backend's own in-memory translation
+    // maps. Without this a child session resolved to nothing after a
+    // restart: its transcript came back empty, and prompting a promoted one
+    // created a brand-new session instead of resuming the real one.
+    const rel = sessionRelations[sessionId];
+    if (rel?.native?.realSessionId) s.nativeSessionId = rel.native.realSessionId;
     const parentId = parentOfSession(sessionId);
     if (parentId && !explicitCwd) {
       const parentState = sessions.get(parentId);

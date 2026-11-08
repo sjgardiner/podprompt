@@ -1308,8 +1308,17 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // — so a client-minted id needs an explicit create call, and the real id
   // it comes back with, before its first /prompt. Returns the real id to
   // use for the rest of this turn.
-  async function ensureSession(sessionId, cwd) {
+  async function ensureSession(sessionId, cwd, nativeSessionId) {
     if (clientToReal.has(sessionId)) return clientToReal.get(sessionId);
+    // Supplied by the driver from the durable relation index for a child
+    // session, whose PodPrompt id is a minted uuid that means nothing to
+    // opencode. Re-establishing the mapping here is what makes a child
+    // survive a restart instead of silently becoming a new empty session.
+    if (nativeSessionId) {
+      clientToReal.set(sessionId, nativeSessionId);
+      realToClient.set(nativeSessionId, sessionId);
+      return nativeSessionId;
+    }
     // Already a real id (e.g. the browser is resuming a session it learned
     // about from /sessions, not a freshly client-minted one) — nothing to
     // create.
@@ -1346,7 +1355,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     id: "opencode",
 
     async runTurn(sessionId, promptText, state) {
-      const realId = await ensureSession(sessionId, state.cwd);
+      const realId = await ensureSession(sessionId, state.cwd, state.nativeSessionId);
       // Cheap, and only matters after a restart — see reconcileChildren.
       // Not awaited into the turn's critical path: a slow or missing
       // /children endpoint must not delay the prompt itself.
@@ -1488,7 +1497,15 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       return { sessions: list, unreachableCount: 0, unreachableSessions: includeUnreachable ? [] : undefined };
     },
 
-    async getSessionHistory(sessionId) {
+    async getSessionHistory(sessionId, fallbackCwd, relation) {
+      // relation carries the child's real id across restarts; without it a
+      // minted child id matched neither branch below and the transcript came
+      // back empty.
+      const nativeId = relation?.native?.realSessionId || null;
+      if (nativeId && !clientToReal.has(sessionId)) {
+        clientToReal.set(sessionId, nativeId);
+        realToClient.set(nativeId, sessionId);
+      }
       if (!clientToReal.has(sessionId) && !sessionId.startsWith("ses_")) return [];
       const target = knownRealId(sessionId);
       let lastErr;

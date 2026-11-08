@@ -449,7 +449,7 @@ deploy_viewer() {
         exit 1
     fi
 
-    local required=(server.py viewer.html start-viewer.sh driver.mjs chains.mjs backends)
+    local required=(server.py viewer.html start-viewer.sh driver.mjs chains.mjs messaging.mjs backends)
     local missing=()
     local f
     for f in "${required[@]}"; do

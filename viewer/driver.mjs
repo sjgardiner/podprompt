@@ -76,6 +76,7 @@ import {
   createChains, BUDGET_PRESETS, DEFAULT_PRESET,
   FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH,
 } from "./chains.mjs";
+import { createPeers, createInbox, LOCAL_REALM } from "./messaging.mjs";
 
 function parseArgs(argv) {
   const args = {
@@ -749,6 +750,193 @@ const chains = createChains({
   onError: (e) => console.error("[driver] failed to write chains file:", e.message),
 });
 
+// ── Delivery core ────────────────────────────────────────────────────────
+// One internal entry point that both surfaces sit on: `delegate` (which
+// creates its target) and `message` (which addresses an existing one). The
+// core owns authorization, provenance and limits; the surfaces own only
+// what differs between them.
+//
+// Built against peer messaging's requirements first, deliberately. Peer
+// messaging is the harder caller — it makes a DIFFERENT session spend tokens
+// and run tools under ITS permissions — and a core shaped around the easier
+// caller would have to be bent back later.
+const peers = createPeers({
+  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-peers.json"),
+  onError: (e) => console.error("[driver] failed to write peers file:", e.message),
+});
+const inbox = createInbox({
+  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-inbox.json"),
+  onError: (e) => console.error("[driver] failed to write inbox file:", e.message),
+});
+
+// Who the driver believes the caller is. Local shims supply an identity
+// their runtime guarantees — a per-turn closure on Claude Code, OpenCode's
+// own `context.sessionID` — so a model never gets to assert who it is.
+// A future host/remote realm plugs in here rather than anywhere else.
+function localPrincipal(sessionId) {
+  return { realm: LOCAL_REALM, id: sessionId };
+}
+
+// Evaluated at DELIVERY time against the TARGET, never captured when the
+// sender decided to send: the user may have changed the target's settings
+// in between, and the newer intent is the real one.
+function authorizeDelivery(from, to) {
+  if (!from?.id || !to?.id) return { allowed: false, reason: "bad-principal" };
+  // Fails closed. Today only local→local exists, but this stays a real
+  // chokepoint so that adding a policy for other realms later is a change
+  // to one function rather than a refactor.
+  if (from.realm !== LOCAL_REALM || to.realm !== LOCAL_REALM) {
+    return { allowed: false, reason: "realm-unreachable" };
+  }
+  if (from.realm === to.realm && from.id === to.id) {
+    return { allowed: false, reason: "self-message" };
+  }
+  const peer = peers.get(to.id);
+  if (peer && peer.messageable === false) return { allowed: false, reason: "not-messageable" };
+  // NOTE what is deliberately absent: nothing here grants the target any of
+  // the sender's privilege. A peer edge never cascades auto-approve, so the
+  // target runs under exactly the posture it would have if the user had
+  // typed the same text into its own box.
+  return { allowed: true };
+}
+
+// A session is ready to receive only when it is doing nothing AND is not
+// blocked on a human. Draining into a session that is sitting on a
+// permission card would bury the card under a new turn.
+function sessionIsIdle(sessionId) {
+  const s = sessions.get(sessionId);
+  if (s?.turnInFlight) return false;
+  if (pendingKindForSession(sessionId)) return false;
+  return true;
+}
+
+function describeSender(entry) {
+  const handle = entry.fromHandle || peers.get(entry.from?.id)?.handle || null;
+  if (handle) return entry.from?.realm === LOCAL_REALM ? `@${handle}` : `@${entry.from.realm}/${handle}`;
+  return entry.from?.id || "unknown";
+}
+
+// Coalesced: N queued messages become ONE turn listing each with its
+// origin. Otherwise three senders cost the target three full turns, and the
+// third one answers a question the first already answered.
+function composeDelivery(entries) {
+  if (entries.length === 1) {
+    const e = entries[0];
+    return `[message from ${describeSender(e)}]\n\n${e.text}`;
+  }
+  const parts = entries.map((e) => `[message from ${describeSender(e)}]\n${e.text}`);
+  return `You have ${entries.length} messages waiting.\n\n${parts.join("\n\n---\n\n")}`;
+}
+
+function maybeDrainInbox(sessionId) {
+  // Global pause halts automatic delivery while leaving typed prompts
+  // working, so this check belongs here and not in startTurn.
+  if (chains.isGloballyPaused()) return false;
+  if (!sessionIsIdle(sessionId)) return false;
+  const group = inbox.nextDrainGroup(sessionId);
+  if (!group.length) return false;
+  const started = startTurn(sessionId, composeDelivery(group), {
+    source: "peer",
+    chainId: group[0].chainId,
+  });
+  if (!started.ok) {
+    // Left queued on purpose. A refusal here is a transient condition (the
+    // chain was paused between enqueue and drain, the session became busy),
+    // and the next idle moment retries.
+    return false;
+  }
+  inbox.markDelivered(group.map((e) => e.id));
+  return true;
+}
+
+function drainAllInboxes() {
+  for (const sessionId of inbox.sessionsWithPending()) maybeDrainInbox(sessionId);
+}
+
+// Conditions a user can lift. Anything else is a hard failure, not a thing
+// to park: there would be nothing to press.
+const PARKABLE_REASONS = new Set(["steps", "deadline", "global", "chain"]);
+
+// A parked message has NOT been charged, so releasing it has to re-attempt
+// the spend. Doing it here rather than at each call site is what stops a
+// release path from quietly starting a turn for free — which is what the
+// first cut of /extend-chain did.
+function releaseParked(entry) {
+  const spent = chains.spend(entry.chainId);
+  if (!spent.ok) {
+    // Still blocked, possibly for a different reason than before (extended
+    // past the step limit but the deadline has since passed). Re-label it so
+    // the UI explains the CURRENT obstacle rather than the original one.
+    if (PARKABLE_REASONS.has(spent.reason)) inbox.park(entry.id, spent.reason);
+    return { ok: false, reason: spent.reason };
+  }
+  inbox.release(entry.id);
+  return { ok: true };
+}
+
+// Every parked entry this condition was blocking. Used on resume and on
+// extend, so a lifted condition actually moves the mail it was holding.
+function releaseParkedFor(predicate) {
+  const released = [];
+  for (const e of inbox.stuck()) {
+    if (!predicate(e)) continue;
+    if (releaseParked(e).ok) released.push(e.id);
+  }
+  if (released.length) drainAllInboxes();
+  return released;
+}
+
+// The single delivery path. Returns a RECEIPT in every case — the sender is
+// always told what happened, because a silently dropped message is
+// indistinguishable to a model from a peer that chose not to answer, and it
+// responds to that by retrying.
+function deliver(toAddr, text, { from, kind = "peer", chainId }) {
+  const resolved = peers.resolve(toAddr);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason, to: toAddr };
+  const to = resolved.ref;
+
+  const auth = authorizeDelivery(from, to);
+  if (!auth.allowed) return { ok: false, reason: auth.reason, to };
+
+  const spent = chains.spend(chainId);
+  if (!spent.ok) {
+    // Parking is only meaningful for a condition the user can later LIFT:
+    // out of steps, past the deadline, or paused. A message naming a chain
+    // that does not exist has nothing to extend or resume, so parking it
+    // would leave permanently stuck garbage inflating the badge the user is
+    // supposed to trust. Those are rejected outright.
+    if (!PARKABLE_REASONS.has(spent.reason)) {
+      return { ok: false, reason: spent.reason, chainId };
+    }
+    // PARKED, not failed: the message becomes an inbox entry marked
+    // undelivered, which extending or resuming releases and ignoring costs
+    // nothing. The sender is still told immediately so it can wrap up
+    // rather than wait. No step is spent — the spend is re-attempted at
+    // release, so a parked message cannot be charged twice or charged for
+    // work that never happened.
+    const entry = inbox.enqueue({
+      to, from, fromHandle: peers.get(from.id)?.handle || null, text, kind, chainId,
+    });
+    inbox.park(entry.id, spent.reason);
+    broadcastStatus(to.id, { type: "inbox_changed" });
+    return { ok: false, reason: spent.reason, parked: true, entryId: entry.id, chainId };
+  }
+
+  const entry = inbox.enqueue({
+    to, from, fromHandle: peers.get(from.id)?.handle || null, text, kind, chainId,
+  });
+  const deliveredNow = maybeDrainInbox(to.id);
+  broadcastStatus(to.id, { type: "inbox_changed" });
+  return {
+    ok: true,
+    entryId: entry.id,
+    delivered: deliveredNow,
+    queued: !deliveredNow,
+    remaining: spent.remaining,
+    to,
+  };
+}
+
 // ── Creation lineage ─────────────────────────────────────────────────────
 // Deliberately separate from parentOfSession/depthOfSession. The parent edge
 // describes what a session may INHERIT (privilege, cascade) and promotion
@@ -1270,6 +1458,8 @@ function forgetSessionRelations(ids) {
   // Per-session budget defaults are keyed by session id too, so they would
   // otherwise outlive the sessions they describe.
   chains.forgetSessions(ids);
+  peers.forget(ids);
+  inbox.forgetSessions(ids);
 }
 
 function autoApproveForSession(sessionId) {
@@ -1550,6 +1740,14 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // not awaited: a slow/failed usage poll must never delay the turn's own
     // completion being reported back to the browser.
     pollAccountUsage(state.backend).catch((e) => console.error("[driver] post-turn pollAccountUsage failed:", e.message));
+    // A session that just went idle is exactly when queued mail can move.
+    // Deliberately after turn_end: the browser sees the turn finish, then
+    // sees the next one begin, rather than the two racing.
+    try {
+      maybeDrainInbox(sessionId);
+    } catch (e) {
+      console.error(`[driver] inbox drain failed for session ${sessionId}:`, e.message);
+    }
   }
 }
 
@@ -2229,6 +2427,19 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: result.reason }));
       return;
     }
+    // Resuming must actually move the mail that piled up while paused —
+    // otherwise "Resume" looks like it did nothing until something else
+    // happens to tick the drain.
+    if (!paused) {
+      // Resuming must move the mail the pause was holding, not just the mail
+      // that happened to be queued: messages that ARRIVED while paused were
+      // parked, and draining alone would leave them sitting there with the
+      // pause visibly lifted.
+      releaseParkedFor((e) => (body.chainId
+        ? e.chainId === body.chainId && e.parkedReason === "chain"
+        : e.parkedReason === "global"));
+      drainAllInboxes();
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       ok: true,
@@ -2256,8 +2467,157 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: result.reason }));
       return;
     }
+    // Extending is what RELEASES the messages that were parked for running
+    // out — the parked entry is the work waiting to resume, so topping up
+    // the chain without releasing them would be a button that appears to do
+    // nothing.
+    const released = releaseParkedFor((e) =>
+      e.chainId === body.chainId && (e.parkedReason === "steps" || e.parkedReason === "deadline"));
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, chain: chains.summary(result.chain) }));
+    res.end(JSON.stringify({ ok: true, chain: chains.summary(result.chain), released: released.length }));
+    return;
+  }
+
+  // ── Peers & inbox ─────────────────────────────────────────────────────
+  if (req.method === "GET" && path === "/peers") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ realm: LOCAL_REALM, peers: peers.list() }));
+    return;
+  }
+
+  if (req.method === "GET" && path === "/inbox") {
+    const sessionId = url.searchParams.get("session");
+    const entries = (sessionId
+      ? inbox.open().filter((e) => e.to?.id === sessionId || e.from?.id === sessionId)
+      : inbox.open()
+    ).map((e) => ({
+      ...e,
+      fromHandle: e.fromHandle || peers.get(e.from?.id)?.handle || null,
+      toHandle: peers.get(e.to?.id)?.handle || null,
+      chain: chains.summary(chains.get(e.chainId)),
+    }));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      entries,
+      // Only PARKED entries count as stuck. Transient queueing behind a busy
+      // target resolves in seconds, and a badge that counted it would
+      // flicker all day until the user stopped seeing it.
+      stuckCount: inbox.stuck().length,
+      globalPaused: chains.isGloballyPaused(),
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/inbox-action") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const { entryId, action } = body || {};
+    let result;
+    if (action === "discard") result = inbox.discard(entryId);
+    else if (action === "deliver-now") {
+      // Deliberate override: releases the entry without topping the chain
+      // up, so the user can let one message through without re-arming the
+      // work that produced it.
+      const entry = inbox.byId(entryId);
+      if (!entry) result = { ok: false, reason: "no-such-entry" };
+      else {
+        // A deliberate user override: it lets ONE message through without
+        // re-arming the work that produced it. It still charges a step when
+        // the chain can pay, so the budget keeps describing what actually
+        // ran; when the chain cannot pay, the user's explicit instruction
+        // wins and the release happens anyway.
+        const spent = chains.spend(entry.chainId);
+        result = inbox.release(entryId);
+        if (result.ok) maybeDrainInbox(entry.to?.id);
+        if (result.ok) result.charged = spent.ok;
+      }
+    } else result = { ok: false, reason: "unknown-action" };
+    if (!result.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: result.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, stuckCount: inbox.stuck().length }));
+    return;
+  }
+
+  // The HTTP face of deliver(). Claude Code's tools call deliver() directly
+  // in-process; the OpenCode plugin runs inside `opencode serve` and so has
+  // to come through here, carrying the session id ITS runtime supplied.
+  //
+  // PD10: `from` is presently taken on trust, like every other driver route.
+  // Phase 16 replaces that with authenticate(request) -> principal, at which
+  // point the plugin's shared secret identifies it as a local-realm caller
+  // and a bare curl stops working.
+  if (req.method === "POST" && path === "/deliver") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const fromId = body.from;
+    if (!fromId || !body.to) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"from and to are required"}');
+      return;
+    }
+    // The sender's own chain, unless one is named explicitly (delegation
+    // hands a child the chain it was created under). Never minted here —
+    // minting on delivery would make "send a message" a way to buy a fresh
+    // budget.
+    const chainId = body.chainId || sessions.get(fromId)?.chainId || null;
+    if (!chainId) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "no chain for sender", reason: "no-chain" }));
+      return;
+    }
+    const receipt = deliver(body.to, body.text || "", {
+      from: localPrincipal(fromId),
+      kind: body.kind === "result" ? "result" : "peer",
+      chainId,
+    });
+    res.writeHead(receipt.ok ? 200 : 409, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(receipt));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/peer-settings") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    if (!body.sessionId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"sessionId required"}');
+      return;
+    }
+    peers.ensure(body.sessionId, { title: body.title, backend: body.backend });
+    let result = { ok: true };
+    if (typeof body.handle === "string") result = peers.setHandle(body.sessionId, body.handle);
+    if (result.ok && typeof body.messageable === "boolean") {
+      result = peers.setMessageable(body.sessionId, body.messageable);
+    }
+    if (!result.ok) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: result.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, peer: peers.get(body.sessionId) }));
     return;
   }
 

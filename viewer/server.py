@@ -110,8 +110,20 @@ def broadcast_to(session_id: str, event: str, data: str):
 meta_clients: list[Queue] = []
 
 
-def broadcast_meta(session_id: str, kind: str):
-    payload = f"event: change\ndata: {json.dumps({'sessionId': session_id, 'kind': kind})}\n\n"
+def broadcast_meta(session_id: str, kind: str, detail: str | None = None, ref: str | None = None):
+    # `detail` refines `kind` for clients that act on the ping rather than
+    # just refetching the session list: "completed"/"aborted"/"error" for a
+    # turn_end, and for a permission either "resolved" or which flavour of
+    # ask it was ("permission"/"question"). The desktop-notification
+    # path needs both halves — notifying about a permission card that was
+    # merely answered, or reporting a crashed turn as a clean finish, is
+    # exactly the kind of wrong-cry that gets a notification feature switched
+    # off — and the sessions panel simply ignores it, as it always has.
+    # `ref` identifies the specific thing that changed (the permission card's
+    # message id); without it two approvals raised seconds apart look like one
+    # repeated event and the second — which the turn is blocked on — would be
+    # silently deduplicated away by the client.
+    payload = f"event: change\ndata: {json.dumps({'sessionId': session_id, 'kind': kind, 'detail': detail, 'ref': ref})}\n\n"
     dead = []
     with sessions_lock:
         for q in meta_clients:
@@ -434,9 +446,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/events-meta":
             # No session param, no history replay — this is a live-only
-            # "something changed somewhere, go refetch /sessions" channel,
-            # not a per-session message log. A tab only holds this open
-            # while its sessions panel is actually open.
+            # "something changed somewhere" channel, not a per-session message
+            # log. Two kinds of subscriber now: a tab with its sessions panel
+            # open (refetches /sessions on each ping) and a tab with desktop
+            # notifications enabled, which holds it open for the whole page
+            # lifetime — so unlike before, this is no longer a short-lived
+            # connection. Each one pins a thread in the blocking loop below,
+            # which is fine at the handful-of-tabs scale this serves but is
+            # worth remembering if that ever stops being true.
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -504,8 +521,20 @@ class Handler(BaseHTTPRequestHandler):
             # A permission/question card just appeared or got resolved (the
             # same role, rebroadcast with resolved:true) — either way, the
             # sessions-panel badge for this session may have just changed.
+            # Which of the two it was rides along as `detail`, since a client
+            # that notifies the user about a blocked turn must not fire again
+            # when the block clears. The text is driver.mjs's JSON blob; a
+            # malformed/unexpected payload just degrades to "asked", matching
+            # the pre-existing behaviour of treating any permission ping as
+            # worth a look (an unreadable card is reported as a plain
+            # "permission" ask rather than being dropped).
             if role == "permission":
-                broadcast_meta(session_id, "permission")
+                try:
+                    card = json.loads(text)
+                    detail = "resolved" if card.get("resolved") else (card.get("kind") or "permission")
+                except Exception:
+                    detail = "permission"
+                broadcast_meta(session_id, "permission", detail, msg_id)
 
         # Ephemeral UI-state signals (turn_start/turn_end/stream_delta/...) —
         # broadcast only, deliberately not appended to the message log: these
@@ -540,7 +569,9 @@ class Handler(BaseHTTPRequestHandler):
                     s["last_status"][payload["type"]] = payload
             broadcast_to(session_id, "status", json.dumps(payload))
             if payload.get("type") in ("turn_start", "turn_end"):
-                broadcast_meta(session_id, payload["type"])
+                # reason is present on turn_end only (driver.mjs classifies it
+                # centrally for both backends); turn_start carries none.
+                broadcast_meta(session_id, payload["type"], payload.get("reason"))
 
         elif path in ("/message", "/status"):
             self.send_response(400)

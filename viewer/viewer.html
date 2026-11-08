@@ -300,6 +300,17 @@
     box-sizing: border-box;
   }
   .settings-row.disabled label { opacity: .45; }
+  /* Explains why notifications are unavailable or blocked. Hidden unless it
+     has something to say, so the group stays as compact as the others when
+     everything is working. */
+  .settings-note {
+    display: none;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .settings-note.show { display: block; }
   .settings-group-title {
     font-size: 10px;
     font-weight: 600;
@@ -1312,6 +1323,17 @@
               </select>
             </label>
           </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-group-title">Notifications</div>
+          <div class="settings-row">
+            <label><span>Notify when a turn ends</span> <input type="checkbox" id="notify-toggle"></label>
+          </div>
+          <div class="settings-row" id="notify-sound-row">
+            <label><span>Play a sound</span> <input type="checkbox" id="notify-sound"></label>
+          </div>
+          <div class="settings-note" id="notify-note"></div>
         </div>
       </div>
     </div>
@@ -2333,7 +2355,17 @@ function connect() {
       // message (the initial ask, or its resolution rebroadcast) — poke
       // the panel the same way turn_start/turn_end does, rather than
       // leaving it to the next poll tick.
-      if (role === 'permission') pokeSessionsListIfOpen();
+      if (role === 'permission') {
+        pokeSessionsListIfOpen();
+        // Live asks only. This listener never sees replayed history (that
+        // arrives as 'history'/'history-batch'), and the resolution
+        // rebroadcast carries resolved:true — without that check, answering
+        // a prompt would itself announce "waiting on your approval".
+        try {
+          const p = JSON.parse(text);
+          if (!p.resolved) notifyNeedsInput(currentSessionId, p.kind, id);
+        } catch { /* not the structured payload — nothing to announce */ }
+      }
     } else if (entry.liveStreamed) {
       // Already typed out live via stream_delta — this is just the
       // authoritative final text for the same bubble, not new content to
@@ -2383,9 +2415,16 @@ function connect() {
   // even if this tab reconnects mid-turn or another tab started it.
   es.addEventListener('status', e => {
     const s = JSON.parse(e.data);
-    if (s.type === 'turn_start') { setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen(); }
+    if (s.type === 'turn_start') {
+      setTurnInFlight(true); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen();
+      // Arming here rather than in submitPrompt covers turns this tab did
+      // not start itself (another tab, or a reconnect that lands mid-turn).
+      armSession(currentSessionId);
+      clearTitleMark();
+    }
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
+      notifyTurnEnd(currentSessionId, s.reason);
       // In case a final 'message' for a live-streamed bubble was ever
       // missed (reconnect gap, backend hiccup), never leave a bubble stuck
       // with a blinking cursor past the end of its turn.
@@ -2562,6 +2601,8 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {})
   }
   clearFeed();
   setTurnIndicator(null);
+  // The flag described the session being left behind.
+  clearTitleMark();
   resetBackendControlsDisplay();
   updateBackendIndicator();
   // isNewSession (set only by startNewChatInProject()) is a hard guarantee,
@@ -2612,6 +2653,13 @@ const SETTINGS_DEFAULTS = {
   tsFormat:'time', hour24:false, showTz:false, thinking:'collapse',
   sessionsLayout: 'flat', unreachableMode: 'count', badgePosition: 'after',
   planResetFormat: 'absolute', showModelOn: 'model-only', sessionsSort: 'created',
+  // notify is the user's *intent*, deliberately independent of whether the
+  // browser will actually show an OS notification: permission can be revoked
+  // in site settings at any time, and on a plain-HTTP origin Safari refuses
+  // the API outright. Keeping the two separate is what lets the feature
+  // degrade to the tab-title flag instead of silently doing nothing — the
+  // reason is spelled out in the settings panel (see refreshNotifyUi).
+  notify: false, notifySound: false,
 };
 
 function loadSettings() {
@@ -2679,6 +2727,10 @@ const tsTzRow        = document.getElementById('ts-tz-row');
 const planResetFormatSelect = document.getElementById('usage-reset-format');
 const sessionsSortSelect = document.getElementById('sessions-sort');
 const showModelOnSelect  = document.getElementById('show-model-on');
+const notifyToggle   = document.getElementById('notify-toggle');
+const notifySound    = document.getElementById('notify-sound');
+const notifySoundRow = document.getElementById('notify-sound-row');
+const notifyNote     = document.getElementById('notify-note');
 const settingsBtn      = document.getElementById('settings-btn');
 const settingsPanel  = document.getElementById('settings-panel');
 const exportBtn      = document.getElementById('export-btn');
@@ -2704,7 +2756,10 @@ tsTz.checked = settings.showTz;
 planResetFormatSelect.value = settings.planResetFormat;
 showModelOnSelect.value = settings.showModelOn;
 sessionsSortSelect.value = settings.sessionsSort;
+notifyToggle.checked = settings.notify;
+notifySound.checked = settings.notifySound;
 applySettings();
+refreshNotifyUi();
 
 fontSlider.addEventListener('input', () => {
   settings.fontSize = Number(fontSlider.value);
@@ -2761,6 +2816,331 @@ themeToggle.addEventListener('change', () => {
   applySettings();
   saveSettings();
 });
+
+// Ticking the box IS the user gesture the permission prompt requires —
+// browsers refuse a requestPermission() that isn't tied to one, and a user
+// who dismisses or blocks the prompt can never be asked again from script,
+// so this is deliberately the only place it is ever called.
+notifyToggle.addEventListener('change', async () => {
+  settings.notify = notifyToggle.checked;
+  if (notifyToggle.checked) {
+    // Prime the audio graph while the gesture is still in scope: an
+    // AudioContext created later, from an SSE callback, starts suspended
+    // under every browser's autoplay policy and the beep is never heard.
+    primeAudio();
+    // Only asked when it can still succeed. Once a user has picked "block",
+    // calling this again is a no-op forever, and the box staying ticked is
+    // correct — the tab-title flag still works, and refreshNotifyUi says so.
+    if (notifySupported() && notifyPermission() === 'default') {
+      try { await Notification.requestPermission(); } catch { /* treated as not-granted below */ }
+    }
+  }
+  saveSettings();
+  refreshNotifyUi();
+  updateMetaSubscription();
+});
+
+notifySound.addEventListener('change', () => {
+  settings.notifySound = notifySound.checked;
+  saveSettings();
+  if (notifySound.checked) primeAudio();
+});
+
+// ── Attention: desktop notifications, tab-title flag, sound ───────────────
+// Three channels, deliberately layered. The tab-title flag is the only one
+// that always works (no permission, no secure context) so it is the floor;
+// the OS notification is the upgrade when the browser allows it; the sound
+// is opt-in on top. Every channel is gated on the user actually being away
+// — the single biggest reason notification features get switched off is
+// firing them at someone who is already looking at the screen.
+
+function notifySupported() { return typeof window.Notification === 'function'; }
+function notifyPermission() { return notifySupported() ? Notification.permission : 'unsupported'; }
+
+function refreshNotifyUi() {
+  notifySoundRow.classList.toggle('disabled', !settings.notify);
+  notifySound.disabled = !settings.notify;
+  let msg = '';
+  if (settings.notify) {
+    const perm = notifyPermission();
+    if (!notifySupported()) {
+      // Overwhelmingly Safari on http://localhost: unlike Chrome and Firefox
+      // it declines to treat a plain-HTTP loopback origin as a secure
+      // context, so the constructor simply isn't there. Same story for
+      // anyone reaching the viewer over a LAN address under --host-network.
+      msg = 'Desktop notifications need a secure context, which this browser does not grant to a plain-HTTP address. The tab title will still flag a finished turn.';
+    } else if (perm === 'denied') {
+      msg = 'Notifications are blocked for this site — re-allow them in your browser’s site settings. The tab title will still flag a finished turn.';
+    } else if (perm !== 'granted') {
+      msg = 'Notification permission was dismissed. Untick and re-tick this box to be asked again; meanwhile the tab title will still flag a finished turn.';
+    }
+  }
+  notifyNote.textContent = msg;
+  notifyNote.classList.toggle('show', !!msg);
+}
+
+// document.hidden alone is not enough: it stays false for the active tab of
+// a window that is itself buried behind an editor, which is the single most
+// common way to be "away" from the viewer. hasFocus() catches that.
+function userIsAway() { return document.hidden || !document.hasFocus(); }
+
+const NOTIFY_BASE_TITLE = document.title;
+let notifyTitleMark = null;
+function setTitleMark(mark) {
+  if (notifyTitleMark === mark) return;
+  notifyTitleMark = mark;
+  document.title = mark ? mark + ' ' + NOTIFY_BASE_TITLE : NOTIFY_BASE_TITLE;
+}
+function clearTitleMark() { setTitleMark(null); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) clearTitleMark(); });
+window.addEventListener('focus', clearTitleMark);
+
+let notifyAudioCtx = null;
+function primeAudio() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!notifyAudioCtx) notifyAudioCtx = new Ctx();
+    if (notifyAudioCtx.state === 'suspended') notifyAudioCtx.resume();
+  } catch { /* no audio available; the other channels still work */ }
+}
+// Returns whether a sound was actually produced, which is what decides
+// whether the OS notification gets muted — resume() is async and can simply
+// fail (no user activation yet), so assuming the beep played would leave a
+// notification that is silent in both channels.
+async function beep() {
+  if (!settings.notifySound) return false;
+  primeAudio();
+  if (!notifyAudioCtx) return false;
+  if (notifyAudioCtx.state === 'suspended') {
+    try { await notifyAudioCtx.resume(); } catch { return false; }
+  }
+  if (notifyAudioCtx.state !== 'running') return false;
+  try {
+    const t = notifyAudioCtx.currentTime;
+    const osc = notifyAudioCtx.createOscillator();
+    const gain = notifyAudioCtx.createGain();
+    osc.frequency.value = 880;
+    // Ramped rather than switched: an abrupt start/stop on a sine clicks.
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+    osc.connect(gain).connect(notifyAudioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.26);
+    return true;
+  } catch { return false; }
+}
+
+// An AudioContext built without user activation starts suspended and cannot
+// be resumed until the page has been interacted with. Typing a prompt counts,
+// so after a reload this is almost always primed well before the turn it
+// belongs to ends — without it, the first notification after every reload
+// would be silent.
+//
+// Gated on the sound setting rather than registered unconditionally: the
+// overwhelming majority of page loads never enable this, and they should not
+// be made to build an audio graph on their first click for nothing. Kept
+// listening (rather than {once:true}) until it has actually primed, so
+// turning the setting on later is still picked up by the next interaction.
+const AUDIO_PRIME_EVENTS = ['pointerdown', 'keydown'];
+function primeAudioOnInteraction() {
+  if (!settings.notifySound) return;
+  primeAudio();
+  if (notifyAudioCtx && notifyAudioCtx.state === 'running') {
+    for (const evt of AUDIO_PRIME_EVENTS) window.removeEventListener(evt, primeAudioOnInteraction);
+  }
+}
+for (const evt of AUDIO_PRIME_EVENTS) {
+  window.addEventListener(evt, primeAudioOnInteraction, { passive: true });
+}
+
+// Exactly one tab wins a given (session, class) event. Web Locks is the
+// standard cross-tab election primitive and needs no coordination protocol:
+// whoever asks first while the lock is free gets it, everyone else is handed
+// null and bails. Without this, opening a second tab — which by default
+// lands on the SAME session, since resolveInitialSessionId falls back to the
+// shared lastViewedSessionId — would double every beep.
+function claimOnce(key, holdMs = 1500) {
+  if (!navigator.locks || typeof navigator.locks.request !== 'function') return Promise.resolve(true);
+  // The hold is deliberately NOT on the caller's critical path. navigator
+  // .locks resolves its request promise only once the callback settles, so
+  // awaiting the hold inside would delay every notification by holdMs. The
+  // outcome is reported the instant it is known; the lock keeps itself held
+  // in the background purely so a tab whose SSE delivery lagged by a few
+  // hundred ms finds it taken rather than firing a duplicate.
+  return new Promise((settle) => {
+    let decided = false;
+    const decide = (won) => { if (!decided) { decided = true; settle(won); } };
+    // try/catch as well as .catch: a synchronous throw would otherwise escape
+    // this executor, reject the promise, and take fireAttention's await down
+    // with it — losing the notification entirely over a dedup optimisation.
+    try {
+      navigator.locks.request('pp-notify:' + key, { ifAvailable: true }, (lock) => {
+        decide(!!lock);
+        if (!lock) return undefined;
+        return new Promise((release) => setTimeout(release, holdMs));
+      }).catch(() => decide(true));
+    } catch { decide(true); }
+  });
+}
+
+// Session titles for cross-session notification bodies. The sessions panel's
+// cache is only populated once that panel has been opened, so a tab that has
+// never opened it needs its own lookup — fetched at most once and refreshed
+// only on a miss, since this is cosmetic and must never delay a notification.
+const notifyTitleCache = new Map();
+let notifyTitleFetch = null;
+// Same derivation buildSessionItem uses, so a notification names a session
+// exactly as the sessions panel does.
+function sessionTitleOf(s) { return s.customTitle || s.summary || s.firstPrompt || ''; }
+function rememberSessionTitles(list) {
+  for (const s of list || []) {
+    const t = s && s.sessionId ? sessionTitleOf(s) : '';
+    if (t) notifyTitleCache.set(s.sessionId, t);
+  }
+}
+function sessionLabel(sessionId) {
+  // The sessions panel keeps its own cache the moment it has ever been
+  // opened — reuse it before spending a request.
+  if (!notifyTitleCache.has(sessionId) && lastSessionsResult) {
+    rememberSessionTitles(lastSessionsResult.sessions);
+  }
+  if (notifyTitleCache.has(sessionId)) return notifyTitleCache.get(sessionId);
+  // Deliberately NOT awaited. /sessions is a heavyweight call on the driver
+  // (a full multi-backend enumeration with a realpath per project), and a
+  // notification that arrives late or not at all because a cosmetic label
+  // lookup stalled would be a much worse bug than a generic label. Warm the
+  // cache for next time and name it generically this time.
+  if (driverBase && !notifyTitleFetch) {
+    notifyTitleFetch = (async () => {
+      try {
+        const res = await fetch(driverBase + '/sessions');
+        if (res.ok) rememberSessionTitles((await res.json()).sessions);
+      } catch { /* cosmetic only */ }
+      notifyTitleFetch = null;
+    })();
+  }
+  return 'another session';
+}
+
+async function fireAttention({ sessionId, cls, ref, mark, title, body, sticky }) {
+  if (!settings.notify) return;
+
+  // Read once, up front: everything below awaits, and currentSessionId can
+  // change under us if the user switches session mid-flight — which would
+  // otherwise flip the label and the click behaviour halfway through.
+  const isCurrent = sessionId === currentSessionId;
+
+  // The title flag describes THIS tab, so it only ever reflects the session
+  // this tab is actually showing — flagging it for someone else's session
+  // would point the user at the wrong conversation when they come back.
+  if (isCurrent && userIsAway()) setTitleMark(mark);
+
+  // Distinct events of the same class must not collapse into each other:
+  // `ref` (a permission card's id) keeps two approvals raised seconds apart
+  // as two notifications, since the turn is blocked on the second just as
+  // much as the first. Turn ends need no ref — arming already guarantees one
+  // per turn.
+  const dedup = sessionId + ':' + cls + (ref ? ':' + ref : '');
+
+  // Claim order, most-entitled first: a FOCUSED tab showing this session
+  // goes at 0ms, any other tab showing it at 50ms, everyone else at 150ms.
+  // The focused one must get there first because its job is to win and then
+  // suppress (below) on every tab's behalf — if it bailed out early instead,
+  // some background tab showing an unrelated session would take the lock and
+  // announce a turn the user is sitting and watching finish.
+  const delay = isCurrent ? (document.hasFocus() ? 0 : 50) : 150;
+  if (delay) await new Promise((r) => setTimeout(r, delay));
+  if (!(await claimOnce(dedup))) return;
+
+  // Decided only after winning the claim, and scoped to THIS session: being
+  // parked on session T with S finishing in the background is still worth a
+  // notification — it is only watching S itself finish that isn't.
+  if (isCurrent && !userIsAway()) return;
+
+  // Awaited so `silent` below reflects whether a sound actually came out.
+  const beeped = await beep();
+  if (!notifySupported() || notifyPermission() !== 'granted') return;
+  try {
+    const label = isCurrent ? null : sessionLabel(sessionId);
+    const n = new Notification(title, {
+      body: label ? label + ' — ' + body : body,
+      // Same tag ⇒ the browser replaces rather than stacks, and with
+      // renotify unset the replacement is silent. Belt-and-braces with the
+      // lock above: it also collapses repeats across reloads of this tab.
+      tag: 'podprompt:' + dedup,
+      // Turn ends share one tag per session (there is no per-turn id to key
+      // on), so without renotify a second finished turn would quietly
+      // *replace* an undismissed first one and never alert at all. renotify
+      // keeps the replace — one card per session rather than a stack of
+      // five — while still announcing each one.
+      renotify: true,
+      // A blocked turn is waiting on a human and should not quietly expire
+      // off-screen; a finished one is just information.
+      requireInteraction: !!sticky,
+      // Muted only if our own beep genuinely played a moment ago, so the two
+      // sounds don't double up. If it didn't — muted tab, no user activation
+      // yet, sound switched off — the platform's default notification sound
+      // is left well alone rather than suppressed for nothing.
+      silent: beeped,
+    });
+    n.onclick = () => {
+      window.focus();
+      clearTitleMark();
+      if (sessionId !== currentSessionId) viewSession(sessionId);
+      n.close();
+    };
+  } catch { /* some platforms reject the constructor; other channels already ran */ }
+}
+
+// Per-session arming. A turn_end only means something if this page saw the
+// matching turn_start, which keeps a reconnect, a session switch, or a
+// replayed backlog from announcing a turn that ended long ago.
+// Map rather than Set so stale arms can age out: a turn_start whose
+// turn_end never arrives (stream drop, driver restart) would otherwise sit
+// in here for the lifetime of the page, and a much later unrelated turn_end
+// for that session would find it armed and fire.
+const notifyArmed = new Map();
+const ARM_TTL_MS = 6 * 60 * 60 * 1000;
+function armSession(sessionId) {
+  const now = Date.now();
+  for (const [id, t] of notifyArmed) if (now - t > ARM_TTL_MS) notifyArmed.delete(id);
+  notifyArmed.set(sessionId, now);
+}
+function disarmSession(sessionId) {
+  const armedAt = notifyArmed.get(sessionId);
+  notifyArmed.delete(sessionId);
+  return armedAt !== undefined && Date.now() - armedAt <= ARM_TTL_MS;
+}
+
+const TURN_END_NOTICES = {
+  completed: { mark: '●', title: 'Turn finished', body: 'Ready for your next prompt.' },
+  error: { mark: '✗', title: 'Turn failed', body: 'The turn ended with an error.' },
+};
+
+function notifyTurnEnd(sessionId, reason) {
+  // Only turns this page watched start to finish, and never a Stop the user
+  // just clicked themselves — they are standing right there and know.
+  if (!disarmSession(sessionId)) return;
+  const notice = TURN_END_NOTICES[reason || 'completed'];
+  if (!notice) return; // 'aborted' is deliberately silent
+  fireAttention({ sessionId, cls: 'turn', mark: notice.mark, title: notice.title, body: notice.body });
+}
+
+function notifyNeedsInput(sessionId, kind, ref) {
+  fireAttention({
+    sessionId,
+    cls: 'input',
+    ref,
+    mark: '?',
+    title: kind === 'question' ? 'Waiting on your answer' : 'Waiting on your approval',
+    body: kind === 'question'
+      ? 'The model asked a question and is paused until you answer.'
+      : 'A tool needs your approval before the turn can continue.',
+    sticky: true,
+  });
+}
 
 toolModeSelect.addEventListener('change', () => {
   settings.tools = toolModeSelect.value;
@@ -3044,6 +3424,11 @@ async function resyncTurnStatus() {
     const res = await fetch(`${driverBase}/turn-status?sessionId=${encodeURIComponent(currentSessionId)}`);
     const data = await res.json();
     setTurnInFlight(!!data.inFlight);
+    // Reconnecting mid-turn (or opening a tab onto a session another tab
+    // started) counts as having seen this turn start — otherwise its
+    // turn_end would arrive unarmed and pass silently, which is precisely
+    // the long-running-turn case the notification exists for.
+    if (data.inFlight) armSession(currentSessionId);
     autoApproveToggle.checked = !!data.autoApprove;
     autoApproveRow.classList.toggle('active', !!data.autoApprove);
   } catch (e) {
@@ -3784,15 +4169,34 @@ function pokeSessionsListIfOpen() {
 // session's turn starting/ending has no signal to piggyback on at all,
 // since each /events stream is scoped to one session by design. This
 // separate, global /events-meta channel (server.py's meta_clients, not
-// nested under any one session) fills that gap: any tab with the sessions
-// panel open subscribes to it and gets a lightweight ping whenever *any*
-// session's turn or permission/question state changes, regardless of
-// whether this tab is looking at that session at all.
+// nested under any one session) fills that gap: a tab subscribes to it and
+// gets a lightweight ping whenever *any* session's turn or
+// permission/question state changes, regardless of whether this tab is
+// looking at that session at all.
+//
+// Two independent subscribers now: the sessions panel (refresh the list
+// while it's open) and desktop notifications (announce any session's turn
+// ending, panel open or not). Either one alone is reason enough to hold the
+// connection open, which is why the lifecycle runs through
+// metaSubscriptionWanted() rather than testing the panel directly.
 let metaEventSource = null;
+let metaRetryTimer = null;
+function metaSubscriptionWanted() {
+  return sessionsPanel.classList.contains('open') || settings.notify;
+}
 function startMetaSubscription() {
   stopMetaSubscription();
   metaEventSource = new EventSource('/events-meta');
-  metaEventSource.addEventListener('change', () => {
+  // EventSource reconnects on its own for transient drops, but gives up for
+  // good on a protocol-level rejection. Only that terminal case is handled
+  // here, on the same 2s cadence as the per-session stream's onerror.
+  metaEventSource.onerror = () => {
+    if (metaEventSource && metaEventSource.readyState === EventSource.CLOSED) {
+      stopMetaSubscription();
+      metaRetryTimer = setTimeout(updateMetaSubscription, 2000);
+    }
+  };
+  metaEventSource.addEventListener('change', (e) => {
     // Self-closing on the next event rather than tracked against every
     // place that can close the panel, same rationale as the poll timer
     // below — simpler than pairing a stop call with each close path, at
@@ -3800,15 +4204,50 @@ function startMetaSubscription() {
     // happens anywhere (already the same tradeoff the main per-session
     // /events connections make, which also stay open indefinitely once
     // a tab connects).
-    if (!sessionsPanel.classList.contains('open')) {
+    if (!metaSubscriptionWanted()) {
       stopMetaSubscription();
       return;
     }
-    refreshSessionsList({ full: false });
+    handleMetaChange(e);
+    if (sessionsPanel.classList.contains('open')) refreshSessionsList({ full: false });
   });
 }
+
+// The payload (server.py's broadcast_meta) was carried for years without a
+// consumer; this is it. Events for the session this tab is *viewing* are
+// deliberately ignored here — that session's own /events stream already
+// delivered the same thing with a richer payload, and acting on both would
+// announce every turn twice.
+function handleMetaChange(e) {
+  if (!settings.notify) return;
+  let m;
+  try { m = JSON.parse(e.data); } catch { return; }
+  if (!m || !m.sessionId || m.sessionId === currentSessionId) return;
+  if (m.kind === 'turn_start') { armSession(m.sessionId); return; }
+  if (m.kind === 'turn_end') { notifyTurnEnd(m.sessionId, m.detail); return; }
+  // detail is the ask's flavour ('permission'/'question') or 'resolved';
+  // ref is the card's message id, which keeps separate asks separate.
+  if (m.kind === 'permission' && m.detail !== 'resolved') notifyNeedsInput(m.sessionId, m.detail, m.ref);
+}
+
+// Called whenever either reason to be subscribed changes.
+function updateMetaSubscription() {
+  if (!metaSubscriptionWanted()) { stopMetaSubscription(); return; }
+  // readyState matters as much as existence. An EventSource gives up
+  // permanently (CLOSED) on a non-2xx response or a wrong Content-Type —
+  // e.g. hitting the viewer mid-restart — and a dead-but-non-null handle
+  // would otherwise wedge this forever, since no further 'change' event can
+  // arrive to trip the self-closing guard either. Before this ran only from
+  // openSessionsPanel, which re-created the stream unconditionally and so
+  // repaired it by accident; now the repair has to be deliberate.
+  if (!metaEventSource || metaEventSource.readyState === EventSource.CLOSED) {
+    startMetaSubscription();
+  }
+}
 function stopMetaSubscription() {
-  if (metaEventSource) { metaEventSource.close(); metaEventSource = null; }
+  clearTimeout(metaRetryTimer);
+  metaRetryTimer = null;
+  if (metaEventSource) { metaEventSource.onerror = null; metaEventSource.close(); metaEventSource = null; }
 }
 
 // Now purely a safety net (the meta subscription above is the real-time
@@ -3830,14 +4269,16 @@ function startSessionsPoll() {
 async function openSessionsPanel() {
   if (sessionsPanel.classList.contains('open')) {
     sessionsPanel.classList.remove('open');
-    stopMetaSubscription();
+    // Not an unconditional stop any more: notifications may still want the
+    // stream even with the panel shut.
+    updateMetaSubscription();
     return;
   }
   if (!driverBase) return;
   sessionsList.innerHTML = '<div class="palette-empty">Loading…</div>';
   sessionsPanel.classList.add('open');
   await refreshSessionsList();
-  startMetaSubscription();
+  updateMetaSubscription();
   startSessionsPoll();
 }
 
@@ -3930,6 +4371,13 @@ for (const tab of sessionsTabs) {
 }
 
 sessionsBtn.addEventListener('click', openSessionsPanel);
+
+// Notifications need the cross-session stream from the moment the page
+// loads, not just while the sessions panel happens to be open — the whole
+// point is hearing about a session this tab isn't watching. Placed here,
+// after sessionsPanel is in scope, rather than beside the other settings
+// initialisation further up.
+updateMetaSubscription();
 // ── New-chat project picker ─────────────────────────────────────────────────
 const newChatPicker = document.getElementById('new-chat-picker');
 

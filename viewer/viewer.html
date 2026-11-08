@@ -407,6 +407,31 @@
      icon buttons and three status widgets, and this UI has no generic panel
      menu — panels are opened BY header buttons — so a second slot for the
      same feature was not affordable. */
+  /* Sits ABOVE the input bar rather than inside it. A button that appears
+     and vanishes inside the bar moves Send at exactly the moment you are
+     reaching for it — and this strip needs room to say WHICH failure
+     happened, since that changes what you would do next. */
+  #resume-bar { display: none; }
+  #resume-bar.show {
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 auto 6px; max-width: var(--content-width, 860px);
+    padding: 6px 12px; border: 1px solid var(--warn); border-radius: 6px;
+    background: var(--warn-bg); color: var(--warn); font-size: 13px;
+  }
+  #resume-bar .rb-spacer { flex: 1; }
+  #resume-bar button {
+    font-size: 12px; padding: 2px 10px;
+    border-color: var(--warn); color: var(--warn); background: transparent;
+  }
+  #resume-bar #resume-dismiss { padding: 2px 7px; }
+
+  /* Generated continuation text. Collapsed to a one-line marker: the point
+     is that the turn resumed, not the boilerplate that made it resume. */
+  .msg.user.from-resume { background: transparent; border-color: var(--border); opacity: .75; }
+  .msg.user.from-resume .msg-body { display: none; }
+  .msg.user.from-resume .msg-label .role-name,
+  .msg.user.from-resume .msg-label .agent-title { color: var(--muted); }
+
   /* A turn nobody typed. Tinted differently from a user bubble so it is
      obvious at a glance when scrolling back weeks later — the failure this
      prevents is silent: misremembering an agent-caused turn as your own. */
@@ -1554,6 +1579,13 @@
     </div>
   </div>
 
+  <div id="resume-bar">
+    <span id="resume-text"></span>
+    <span class="rb-spacer"></span>
+    <button id="resume-btn">Continue</button>
+    <button id="resume-dismiss" title="Dismiss">×</button>
+  </div>
+
   <div id="input-bar">
     <div id="palette-dropdown"></div>
     <div id="input-row">
@@ -1961,6 +1993,21 @@ function insertFeedItem(wrap, insertTop) {
 function applyOrigin(m, origin) {
   if (!m || !origin || m.role !== 'user') return;
   const [kind, who] = String(origin).split(/:(.+)/);
+  // A resumed turn is generated text, not something the user typed, and the
+  // transcript must not claim otherwise. Rendered as a thin marker rather
+  // than a prompt bubble — the interesting content is what follows it.
+  if (kind === 'resume') {
+    if (m.wrap) m.wrap.classList.add('from-resume');
+    if (m.roleNameEl) {
+      m.roleNameEl.textContent = '▸ Continued';
+    }
+    if (m.titleEl) {
+      m.titleEl.textContent = ({
+        restart: 'after a restart', aborted: 'after being stopped', error: 'after an error',
+      })[who] || '';
+    }
+    return;
+  }
   if (kind !== 'peer' && kind !== 'result' && kind !== 'delegate') return;
   if (m.wrap) m.wrap.classList.add('from-peer');
   if (m.roleNameEl) m.roleNameEl.textContent = kind === 'delegate' ? 'Delegated' : 'Peer';
@@ -2737,6 +2784,9 @@ function connect() {
     // roster can stay current without polling.
     if (s.type === 'sub_agents_changed' || s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
     if (s.type === 'inbox_changed') refreshMessaging();
+    // Both edges: a turn ending may CREATE something to resume, and a turn
+    // starting always retires it.
+    if (s.type === 'turn_end' || s.type === 'turn_start') refreshResumeBar();
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
       refreshSubAgents();
@@ -2935,6 +2985,8 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   subAgents = [];
   currentSessionIsChild = knownChild;
   loadBudgetPreset(sessionId);
+  resumeBar.classList.remove('show');
+  refreshResumeBar();
   currentSessionParent = knownParent;
   applySubAgentBanner();
   renderRoster();
@@ -3386,6 +3438,65 @@ document.addEventListener('click', (e) => {
   }
 });
 psResume.addEventListener('click', () => messagingPost('/pause', { paused: false }));
+
+// ── Continue after a turn that ended badly ──────────────────────────────
+// Sits above the input bar, never inside it: a control that appears and
+// vanishes inside the bar moves Send at exactly the moment you are reaching
+// for it. It clears when the next turn starts by ANY route — Continue, Send,
+// or a peer message waking the session — which is one rule instead of three.
+const resumeBar = document.getElementById('resume-bar');
+const resumeText = document.getElementById('resume-text');
+const resumeBtn = document.getElementById('resume-btn');
+const resumeDismiss = document.getElementById('resume-dismiss');
+
+const RESUME_WORDING = {
+  restart: 'The previous turn was interrupted when the environment restarted.',
+  aborted: 'You stopped the previous turn before it finished.',
+  error: 'The previous turn ended with an error.',
+};
+
+async function refreshResumeBar() {
+  // Never offered on a sub-agent transcript — its input bar is hidden for
+  // the same reason, and its parent is the one that should restart it.
+  if (!driverBase || !currentSessionId || currentSessionIsChild) {
+    resumeBar.classList.remove('show');
+    return;
+  }
+  let d;
+  try {
+    d = await fetch(`${driverBase}/resume-state?sessionId=${encodeURIComponent(currentSessionId)}`)
+      .then(r => r.json());
+  } catch {
+    return; // a failed poll must not hide a control the user may want
+  }
+  if (!d.available) {
+    resumeBar.classList.remove('show');
+    return;
+  }
+  const why = RESUME_WORDING[d.reason] || 'The previous turn ended abnormally.';
+  const detail = d.error ? ` ${String(d.error).slice(0, 120)}` : '';
+  const tool = d.lastTool ? ` (during ${d.lastTool})` : '';
+  resumeText.textContent = `${why}${tool}${detail}`;
+  resumeBar.classList.add('show');
+}
+
+resumeBtn.addEventListener('click', async () => {
+  if (!driverBase || !currentSessionId) return;
+  resumeBar.classList.remove('show');
+  try {
+    await fetch(`${driverBase}/continue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId }),
+    });
+  } catch {
+    refreshResumeBar(); // put it back if the call never landed
+  }
+});
+
+// Dismiss hides it for now without resolving anything; the next poll or
+// session switch brings it back, because the turn really did die.
+resumeDismiss.addEventListener('click', () => resumeBar.classList.remove('show'));
 
 // Budget preset for this session. One control, collapsed to the preset name,
 // carrying the same envelope as the panel button so it reads as part of the
@@ -4290,6 +4401,10 @@ async function loadDriverConfig() {
     // chain hitting its deadline with nobody watching.
     refreshMessaging();
     setInterval(refreshMessaging, 20000);
+    // The restart case is precisely when the page has just been reloaded,
+    // so this has to be correct from first paint rather than only after
+    // something happens to tick it.
+    refreshResumeBar();
   } catch (e) {
     console.error('Failed to load /config:', e);
   }

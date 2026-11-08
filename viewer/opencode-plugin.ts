@@ -189,6 +189,10 @@ export default (async () => {
             .describe('Peer handle, e.g. "@researcher". Get these from list_peers.'),
           text: tool.schema.string()
             .describe("What to say. Include enough context to act on alone."),
+          resume: tool.schema.boolean().optional().describe(
+            "Set true for a peer list_peers reports as stalled. Sends the standard"
+            + " continuation prompt for however its turn died; your text, if any, is"
+            + " appended rather than replaced."),
         },
         async execute(args, context) {
           // Parity with Claude Code, where an MCP tool call goes through
@@ -218,6 +222,7 @@ export default (async () => {
                 to: args.to,
                 text: args.text,
                 kind: "peer",
+                resume: args.resume === true,
               }),
             })
             const receipt = (body || {}) as Receipt

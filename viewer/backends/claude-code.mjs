@@ -1085,10 +1085,14 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           "message",
           "Send a message to another PodPrompt session. It is delivered when that "
           + "session is idle, and it will reply by messaging you back — this does not "
-          + "block and does not return their answer.",
+          + "block and does not return their answer. Can also restart a stalled peer.",
           {
             to: z.string().describe('Peer handle, e.g. "@researcher". Get these from list_peers.'),
             text: z.string().describe("What to say. Include enough context to act on alone."),
+            resume: z.boolean().optional().describe(
+              "Set true for a peer list_peers reports as stalled. Sends the standard"
+              + " continuation prompt for however its turn died; your text, if any, is"
+              + " appended rather than replaced."),
           },
           async (args) => {
             try {

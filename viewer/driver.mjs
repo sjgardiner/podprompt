@@ -149,6 +149,12 @@ function enqueueSend(sessionId, doSend) {
 // human input from agent input is ambiguous to read, and any future loop
 // detection between sessions has nothing to key on without it.
 async function broadcast(sessionId, role, text, id, ts, model, origin) {
+  // Cheapest place to learn what was running when a turn died: every tool
+  // bubble passes through here already.
+  if (role === "tool") {
+    const m = /^`([^`\n]+)`/.exec(text || "");
+    if (m) noteTurnTool(sessionId, m[1]);
+  }
   return enqueueSend(sessionId, async () => {
     try {
       await fetch(VIEWER_MESSAGE_URL, {
@@ -760,6 +766,130 @@ const chains = createChains({
   onError: (e) => console.error("[driver] failed to write chains file:", e.message),
 });
 
+// ── Resuming a turn that ended badly ────────────────────────────────────
+// Turns die in three ways, and only two of them announce it:
+//
+//   error    — the backend failed; turn_end carries the reason and message
+//   aborted  — the user pressed Stop; turn_end says so
+//   restart  — the driver or container died mid-turn. NOTHING is broadcast,
+//              because the thing that would broadcast it is gone.
+//
+// That third case is the common one in practice and the only one where the
+// user has certainly reloaded the page, so this state is durable: a marker
+// is written when a turn starts and cleared when it ends cleanly. Any
+// marker still present at startup belonged to a turn that died with the
+// process.
+const TURN_STATE_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-turn-state.json");
+
+let turnState = loadTurnState();
+
+function loadTurnState() {
+  try {
+    const raw = JSON.parse(readFileSync(TURN_STATE_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTurnState() {
+  try {
+    writeFileSync(`${TURN_STATE_FILE}.tmp`, JSON.stringify(turnState));
+    renameSync(`${TURN_STATE_FILE}.tmp`, TURN_STATE_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write turn-state file:", e.message);
+  }
+}
+
+// Anything still marked in-flight when this process starts was killed with
+// the previous one. Promote those to a resumable "restart" outcome.
+function reconcileTurnStateOnStartup() {
+  let changed = false;
+  for (const [sessionId, rec] of Object.entries(turnState)) {
+    if (!rec?.inFlight) continue;
+    turnState[sessionId] = {
+      inFlight: false,
+      resumable: { reason: "restart", lastTool: rec.lastTool || null, at: nowIso() },
+    };
+    changed = true;
+  }
+  if (changed) {
+    saveTurnState();
+    console.log("[driver] marked turns interrupted by restart as resumable");
+  }
+}
+
+function markTurnStarted(sessionId) {
+  turnState[sessionId] = { inFlight: true, startedAt: nowIso(), lastTool: null };
+  saveTurnState();
+}
+
+function noteTurnTool(sessionId, toolName) {
+  const rec = turnState[sessionId];
+  if (!rec?.inFlight || !toolName) return;
+  rec.lastTool = toolName;
+  // Not saved on every tool call — this only matters if the process dies, and
+  // a crash loses at most the last tool name, which is a far better trade
+  // than a disk write per tool bubble.
+}
+
+function markTurnEnded(sessionId, outcome) {
+  const rec = turnState[sessionId] || {};
+  const bad = outcome?.reason === "error" || outcome?.reason === "aborted";
+  turnState[sessionId] = {
+    inFlight: false,
+    ...(bad ? { resumable: {
+      reason: outcome.reason,
+      error: outcome.error || null,
+      lastTool: rec.lastTool || null,
+      at: nowIso(),
+    } } : {}),
+  };
+  saveTurnState();
+}
+
+function clearResumable(sessionId) {
+  if (!turnState[sessionId]?.resumable) return;
+  delete turnState[sessionId].resumable;
+  saveTurnState();
+}
+
+function resumableFor(sessionId) {
+  return turnState[sessionId]?.resumable || null;
+}
+
+// The wording lives here, not in the browser: both backends and any future
+// caller should say the same thing, and only the driver knows the error text
+// and which tool was running.
+//
+// Every variant says "do not start over" in some form, because restarting
+// from scratch is the expensive failure — far worse than doing nothing.
+function resumePromptFor(resumable) {
+  if (!resumable) return null;
+  const tool = resumable.lastTool
+    ? ` You were interrupted while running ${resumable.lastTool}; its result is unknown,`
+      + ` so check the current state before assuming it succeeded or failed.`
+    : "";
+  if (resumable.reason === "restart") {
+    // Deliberately makes NO claim about what survived. Whether files persist
+    // depends entirely on where they were written, and a confident wrong
+    // claim here is worse than silence.
+    return "Your previous turn was interrupted when the environment restarted."
+      + " Resume from where you left off; don't assume prior files, processes, etc. survived;"
+      + " attempt to re-establish the prior setup for things that were lost, and pause to"
+      + " alert me if this cannot be done easily." + tool;
+  }
+  if (resumable.reason === "aborted") {
+    return "Your previous turn was interrupted before it finished. Resume from where you"
+      + " left off, keeping what was already completed. Do not restart from the beginning."
+      + tool;
+  }
+  return "Your previous turn was cut short by a system error"
+    + (resumable.error ? `: ${resumable.error}` : "")
+    + ". Everything above is what actually happened. Resume from where you left off — keep"
+    + " work that is already complete, and do not start over." + tool;
+}
+
 // ── Delivery core ────────────────────────────────────────────────────────
 // One internal entry point that both surfaces sit on: `delegate` (which
 // creates its target) and `message` (which addresses an existing one). The
@@ -1002,6 +1132,13 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
       // target was busy only from a receipt.
       state: s.inFlight ? "in-turn" : (s.pendingKind ? "blocked-on-approval" : "idle"),
       relation: relationTo(fromSessionId, s.sessionId),
+      // A peer whose last turn died. Surfaced because the most useful thing
+      // a parent can do with a stalled child is restart it, and it cannot
+      // decide to do that without knowing.
+      stalled: (() => {
+        const r = resumableFor(s.sessionId);
+        return r ? { reason: r.reason, at: r.at, lastTool: r.lastTool || null } : null;
+      })(),
       // Addressable, but marked: a sub-agent its parent is blocking on will
       // queue your message behind that delegation, and what the parent
       // receives is unaffected by it.
@@ -1039,7 +1176,7 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
 const PEER_LIST_DEFAULT = 20;
 const PEER_LIST_MAX = 200;
 
-function toolMessage(fromSessionId, { to, text, kind = "peer" }) {
+function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false }) {
   const state = sessions.get(fromSessionId);
   // Everything automatic belongs to the chain the caller is running under.
   // No chain means no budget to spend, which means this is not a turn that
@@ -1059,7 +1196,21 @@ function toolMessage(fromSessionId, { to, text, kind = "peer" }) {
     backend: sessionIdToBackend.get(fromSessionId) || null,
     title: peers.get(fromSessionId)?.title || chains.get(chainId)?.rootPrompt || null,
   });
-  return deliver(to, text, {
+  let body = text;
+  if (resume) {
+    // The same wording the Continue button uses, chosen from the TARGET's
+    // own failure — a parent should not have to invent it, and a generic
+    // "carry on" loses the part that matters (what actually went wrong).
+    const resolved = peers.resolve(to);
+    const targetId = resolved.ok ? resolved.ref.id : null;
+    const resumable = targetId ? resumableFor(targetId) : null;
+    if (!resumable) return { ok: false, reason: "not-stalled", to };
+    const canned = resumePromptFor(resumable);
+    // Custom text is preserved, not replaced: the parent usually knows
+    // something the boilerplate does not.
+    body = text && text.trim() ? `${canned}\n\n${text}` : canned;
+  }
+  return deliver(to, body, {
     from: localPrincipal(fromSessionId),
     kind,
     chainId,
@@ -1222,6 +1373,7 @@ function describeReceipt(receipt, to) {
     "self-message": "A session cannot message itself.",
     "not-messageable": `${to} has messaging turned off.`,
     "no-chain": "This turn has no budget to spend, so it cannot cause other sessions to run.",
+    "not-stalled": `${to} did not end abnormally, so there is nothing to resume. Send it instructions instead.`,
     "fanout-cap": `Too many messages and delegations in one turn (limit ${receipt.cap}).`,
     "no-such-chain": "The work this turn belongs to no longer exists.",
     steps: `Out of steps. The message is parked; the user can extend the budget to release it. Do not retry.`,
@@ -1491,6 +1643,11 @@ process.on("exit", () => {
     } catch { /* already dead */ }
   }
 });
+
+// Any turn still marked in-flight belonged to the previous process and died
+// with it. Promote those to resumable BEFORE anything can start a new turn
+// and overwrite the marker.
+reconcileTurnStateOnStartup();
 
 // Ensure the opencode serve child is up before firing warm-up fetches at it,
 // then start the liveness poll that catches a wedged-but-running process.
@@ -1932,7 +2089,7 @@ reportAbandonedApprovals();
 // `origin` so a transcript can say who actually asked.
 function startTurn(sessionId, promptText, {
   source = "human", explicitCwd, backendId,
-  chainId = null, preset = null, custom = null, origin = null,
+  chainId = null, preset = null, custom = null, origin = null, chainLabel = null,
 } = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
   if (state.turnInFlight) {
@@ -1943,10 +2100,16 @@ function startTurn(sessionId, promptText, {
   // — a delegation, a peer delivery — needed its own copy, and the copies
   // would drift apart exactly the way the in-flight check would have.
   let chain;
-  if (source === "human") {
+  // "resume" mints its own chain alongside "human": clicking Continue IS the
+  // user acting, and the trust root is the human, not the keystrokes.
+  if (source === "human" || source === "resume") {
     const fallback = chains.getSessionPreset(sessionId);
     chain = chains.mint({
-      rootPrompt: promptText,
+      // Chains are named after the prompt that created them, which is what
+      // makes Extend and Pause legible. A resume's prompt is boilerplate, so
+      // it supplies its own label — otherwise the panel fills with rows all
+      // called "Your previous turn was interrupted...".
+      rootPrompt: chainLabel || promptText,
       originSession: sessionId,
       preset: preset || fallback.preset,
       custom: preset ? custom : fallback.custom,
@@ -1965,6 +2128,10 @@ function startTurn(sessionId, promptText, {
   }
   state.chainId = chain.id;
   state.fanoutThisTurn = 0;
+  // A new turn by ANY route — typed, Continue, or a peer message — retires
+  // the old failure. One rule rather than three separate clearing paths.
+  clearResumable(sessionId);
+  markTurnStarted(sessionId);
   // C10: who caused this turn to exist. Carried onto the user bubble so a
   // transcript can never be ambiguous about whether a human typed something
   // — which matters most for turns that begin with no user input at all.
@@ -2091,6 +2258,7 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // failed before the backend ever announced it never reached the browser
     // as "running", so telling it the turn ENDED would be news about
     // something it never heard begin.
+    markTurnEnded(sessionId, outcome);
     if (announced) broadcastStatus(sessionId, { type: "turn_end", ...outcome });
     expirePendingApprovals(sessionId);
     // Opportunistic refresh after every turn, any session, any backend —
@@ -3019,6 +3187,7 @@ const server = createServer(async (req, res) => {
       to: body.to,
       text: body.text || "",
       kind: body.kind === "result" ? "result" : "peer",
+      resume: !!body.resume,
     });
     res.writeHead(receipt.ok ? 200 : 409, { "Content-Type": "application/json" });
     // `describe` is the model-facing wording, owned here so the two backends
@@ -3056,6 +3225,67 @@ const server = createServer(async (req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
     }
+    return;
+  }
+
+  // What the Continue strip reads. Returns the prompt too, so the browser
+  // never has to know the wording — one source for both backends.
+  if (req.method === "GET" && path === "/resume-state") {
+    const sessionId = url.searchParams.get("sessionId");
+    const resumable = sessionId ? resumableFor(sessionId) : null;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      available: !!resumable,
+      // Never offered for a sub-agent transcript: it is a record of
+      // delegated work, not a conversation, and its input bar is hidden for
+      // the same reason. Its parent is told the outcome and can re-prompt it.
+      ...(resumable && !isChildSession(sessionId) ? {
+        reason: resumable.reason,
+        error: resumable.error || null,
+        lastTool: resumable.lastTool || null,
+        at: resumable.at,
+        prompt: resumePromptFor(resumable),
+      } : { available: false }),
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/continue") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const sessionId = body.sessionId;
+    const resumable = sessionId ? resumableFor(sessionId) : null;
+    if (!resumable || isChildSession(sessionId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "nothing to resume", reason: "not-resumable" }));
+      return;
+    }
+    // source "resume" rather than "human": the text was generated, not typed,
+    // and the transcript should not claim otherwise. It still mints a fresh
+    // budget, because clicking Continue IS the user acting.
+    const label = ({
+      restart: "Continued after a restart",
+      aborted: "Continued after being stopped",
+      error: "Continued after an error",
+    })[resumable.reason] || "Continued";
+    const started = startTurn(sessionId, resumePromptFor(resumable), {
+      source: "resume",
+      origin: `resume:${resumable.reason}`,
+      chainLabel: label,
+    });
+    if (!started.ok) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "could not resume", reason: started.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, chainId: started.chainId }));
     return;
   }
 

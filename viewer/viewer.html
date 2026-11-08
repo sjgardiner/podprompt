@@ -2699,7 +2699,12 @@ function connect() {
 // driver-pushed 'reset' broadcast — that only made sense when every
 // connected tab shared one "current" session to be reset onto; now each tab
 // asks for exactly the session it wants and nothing else is affected.
-function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {}) {
+// knownChild/knownParent let a caller that ALREADY knows it is opening a
+// sub-agent (the roster, a Task bubble) say so, so the read-only chrome is
+// right on the first paint. Without it the input bar and controls flash
+// visible for the moment between the switch and resyncTurnStatus confirming
+// what kind of session this is.
+function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownChild = false, knownParent = null } = {}) {
   if (sessionId === currentSessionId) return;
   if (!(pendingCwdForNewSession && pendingCwdForNewSession.sessionId === sessionId)) {
     pendingCwdForNewSession = null;
@@ -2722,8 +2727,8 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {})
   // for the new session a moment later, and showing the previous session's
   // sub-agents in between would be wrong.
   subAgents = [];
-  currentSessionIsChild = false;
-  currentSessionParent = null;
+  currentSessionIsChild = knownChild;
+  currentSessionParent = knownParent;
   applySubAgentBanner();
   renderRoster();
   resetBackendControlsDisplay();
@@ -3064,7 +3069,7 @@ function renderRoster() {
 
     row.addEventListener('click', () => {
       rosterPanel.classList.remove('open');
-      viewSession(sa.agentId);
+      viewSession(sa.agentId, { knownChild: true, knownParent: sa.parentSessionId || currentSessionId });
     });
     rosterPanel.appendChild(row);
   }
@@ -3111,7 +3116,10 @@ function refreshTaskBubbles() {
     const open = document.createElement('span');
     open.className = 'task-open';
     open.textContent = 'open transcript';
-    open.addEventListener('click', (e) => { e.stopPropagation(); viewSession(sa.agentId); });
+    open.addEventListener('click', (e) => {
+      e.stopPropagation();
+      viewSession(sa.agentId, { knownChild: true, knownParent: sa.parentSessionId || currentSessionId });
+    });
     live.appendChild(text);
     live.appendChild(open);
   }
@@ -3134,6 +3142,14 @@ function applySubAgentBanner() {
   subagentBanner.classList.toggle('show', currentSessionIsChild);
   const inputBar = document.getElementById('input-bar') || promptInput.closest('div');
   if (inputBar) inputBar.style.display = currentSessionIsChild ? 'none' : '';
+  // The model picker, mode picker and Auto-approve all change how a session
+  // RUNS, and a sub-agent transcript is not something the user runs — its
+  // model and permissions were decided by the parent that delegated to it.
+  // Leaving them live would offer settings that either do nothing or, worse,
+  // quietly alter a child's next turn after it is promoted. Hidden with the
+  // input bar, and restored by Promote.
+  const controlsRow = document.getElementById('controls-row');
+  if (controlsRow) controlsRow.style.display = currentSessionIsChild ? 'none' : '';
 }
 
 saParentBtn.addEventListener('click', () => {

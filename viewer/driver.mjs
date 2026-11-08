@@ -3995,8 +3995,18 @@ const server = createServer(async (req, res) => {
   res.end();
 });
 
-server.listen(args.port, "0.0.0.0", () => {
-  console.log(`[driver] listening on port ${args.port}, forwarding to viewer at ${VIEWER_MESSAGE_URL}`);
+// 0.0.0.0 by default because under Docker's default bridge network a service
+// bound to 127.0.0.1 inside the container is not reachable through a -p publish
+// at all; the publish itself (-p 127.0.0.1:PORT:PORT) is what scopes it. Under
+// --host-network there is no namespace and no publish, so 0.0.0.0 would put
+// THIS control plane — pause, delete, auto-approve, and everything §10 adds —
+// on every host interface. podprompt.sh sets PODPROMPT_BIND_ADDR=127.0.0.1 in
+// that mode. Defaulted rather than required so running the driver by hand, or
+// from an older launcher, behaves as it always did.
+const BIND_ADDR = process.env.PODPROMPT_BIND_ADDR || "0.0.0.0";
+
+server.listen(args.port, BIND_ADDR, () => {
+  console.log(`[driver] listening on ${BIND_ADDR}:${args.port}, forwarding to viewer at ${VIEWER_MESSAGE_URL}`);
   console.log(`[driver] new-chat default backend: ${defaultBackendId()}`);
   console.log("[driver] multi-session — no pinned session id; each request names its own target");
 });

@@ -144,7 +144,10 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   container reach services the host listens on
                   loopback-only (e.g. a llama-server bound to
                   127.0.0.1:8080) at the same 127.0.0.1 address, with no
-                  -p port publishes and no LAN exposure. Native and
+                  -p port publishes. The viewer services bind loopback in
+                  this mode rather than 0.0.0.0, so there is still no LAN
+                  exposure even though the container shares the host's
+                  interfaces. Native and
                   reliable on Linux. On macOS this needs Docker Desktop
                   4.34+ with Settings > Resources > Network > "Enable
                   host networking" turned on — and even then the
@@ -836,9 +839,22 @@ fi
 # container, with no -p publishes and no LAN exposure. Native and reliable on
 # Linux; on macOS it needs Docker Desktop 4.34+ with the "Enable host
 # networking" setting in Settings > Resources > Network.
+# What the in-container viewer services bind to. 0.0.0.0 is REQUIRED under the
+# default bridge network: a service bound to 127.0.0.1 inside the container is
+# not reachable through a -p publish at all. It is safe there precisely because
+# the publish is itself scoped (-p 127.0.0.1:PORT:PORT) and the container has
+# its own network namespace.
+#
+# Under --host-network neither of those holds: there is no namespace and no
+# publish, so a 0.0.0.0 bind lands on EVERY host interface and puts the driver's
+# whole control plane on the LAN — the opposite of what this flag documents.
+# So host networking forces the bind back to loopback, which is also all that
+# mode ever needed: the browser reaches the services at 127.0.0.1 directly.
+BIND_ADDR=0.0.0.0
 NETWORK_FLAG=()
 if [ "$HOST_NETWORK" = 1 ]; then
     NETWORK_FLAG=(--network host)
+    BIND_ADDR=127.0.0.1
     # -p publishes are discarded under host networking (Docker warns about it);
     # drop them up front so no stale 127.0.0.1:PORT publishes linger in the
     # command. Server-side listeners inside the container now bind into the
@@ -975,6 +991,7 @@ docker run -it --rm \
   -e VIEWER_PORT="$VIEWER_PORT" \
   -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
   -e OPENCODE_PORT="$OPENCODE_PORT" \
+  -e PODPROMPT_BIND_ADDR="$BIND_ADDR" \
   -e HOST_WORKSPACE_PATH="$(pwd)" \
   ${EFFECTIVE_TOKEN:+-e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"} \
   ${EFFECTIVE_MODEL:+-e ANTHROPIC_MODEL="$EFFECTIVE_MODEL"} \

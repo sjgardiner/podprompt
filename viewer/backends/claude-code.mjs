@@ -689,6 +689,75 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // transcript, where every entry is by definition sub-agent-internal. In a
   // parent's transcript those entries are still skipped: they belong to the
   // child session's feed, not the parent's.
+  // ── Deep history ────────────────────────────────────────────────────
+  // getSessionMessages returns the CURRENT conversation view, which after a
+  // compaction begins at the summary. Measured on a real session: the SDK
+  // offered 1299 entries while the on-disk log held 6931, with 2201
+  // user/assistant turns sitting before the SDK's window — including content
+  // the model could no longer see.
+  //
+  // So this does not replace the SDK. It STITCHES: the SDK stays
+  // authoritative for its own window (it curates away queue-operation,
+  // atis-latch, attachment and other bookkeeping we have no business
+  // interpreting), and the raw log supplies only what precedes it. The seam
+  // is the uuid of the SDK's first entry, which is present in the log.
+  //
+  // Cost is not the reason this is opt-in for display: reading the whole
+  // 13MB log measured 80ms against the SDK call's 82ms. The reason is that
+  // the browser then has to render ~7x the bubbles.
+  function deepHistoryFile(sessionId) {
+    // Discovered by session id rather than derived from cwd. Session ids are
+    // unique across project directories (verified: 49 files, 7 dirs, no
+    // duplicate basenames), and derivation is exactly the bug that bites —
+    // a cwd guess of /workspace instead of /workspace/podprompt silently
+    // yields an empty read.
+    let dirs;
+    try {
+      dirs = readdirSync(PROJECTS_DIR);
+    } catch {
+      return null;
+    }
+    for (const d of dirs) {
+      const candidate = nodePath.join(PROJECTS_DIR, d, `${sessionId}.jsonl`);
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  function readRawSessionLog(file) {
+    const out = [];
+    let text;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      return out;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      // One torn line (a crash mid-write) must not lose the whole log.
+      try { out.push(JSON.parse(line)); } catch { /* skip */ }
+    }
+    return out;
+  }
+
+  // Entries from the log that precede the SDK's window. Returns [] whenever
+  // anything is uncertain — a missing file, an unrecognised seam — because
+  // showing a partial-but-honest view beats guessing at a stitch point.
+  function historyBeforeSdkWindow(sessionId, sdkMessages) {
+    const firstUuid = sdkMessages?.[0]?.uuid;
+    if (!firstUuid) return [];
+    const file = deepHistoryFile(sessionId);
+    if (!file) return [];
+    const raw = readRawSessionLog(file);
+    const seam = raw.findIndex((e) => e?.uuid === firstUuid);
+    if (seam <= 0) return []; // not found, or the SDK already starts at the top
+    // Deduped against the SDK window: the append-only log can carry revised
+    // entries whose uuids reappear later. Measured 2 such overlaps on a real
+    // session, so this is load-bearing rather than belt-and-braces.
+    const sdkUuids = new Set(sdkMessages.map((e) => e?.uuid).filter(Boolean));
+    return raw.slice(0, seam).filter((e) => e?.uuid && !sdkUuids.has(e.uuid));
+  }
+
   function convertSessionMessages(rawMessages, { includeSubagent = false } = {}) {
     const out = [];
     for (const entry of rawMessages) {
@@ -1855,7 +1924,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       return null;
     },
 
-    async getSessionHistory(sessionId, fallbackCwd, relation) {
+    async getSessionHistory(sessionId, fallbackCwd, relation, { deep = false } = {}) {
       // A sub-agent's transcript is a file of its own
       // (subagents/agent-<agentId>.jsonl), not entries inside the parent's —
       // so replaying one means asking the SDK for that agent's messages
@@ -1877,7 +1946,15 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       }
       try {
         const raw = await getSessionMessages(sessionId, { dir: cwdForSession(sessionId, fallbackCwd) });
-        return convertSessionMessages(raw);
+        if (!deep) return convertSessionMessages(raw);
+        // convertSessionMessages works on raw log lines unchanged: its
+        // `entry.parent_agent_id || entry.isSidechain` guard happens to cover
+        // the SDK's spelling and the log's spelling of the same idea, and it
+        // ignores every entry type it does not recognise. Defensive code
+        // written for older CLI builds is what makes this free.
+        const before = historyBeforeSdkWindow(sessionId, raw);
+        if (!before.length) return convertSessionMessages(raw);
+        return [...convertSessionMessages(before), ...convertSessionMessages(raw)];
       } catch {
         return [];
       }

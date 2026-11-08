@@ -511,6 +511,24 @@ class Handler(BaseHTTPRequestHandler):
         # message the browser should see here, tagged with which session it
         # belongs to (also handy for manual testing, e.g.
         # `curl -d '{"sessionId":"...","role":"user","text":"hi"}'`).
+        # Drop every session's cached history so the next connect re-fetches
+        # it. Posted by driver.mjs when the deep-history setting changes:
+        # the log here is seeded once behind a latch, so without this a tab
+        # would keep replaying the depth it happened to be seeded with and
+        # the setting would appear to do nothing.
+        if path == "/reseed":
+            with sessions_lock:
+                for s in sessions.values():
+                    s["log"] = []
+                    s["seeded"] = False
+                    s["seeding"] = False
+                    s["retry_scheduled"] = False
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+
         if path == "/message" and session_id:
             role = payload.get("role", "assistant")
             text = payload.get("content", payload.get("text", ""))

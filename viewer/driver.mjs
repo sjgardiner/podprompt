@@ -769,6 +769,37 @@ const chains = createChains({
   onError: (e) => console.error("[driver] failed to write chains file:", e.message),
 });
 
+// ── Deep-history display setting ─────────────────────────────────────────
+// Lives server-side rather than in the browser's localStorage, unlike every
+// other viewer setting. Those are render-time preferences and per-tab is
+// fine; this one decides what server.py FETCHES into a log shared by every
+// tab, so two tabs disagreeing would fight over one cache. Persisting here
+// also makes it per-install rather than per-browser.
+//
+// Claude Code only. OpenCode's API already returns its full history (its
+// compaction adds messages and deletes nothing — verified by forcing one),
+// so there is nothing for this to turn on there.
+const DEEP_HISTORY_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-deep-history.json");
+
+let deepHistoryEnabled = (() => {
+  try {
+    return !!JSON.parse(readFileSync(DEEP_HISTORY_FILE, "utf8"))?.enabled;
+  } catch {
+    return false;
+  }
+})();
+
+function setDeepHistory(enabled) {
+  deepHistoryEnabled = !!enabled;
+  try {
+    writeFileSync(`${DEEP_HISTORY_FILE}.tmp`, JSON.stringify({ enabled: deepHistoryEnabled }));
+    renameSync(`${DEEP_HISTORY_FILE}.tmp`, DEEP_HISTORY_FILE);
+  } catch (e) {
+    console.error("[driver] failed to persist deep-history setting:", e.message);
+  }
+  return deepHistoryEnabled;
+}
+
 // ── Resuming a turn that ended badly ────────────────────────────────────
 // Turns die in three ways, and only two of them announce it:
 //
@@ -1448,7 +1479,12 @@ async function historyFor(sessionId) {
   const st = sessions.get(sessionId);
   const backend = st?.backend
     || getBackend(sessionIdToBackend.get(sessionId) || defaultBackendId());
-  const hist = await backend.getSessionHistory(sessionId, st?.cwd, sessionRelations[sessionId] || null);
+  // ALWAYS deep, regardless of the viewer's display setting. This is the
+  // tool whose whole purpose is recovering what was lost; a version of it
+  // that silently answers "nothing found" when the answer exists would be
+  // worse than not having it. The setting governs rendering, not retrieval.
+  const hist = await backend.getSessionHistory(
+    sessionId, st?.cwd, sessionRelations[sessionId] || null, { deep: true });
   return Array.isArray(hist) ? hist : [];
 }
 
@@ -2837,7 +2873,11 @@ const server = createServer(async (req, res) => {
       // The relation row rides along so a backend can tell a sub-agent's
       // transcript apart from an ordinary session's — they live in different
       // places on disk and a child's synthesized id appears in neither.
-      history = await backend.getSessionHistory(sessionId, state?.cwd, sessionRelations[sessionId] || null);
+      // The display setting governs this route only. read_session goes
+      // through historyFor(), which is deep unconditionally.
+      history = await backend.getSessionHistory(
+        sessionId, state?.cwd, sessionRelations[sessionId] || null,
+        { deep: deepHistoryEnabled });
     } catch (e) {
       // /modes and /models already fail with 502 rather than killing the
       // driver; history must behave the same so server.py's _fetch_session_history
@@ -3533,6 +3573,40 @@ const server = createServer(async (req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
     }
+    return;
+  }
+
+  if (req.method === "GET" && path === "/deep-history") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ enabled: deepHistoryEnabled }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/deep-history") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const enabled = setDeepHistory(!!body.enabled);
+    console.log(`[driver] deep history display ${enabled ? "enabled" : "disabled"}`);
+    // server.py seeds each session's log ONCE behind a latch, so the new
+    // depth would otherwise never be fetched. Dropping the seed makes the
+    // next connect re-read at the new depth.
+    try {
+      await fetch(VIEWER_MESSAGE_URL.replace("/message", "/reseed"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (e) {
+      console.error("[driver] could not ask the viewer to reseed:", e.message);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, enabled }));
     return;
   }
 

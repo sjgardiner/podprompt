@@ -407,6 +407,16 @@
      icon buttons and three status widgets, and this UI has no generic panel
      menu — panels are opened BY header buttons — so a second slot for the
      same feature was not affordable. */
+  #jump-latest { display: none; }
+  #jump-latest.show {
+    display: block;
+    margin: 0 auto 12px; max-width: var(--content-width, 860px);
+    padding: 7px 12px; text-align: center; cursor: pointer;
+    border: 1px dashed var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--muted); font-size: 13px;
+  }
+  #jump-latest.show:hover { color: var(--accent); border-color: var(--accent); }
+
   /* Sits ABOVE the input bar rather than inside it. A button that appears
      and vanishes inside the bar moves Send at exactly the moment you are
      reaching for it — and this strip needs room to say WHICH failure
@@ -1541,6 +1551,14 @@
           </div>
           <div class="settings-note" id="notify-note"></div>
         </div>
+
+        <div class="settings-group">
+          <div class="settings-group-title">History</div>
+          <div class="settings-row" id="deep-history-row">
+            <label><span>Load full history</span> <input type="checkbox" id="deep-history-toggle"></label>
+          </div>
+          <div class="settings-note show" id="deep-history-note"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1556,6 +1574,11 @@
   </div>
 
   <div id="feed">
+    <!-- Lives INSIDE the feed as its first item rather than floating: it is
+         only reachable by scrolling to the top, which is exactly when it is
+         wanted. The existing new-message affordance covers "something
+         arrived"; this covers "nothing new, but I am a long way up". -->
+    <div id="jump-latest" role="button" tabindex="0">↓ Jump to latest message</div>
     <div id="empty">
       <div class="icon">⌨</div>
       <p>Waiting for messages…</p>
@@ -1972,6 +1995,12 @@ function renderPlanUsage() {
 function insertFeedItem(wrap, insertTop) {
   if (insertTop) feed.insertBefore(wrap, feed.firstChild);
   else feed.appendChild(wrap);
+  // The jump bar is a feed item, not an overlay, so a front-inserting
+  // history batch would otherwise shove it into the middle of the
+  // transcript. Re-assert it rather than special-casing the insert, which
+  // would mean reasoning about the batch's own ordering.
+  if (jumpLatest && feed.firstChild !== jumpLatest) feed.insertBefore(jumpLatest, feed.firstChild);
+  refreshJumpLatest();
 }
 
 // Shared body behind both history replay paths: the per-entry 'history' events
@@ -3242,6 +3271,82 @@ notifySound.addEventListener('change', () => {
 // The safety half of the messaging UI, and deliberately built BEFORE
 // anything can start a turn on its own: the breaker ships before the thing
 // it stops.
+// ── Jump to latest ──────────────────────────────────────────────────────
+// A feed item rather than a floating control: it is only reachable by
+// scrolling to the top, which is exactly when it is useful. The existing
+// new-message pill covers "something arrived while you were away"; this
+// covers "nothing is new, but I have read my way up here".
+const jumpLatest = document.getElementById('jump-latest');
+const JUMP_LATEST_MIN_SCREENS = 1.2; // a screenful, plus a little, so it never appears on a short feed
+
+function refreshJumpLatest() {
+  if (!jumpLatest) return;
+  const worthIt = feed.scrollHeight > feed.clientHeight * JUMP_LATEST_MIN_SCREENS;
+  jumpLatest.classList.toggle('show', worthIt);
+}
+
+if (jumpLatest) {
+  const jump = () => { pinnedToBottom = true; feed.scrollTop = feed.scrollHeight; };
+  jumpLatest.addEventListener('click', jump);
+  jumpLatest.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); }
+  });
+  // Content can change height without an insert (a streaming bubble growing,
+  // thinking blocks expanding, the window resizing).
+  window.addEventListener('resize', refreshJumpLatest);
+}
+
+// ── Full history (Claude Code only) ─────────────────────────────────────
+// Unlike every other setting here this one is NOT in localStorage: it
+// decides what server.py fetches into a log shared by every tab, so two
+// tabs disagreeing would fight over one cache. It lives in the driver and
+// persists per-install.
+const deepHistoryRow = document.getElementById('deep-history-row');
+const deepHistoryToggle = document.getElementById('deep-history-toggle');
+const deepHistoryNote = document.getElementById('deep-history-note');
+
+function refreshDeepHistoryUi() {
+  if (!deepHistoryRow) return;
+  // Greyed rather than hidden for OpenCode: a control that vanishes reads as
+  // a bug, one that explains itself teaches what the backends do differently.
+  const isOpencode = resolvedBackendForIndicator() === 'opencode';
+  deepHistoryRow.classList.toggle('disabled', isOpencode);
+  if (deepHistoryToggle) deepHistoryToggle.disabled = isOpencode;
+  deepHistoryNote.textContent = isOpencode
+    ? 'OpenCode already loads a session\u2019s full history, so this does nothing there.'
+    : 'Claude Code hides turns from before a conversation was compacted. Loading them is '
+      + 'slower and uses more memory on long sessions. This affects what you SEE \u2014 '
+      + 'agents can always read the full history. Turning it off takes effect on the next load.';
+}
+
+async function loadDeepHistorySetting() {
+  if (!driverBase || !deepHistoryToggle) return;
+  try {
+    const d = await fetch(`${driverBase}/deep-history`).then(r => r.json());
+    deepHistoryToggle.checked = !!d.enabled;
+  } catch { /* leave as-is; a failed read must not flip a stored setting */ }
+  refreshDeepHistoryUi();
+}
+
+if (deepHistoryToggle) {
+  deepHistoryToggle.addEventListener('change', async () => {
+    if (!driverBase) return;
+    const enabled = deepHistoryToggle.checked;
+    try {
+      await fetch(`${driverBase}/deep-history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    } catch { return; }
+    // Turning it ON reloads so the newly-available history actually appears;
+    // the driver has already dropped server.py's seed. Turning it OFF does
+    // NOT reload: un-rendering thousands of bubbles would mean clearing the
+    // feed and losing your place, for no gain. It applies next time.
+    if (enabled) location.reload();
+  });
+}
+
 const messagingBtn = document.getElementById('messaging-btn');
 const messagingPanel = document.getElementById('messaging-panel');
 const pausedStrip = document.getElementById('paused-strip');
@@ -4401,6 +4506,7 @@ async function loadDriverConfig() {
     // chain hitting its deadline with nobody watching.
     refreshMessaging();
     setInterval(refreshMessaging, 20000);
+    loadDeepHistorySetting();
     // The restart case is precisely when the page has just been reloaded,
     // so this has to be correct from first paint rather than only after
     // something happens to tick it.
@@ -5530,6 +5636,10 @@ const backendBadge = document.getElementById('backend-badge');
 // a stale or unresolved backend any longer than the underlying data does.
 function updateBackendIndicator() {
   const backend = resolvedBackendForIndicator();
+  // The setting is Claude-Code-only, and "which backend" is a property of
+  // the session being viewed, not of the window — so this has to follow a
+  // session switch rather than being decided once at load.
+  refreshDeepHistoryUi();
   appLogo.classList.remove('backend-claude-code', 'backend-opencode');
   if (backend) {
     appLogo.classList.add(`backend-${backend}`);

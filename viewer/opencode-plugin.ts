@@ -217,6 +217,34 @@ export default (async () => {
         },
       }),
 
+      read_session: tool({
+        description: "Read the transcript of a PodPrompt session — another one, or your OWN. Use it to recover something said EARLIER in this conversation that you no longer remember or that was summarised away by compaction, to re-read what the user told you before, or to find detail a delegated session did not include in its final reply. Search by text, or page with from=. Returns numbered entries, most recent by default.",
+        args: {
+          session: tool.schema.string().optional().describe("Which session: an @handle from list_sessions, or \"me\" for this session's own transcript (the default)."),
+          search: tool.schema.string().optional().describe("Only entries containing this text. The main way to find something specific without reading everything."),
+          from: tool.schema.number().optional().describe("Start at this entry number and read forwards — use it to reach the BEGINNING of a long session, which the default (most recent) will not show."),
+          last: tool.schema.number().optional().describe("Only the final N entries."),
+          role: tool.schema.enum(["assistant", "user", "tool"]).optional().describe("Only entries of this kind: assistant, user or tool. Tool entries hold command output and are often where a detail actually lives."),
+          limit: tool.schema.number().optional().describe("How many entries to return (default 10, max 25)."),
+        },
+        async execute(args, context) {
+          const q = new URLSearchParams({ from: context.sessionID })
+          if (args.session) q.set("session", String(args.session))
+          if (args.search) q.set("search", String(args.search))
+          if (args.from) q.set("start", String(args.from))
+          if (args.last) q.set("last", String(args.last))
+          if (args.role) q.set("role", String(args.role))
+          if (args.limit) q.set("limit", String(args.limit))
+          try {
+            const { body } = await driverFetch(`/read-session?${q.toString()}`)
+            // The driver renders it, so both backends print the same thing.
+            return (body?.rendered as string) || `Could not read that session.`
+          } catch (e: any) {
+            return `Could not read that session: ${e?.message || String(e)}`
+          }
+        },
+      }),
+
       message_session: tool({
         description:
           "Send a message to another PodPrompt session, addressed by an @handle from "

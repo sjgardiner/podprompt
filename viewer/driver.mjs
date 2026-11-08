@@ -433,6 +433,8 @@ const backendHooks = {
     describeReceipt,
     backendIds: () => Object.keys(backends),
     systemPrompt: () => messagingSystemPrompt({ prefix: "mcp__podprompt__" }),
+    readSession: (fromSessionId, args) => toolReadSession(fromSessionId, args),
+    renderReadSession,
   },
 };
 const backends = {
@@ -1236,11 +1238,12 @@ function messagingSystemPrompt({ prefix = "" } = {}) {
     "This session runs inside PodPrompt, which shows the user a list of chat sessions."
     + " Other sessions are reachable from here and are addressed by @handle.",
     "",
-    "Three tools act on PodPrompt sessions:",
+    "Four tools act on PodPrompt sessions:",
     `  ${t("list_sessions")}    — find another session's @handle`,
     `  ${t("message_session")}  — send a message to one`,
     `  ${t("delegate_session")} — create a NEW session on a chosen backend`
     + " (claude-code or opencode) and give it work",
+    `  ${t("read_session")}     — read a session's transcript, including your own`,
     "",
     // Framed by WHEN each route is right, never by what each is not. An
     // earlier draft said "a PodPrompt session is not a sub-agent", which
@@ -1267,6 +1270,15 @@ function messagingSystemPrompt({ prefix = "" } = {}) {
     // list again.
     "You only need to look a handle up once per conversation. Reuse handles you have already"
     + " looked up; if one stops resolving, list again to get the current set.",
+    "",
+    // The one case the free mechanisms cannot reach. delegate_session's own
+    // output advertises read_session for inspecting a CHILD, which is where
+    // that need arises — but nothing advertises reading your OWN transcript,
+    // and a model asked to recall something from earlier will reach for
+    // files or its context rather than suspect a transcript tool exists.
+    `${t("read_session")} also reads THIS session: if you need something said earlier that you`
+    + " no longer have — because the conversation is long or was compacted — read your own"
+    + ' transcript with session="me" and a search term rather than guessing or asking again.',
   ].join("\n");
 }
 
@@ -1397,9 +1409,14 @@ function watchDelegateForReport(waiter, childId, parentId, chainId) {
   waiter.then(async (outcome) => {
     const text = await finalAssistantText(childId);
     const handle = peers.get(childId)?.handle || childId;
-    const body = text
+    // Advertises read_session exactly where it becomes relevant: the parent
+    // has just received a summary and may want the working that produced it.
+    // Cheaper and better targeted than a system-prompt clause.
+    const body = (text
       ? `Delegated work finished (${outcome?.reason || "completed"}):\n\n${text}`
-      : `Delegated work ended with no output (${outcome?.reason || "completed"}).`;
+      : `Delegated work ended with no output (${outcome?.reason || "completed"}).`)
+      + `\n\n(For detail it left out, read its transcript: read_session session="@${handle}",`
+      + ` search="...".)`;
     const receipt = deliver(parentId, body, {
       from: localPrincipal(childId),
       kind: "result",
@@ -1409,6 +1426,150 @@ function watchDelegateForReport(waiter, childId, parentId, chainId) {
       console.error(`[driver] delegated report from @${handle} not delivered: ${receipt.reason}`);
     }
   }).catch((e) => console.error(`[driver] delegate watcher failed for ${childId}:`, e.message));
+}
+
+// read_session: retrospective access to a session's transcript, including
+// the caller's own.
+//
+// Why it exists: the only information a parent gets back from a delegated
+// child is its FINAL reply, and the only thing a peer gets is what was
+// messaged. Anything learned along the way is lost unless it was anticipated
+// when the prompt was written — which is exactly when it is not. Search
+// after the fact is the fix.
+//
+// Why search rather than citation: a model never sees its own message ids,
+// so it cannot say "see message 7 of mine". It can only describe what it
+// did, and the reader greps for it.
+const READ_DEFAULT_LIMIT = 10;
+const READ_MAX_LIMIT = 25;
+const READ_ENTRY_CHARS = 1500;
+
+async function historyFor(sessionId) {
+  const st = sessions.get(sessionId);
+  const backend = st?.backend
+    || getBackend(sessionIdToBackend.get(sessionId) || defaultBackendId());
+  const hist = await backend.getSessionHistory(sessionId, st?.cwd, sessionRelations[sessionId] || null);
+  return Array.isArray(hist) ? hist : [];
+}
+
+async function toolReadSession(fromSessionId, {
+  session, search = null, from = null, last = null, role = null, limit = null,
+} = {}) {
+  // "me" is the compaction-repair path: a session re-reading its own earlier
+  // turns after they have been summarised away.
+  const self = !session || session === "me" || session === "self";
+  let targetId = fromSessionId;
+  if (!self) {
+    const resolved = peers.resolve(session);
+    if (!resolved.ok) return { ok: false, reason: resolved.reason, session };
+    if (resolved.ref.realm !== LOCAL_REALM) return { ok: false, reason: "realm-unreachable" };
+    targetId = resolved.ref.id;
+    // Reading is interaction, so the same fence applies. A user who turned a
+    // session off from other sessions did not mean "except for reading".
+    const peer = peers.get(targetId);
+    if (peer && peer.messageable === false) return { ok: false, reason: "not-messageable", session };
+  }
+
+  let history;
+  try {
+    history = await historyFor(targetId);
+  } catch (e) {
+    return { ok: false, reason: "unreadable", error: e.message };
+  }
+
+  // Numbered over the FULL history before any filtering, so an index means
+  // the same thing across calls with different filters — otherwise `from=12`
+  // would silently refer to a different entry each time.
+  const all = history.map((h, i) => ({
+    n: i + 1,
+    role: h.role || "assistant",
+    ts: h.ts || null,
+    text: String(h.text ?? ""),
+  })).filter((e) => e.text.trim());
+
+  let rows = all;
+  if (role) rows = rows.filter((e) => e.role === role);
+  const needle = search ? String(search).toLowerCase() : null;
+  if (needle) rows = rows.filter((e) => e.text.toLowerCase().includes(needle));
+
+  const matched = rows.length;
+  const cap = Math.max(1, Math.min(Number(limit) || READ_DEFAULT_LIMIT, READ_MAX_LIMIT));
+
+  let shown;
+  if (from !== null && from !== undefined) {
+    const start = Math.max(1, Number(from) || 1);
+    shown = rows.filter((e) => e.n >= start).slice(0, cap);
+  } else if (last !== null && last !== undefined) {
+    shown = rows.slice(-Math.max(1, Math.min(Number(last), READ_MAX_LIMIT)));
+  } else {
+    // No position given: the tail, which is the right guess for "what just
+    // happened" and the WRONG one for "what did they say at the start" —
+    // hence the header below, which hands the caller the coordinates to ask
+    // again properly.
+    shown = rows.slice(-cap);
+  }
+  shown = shown.map((e) => ({
+    ...e,
+    text: e.text.length > READ_ENTRY_CHARS
+      ? `${e.text.slice(0, READ_ENTRY_CHARS)}\n… [entry truncated]`
+      : e.text,
+  }));
+
+  return {
+    ok: true,
+    session: self ? "me" : session,
+    handle: peers.get(targetId)?.handle || null,
+    total: all.length,
+    matched,
+    shown: shown.length,
+    firstShown: shown.length ? shown[0].n : null,
+    lastShown: shown.length ? shown[shown.length - 1].n : null,
+    search: search || null,
+    role: role || null,
+    entries: shown,
+  };
+}
+
+// Rendered once, here, so both shims print the same thing. The header is the
+// load-bearing part: it gives the caller the coordinate system, which is what
+// makes a second, targeted call possible instead of blind paging.
+function renderReadSession(result) {
+  if (!result.ok) {
+    return ({
+      "unknown-handle": `No session called ${result.session}. Use list_sessions to see who exists.`,
+      "unknown-realm": `No such realm in ${result.session}.`,
+      "bad-address": `"${result.session}" is not a valid session address.`,
+      "not-messageable": `${result.session} has inter-session access turned off.`,
+      "realm-unreachable": "Only local sessions can be read.",
+      unreadable: `Could not read that session: ${result.error}`,
+    })[result.reason] || `Could not read that session (${result.reason}).`;
+  }
+  const who = result.session === "me" ? "This session" : `@${result.handle || result.session}`;
+  if (!result.total) return `${who} has no readable transcript yet.`;
+  if (!result.shown) {
+    return result.search
+      ? `${who}: nothing matches "${result.search}" in ${result.total} entries.`
+      : `${who}: nothing to show.`;
+  }
+  // Filters are named, and the count is stated separately from the entry
+  // RANGE: with a filter applied the two differ (entries 1 and 3 are "2
+  // entries, numbers 1–3"), and printing only the range reads as a count.
+  const filters = [];
+  if (result.search) filters.push(`matching "${result.search}"`);
+  if (result.role) filters.push(`of kind ${result.role}`);
+  const scope = filters.length
+    ? `${result.matched} of ${result.total} entries ${filters.join(", ")}`
+    : `${result.total} entries`;
+  const range = result.firstShown === result.lastShown
+    ? `entry ${result.firstShown}`
+    : `entries ${result.firstShown}–${result.lastShown}`;
+  const header = `${who}: ${scope}. Showing ${result.shown} (${range}).`
+    + `\nNumbers are positions in the full transcript. Use from= to read earlier,`
+    + ` search= to find specific text, role= to filter.`;
+  const body = result.entries
+    .map((e) => `\n[${e.n}] ${e.role}${e.ts ? ` · ${e.ts}` : ""}\n${e.text}`)
+    .join("\n");
+  return `${header}\n${body}`;
 }
 
 // What the model actually reads back. Every outcome is stated plainly,
@@ -3346,6 +3507,32 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, chainId: started.chainId }));
+    return;
+  }
+
+  if (req.method === "GET" && path === "/read-session") {
+    const fromId = podSessionIdFor(url.searchParams.get("from"));
+    if (!fromId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"from is required"}');
+      return;
+    }
+    const num = (k) => (url.searchParams.get(k) ? Number(url.searchParams.get(k)) : null);
+    try {
+      const result = await toolReadSession(fromId, {
+        session: url.searchParams.get("session"),
+        search: url.searchParams.get("search"),
+        from: num("start"),
+        last: num("last"),
+        role: url.searchParams.get("role"),
+        limit: num("limit"),
+      });
+      res.writeHead(result.ok ? 200 : 409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...result, rendered: renderReadSession(result) }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 

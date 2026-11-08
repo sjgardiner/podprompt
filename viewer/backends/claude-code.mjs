@@ -1111,6 +1111,26 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // prompt buys access to all three.
         ),
         tool(
+          "read_session",
+          "Read the transcript of a PodPrompt session — another one, or your OWN. Use it to recover something said EARLIER in this conversation that you no longer remember or that was summarised away by compaction, to re-read what the user told you before, or to find detail a delegated session did not include in its final reply. Search by text, or page with from=. Returns numbered entries, most recent by default.",
+          {
+            session: z.string().optional().describe("Which session: an @handle from list_sessions, or \"me\" for this session's own transcript (the default)."),
+            search: z.string().optional().describe("Only entries containing this text. The main way to find something specific without reading everything."),
+            from: z.number().optional().describe("Start at this entry number and read forwards — use it to reach the BEGINNING of a long session, which the default (most recent) will not show."),
+            last: z.number().optional().describe("Only the final N entries."),
+            role: z.enum(["assistant", "user", "tool"]).optional().describe("Only entries of this kind: assistant, user or tool. Tool entries hold command output and are often where a detail actually lives."),
+            limit: z.number().optional().describe("How many entries to return (default 10, max 25)."),
+          },
+          async (args) => {
+            try {
+              const result = await messaging.readSession(sessionId, args || {});
+              return { content: [{ type: "text", text: messaging.renderReadSession(result) }] };
+            } catch (e) {
+              return { content: [{ type: "text", text: `Could not read that session: ${e.message}` }] };
+            }
+          },
+        ),
+        tool(
           "message_session",
           "Send a message to another PodPrompt session, addressed by an @handle from "
           + "list_sessions. Delivered when that session is idle; it replies by messaging "
@@ -1173,7 +1193,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                     type: "text",
                     text: `Delegated to ${receipt.handle} on ${args.backend}. It is running now;`
                       + ` its report will arrive as a message. You can also send it more`
-                      + ` instructions with the message tool.`,
+                      + ` instructions with message_session, or read its transcript as it goes`
+                      + ` with read_session.`,
                   }],
                 };
               }
@@ -1182,7 +1203,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                   type: "text",
                   text: `${receipt.handle} (${args.backend}) finished [${receipt.outcome}].\n\n`
                     + (receipt.text || "(it produced no text output)")
-                    + `\n\nYou can follow up with it using the message tool and this handle.`,
+                    + `\n\nYou can follow up with message_session using this handle, or read`
+                    + ` what it left out with read_session session="${receipt.handle}".`,
                 }],
               };
             } catch (e) {

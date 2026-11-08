@@ -124,12 +124,13 @@ export default (async () => {
           + "different backend or model than yours, and by default it is asynchronous — your "
           + "turn ends right away and the result arrives later as a message, so the user is "
           + "not left waiting. Use a plain sub-agent (or await=true) only when the work is "
-          + "quick and you need its answer inside this turn.",
+          + "quick and you need its answer inside this turn. "
+          + "You get back only its FINAL reply, not its whole transcript — so say what the answer should look like and ask for it last. You also get an @handle: follow up with message_session, and the user can open the session to read it in full.",
         args: {
           backend: tool.schema.enum(["claude-code", "opencode"])
             .describe("Which backend the new session should run on."),
           prompt: tool.schema.string()
-            .describe("The work. Self-contained — the new session sees none of your context."),
+            .describe("The work, stated so it stands alone. The new session starts a FRESH conversation: it cannot see this one, anything you have read, or the instructions you were given — if it needs background, put it here. It DOES share the same workspace and working directory, so refer to files by path rather than pasting them."),
           title: tool.schema.string().optional()
             .describe("Short label for the new session."),
           await: tool.schema.boolean().optional()

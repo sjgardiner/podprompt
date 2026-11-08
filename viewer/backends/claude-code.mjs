@@ -1037,15 +1037,26 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const messagingServer = messaging ? createSdkMcpServer({
       name: "podprompt",
       version: "1.0.0",
+      // Surfaced to the model as an MCP instructions block. The one place
+      // to state what this server is FOR, which matters because the host
+      // harness may provide its own agent-messaging tools that look similar
+      // and mean something else.
       instructions:
-        "Tools for talking to other PodPrompt sessions running alongside this one. "
-        + "Use list_peers first to see who exists and whether they are busy.",
+        "Tools for talking to the other PodPrompt sessions running alongside this one — "
+        + "the chats visible in the user's PodPrompt window. They are addressed by "
+        + "@handle, which you get from list_sessions. These are NOT sub-agents you "
+        + "spawned, and NOT the agents of any other messaging tool your harness "
+        + "provides; those are separate and unrelated. Call list_sessions first.",
       tools: [
         tool(
-          "list_peers",
-          "List the other PodPrompt sessions you can send messages to, with their "
-          + "handle, backend, whether they are idle or busy, and how they relate to you. "
-          + "Shows the most recently active first; use search or all to reach the rest.",
+          "list_sessions",
+          "List the other PodPrompt sessions (the chats in the user's PodPrompt window) that "
+          + "you can message, with their @handle, backend, whether they are idle or busy, and "
+          + "how they relate to you. Shows the most recently active first; use search or all "
+          + "to reach the rest. These are not sub-agents and not your harness's own agents. "
+          + "Use this whenever the user refers to another session, chat or @handle. Then send "
+          + "to one with message_session, or create a new session on another backend with "
+          + "delegate_session.",
           {
             search: z.string().optional()
               .describe("Only peers whose handle or title contains this text."),
@@ -1080,17 +1091,30 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
               return { content: [{ type: "text", text: `Could not list peers: ${e.message}` }] };
             }
           },
+          // ALWAYS loaded, unlike its two siblings. Without this the tool is
+          // deferred behind tool search, and a host harness that ships its
+          // own always-present agent-messaging tools wins every time — the
+          // model never sees ours to choose it. Verified: with identical
+          // phrasing the model reached for the built-in ListAgents twice.
+          //
+          // Only this one is always loaded. It is the discovery entry point
+          // and its description names the other two, so one tool's worth of
+          // prompt buys access to all three.
+          { alwaysLoad: true },
         ),
         tool(
-          "message",
-          "Send a message to another PodPrompt session. It is delivered when that "
-          + "session is idle, and it will reply by messaging you back — this does not "
-          + "block and does not return their answer. Can also restart a stalled peer.",
+          "message_session",
+          "Send a message to another PodPrompt session, addressed by an @handle from "
+          + "list_sessions. Delivered when that session is idle; it replies by messaging "
+          + "you back, so this does not block and does not return their answer. Can also "
+          + "restart a stalled session. Use this ONLY for PodPrompt sessions — not for "
+          + "sub-agents you spawned, and not for any other agent-messaging tool your "
+          + "harness provides.",
           {
-            to: z.string().describe('Peer handle, e.g. "@researcher". Get these from list_peers.'),
+            to: z.string().describe('Session handle, e.g. "@researcher". Get these from list_sessions.'),
             text: z.string().describe("What to say. Include enough context to act on alone."),
             resume: z.boolean().optional().describe(
-              "Set true for a peer list_peers reports as stalled. Sends the standard"
+              "Set true for a session list_sessions reports as stalled. Sends the standard"
               + " continuation prompt for however its turn died; your text, if any, is"
               + " appended rather than replaced."),
           },
@@ -1104,9 +1128,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           },
         ),
         tool(
-          "delegate",
-          "Create a NEW session on a chosen backend and give it a piece of work. "
-          + "Use this to hand a task to a different model or backend than your own. "
+          "delegate_session",
+          "Create a NEW PodPrompt session on a chosen backend and give it a piece of work. "
+          + "Use this to hand work to a different BACKEND or model than your own — it is "
+          + "not the way to spawn an ordinary sub-agent within your own backend. "
           + "By default it waits and returns the result; set await=false to be told "
           + "later by message instead, which is what you want when fanning out.",
           {

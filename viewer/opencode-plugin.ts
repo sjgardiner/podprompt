@@ -67,11 +67,13 @@ export default (async () => {
 
   return {
     tool: {
-      list_peers: tool({
+      list_sessions: tool({
         description:
-          "List the other PodPrompt sessions you can send messages to, with their "
-          + "handle, backend, whether they are idle or busy, and how they relate to you. "
-          + "Shows the most recently active first; use search or all to reach the rest.",
+          "List the other PodPrompt sessions (the chats in the user's PodPrompt window) "
+          + "that you can message, with their @handle, backend, whether they are idle or "
+          + "busy, and how they relate to you. Shows the most recently active first; use "
+          + "search or all to reach the rest. These are not sub-agents and not your "
+          + "harness's own agents.",
         args: {
           search: tool.schema.string().optional()
             .describe("Only peers whose handle or title contains this text."),
@@ -115,10 +117,11 @@ export default (async () => {
         },
       }),
 
-      delegate: tool({
+      delegate_session: tool({
         description:
-          "Create a NEW session on a chosen backend and give it a piece of work. "
-          + "Use this to hand a task to a different model or backend than your own. "
+          "Create a NEW PodPrompt session on a chosen backend and give it a piece of work. "
+          + "Use this to hand work to a different BACKEND or model than your own — it is "
+          + "not the way to spawn an ordinary sub-agent within your own backend. "
           + "By default it waits and returns the result; set await=false to be told "
           + "later by message instead, which is what you want when fanning out.",
         args: {
@@ -179,18 +182,21 @@ export default (async () => {
         },
       }),
 
-      message: tool({
+      message_session: tool({
         description:
-          "Send a message to another PodPrompt session. It is delivered when that "
-          + "session is idle, and it will reply by messaging you back — this does not "
-          + "block and does not return their answer.",
+          "Send a message to another PodPrompt session, addressed by an @handle from "
+          + "list_sessions. Delivered when that session is idle; it replies by messaging "
+          + "you back, so this does not block and does not return their answer. Can also "
+          + "restart a stalled session. Use this ONLY for PodPrompt sessions — not for "
+          + "sub-agents you spawned, and not for any other agent-messaging tool your "
+          + "harness provides.",
         args: {
           to: tool.schema.string()
-            .describe('Peer handle, e.g. "@researcher". Get these from list_peers.'),
+            .describe('Peer handle, e.g. "@researcher". Get these from list_sessions.'),
           text: tool.schema.string()
             .describe("What to say. Include enough context to act on alone."),
           resume: tool.schema.boolean().optional().describe(
-            "Set true for a peer list_peers reports as stalled. Sends the standard"
+            "Set true for a session list_sessions reports as stalled. Sends the standard"
             + " continuation prompt for however its turn died; your text, if any, is"
             + " appended rather than replaced."),
         },

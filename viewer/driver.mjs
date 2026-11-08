@@ -1367,7 +1367,7 @@ function describeReceipt(receipt, to) {
   }
   if (receipt.reason === "empty-prompt") return "Delegation needs a prompt describing the work.";
   const why = {
-    "unknown-handle": `No peer called ${to} in this realm. Use list_peers to see who exists.`,
+    "unknown-handle": `No peer called ${to} in this realm. Use list_sessions to see who exists.`,
     "unknown-realm": `No such realm in ${to}. Only local peers are reachable right now.`,
     "bad-address": `"${to}" is not a valid address. Use a handle like @researcher.`,
     "self-message": "A session cannot message itself.",
@@ -2657,7 +2657,7 @@ const server = createServer(async (req, res) => {
       // folded into `unreachable`.
       // Keep peer records (and therefore handles) current off a poll the
       // browser already makes. Without this, a session that messages before
-      // anyone calls list_peers has no title yet, so its handle stays the
+      // anyone calls list_sessions has no title yet, so its handle stays the
       // provisional fallback and the RECIPIENT sees something meaningless —
       // the first cross-backend message arrived labelled with a raw id.
       for (const s_ of allSessions) {
@@ -3063,8 +3063,8 @@ const server = createServer(async (req, res) => {
   // ── Peers & inbox ─────────────────────────────────────────────────────
   // Two callers, deliberately one implementation. Without `from` this is the
   // raw registry, which is what the UI wants. With `from` it is exactly what
-  // the list_peers tool returns — because the OpenCode plugin calls this
-  // route for ITS list_peers, and if the two transports disagreed about
+  // the list_sessions tool returns — because the OpenCode plugin calls this
+  // route for ITS list_sessions, and if the two transports disagreed about
   // paging the two backends would quietly behave differently.
   //
   // The default cap lives in toolListPeers and nowhere else. A shim that

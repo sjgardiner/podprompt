@@ -1650,10 +1650,10 @@ function splitToolName(text) {
   // A message or delegation reads far better with its target in the title,
   // the same reason the tool name was lifted out of the body at all —
   // otherwise a feed full of peer traffic is a column of identical labels.
-  if (name === 'message' || name === 'delegate') {
+  if (name === 'message_session' || name === 'delegate_session') {
     try {
       const args = JSON.parse(rest.trim());
-      const target = name === 'message' ? args.to : (args.backend ? `${args.backend}` : null);
+      const target = name === 'message_session' ? args.to : (args.backend ? `${args.backend}` : null);
       if (target) name = `${name} → ${target}`;
     } catch { /* not JSON args — leave the plain name */ }
   }

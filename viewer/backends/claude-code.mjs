@@ -1047,9 +1047,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       if (abortController.signal.aborted) {
         console.log(`[claude-code] turn aborted for session ${sessionId}`);
         broadcast(sessionId, "tool", "*(stopped)*", randomUUID(), null, null);
+        state.turnOutcome = { reason: "aborted" };
       } else {
         console.error(`[claude-code] error during turn for session ${sessionId}:`, e.message);
         broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID(), null, null);
+        state.turnOutcome = { reason: "error", error: e.message };
       }
     } finally {
       if (state.abortController === abortController) state.abortController = null;
@@ -1058,7 +1060,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // the session's previous one — drop the cached derivation so the next
       // listModels() re-reads the transcript's new last assistant entry.
       derivedModelCache.delete(sessionId);
-      broadcastStatus(sessionId, { type: "turn_end" });
+      // turn_end is deliberately NOT broadcast here — driver.mjs's runTurn
+      // wrapper emits it once this returns, reading the state.turnOutcome set
+      // above so a Stop and a crash reach the browser as distinguishable
+      // reasons. See the backend-contract comment at the top of driver.mjs.
     }
   }
 

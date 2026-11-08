@@ -916,6 +916,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     } catch (e) {
       console.error(`[opencode] error during turn for session ${sessionId}:`, e.message);
       broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID());
+      // Only ever "error" here: abort() is a fire-and-forget POST to
+      // /session/{id}/abort with no signal back into this turn body, so a
+      // deliberate Stop is indistinguishable from a failure at this level.
+      // driver.mjs's /abort handler records the user's intent instead and
+      // its runTurn wrapper prefers that, which is what lets both backends
+      // report reason:"aborted" identically.
+      state.turnOutcome = { reason: "error", error: e.message };
     } finally {
       turnWaiters.delete(realId);
       // A completed turn may have run on a different model (state.model) than
@@ -927,7 +934,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       toolTicker = null;
       runningTools.clear();
       toolStartedAt.clear();
-      broadcastStatus(sessionId, { type: "turn_end" });
+      // turn_end is deliberately NOT broadcast here — driver.mjs's runTurn
+      // wrapper emits it once this returns, reading state.turnOutcome and its
+      // own abortRequested flag so a Stop and a crash reach the browser as
+      // distinguishable reasons. Emitting it here as well would land FIRST
+      // (this finally runs before the wrapper's) and the reason-less event
+      // would win, which is exactly the wrong-cry the reason exists to stop.
+      // See the backend-contract comment at the top of driver.mjs.
     }
   }
 

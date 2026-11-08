@@ -44,8 +44,11 @@
 //                                                              refreshAccountUsage() cached, or null
 //
 // Status payload types broadcast via broadcastStatus (beyond the older
-// turn_start/turn_end/thinking_tokens/tool_progress/stream_start/
-// stream_delta set): context_usage {percentage,totalTokens,maxTokens},
+// turn_start/thinking_tokens/tool_progress/stream_start/stream_delta set):
+// turn_end {reason:"completed"|"aborted"|"error", error?} — broadcast by
+// runTurn()'s own finally rather than by either backend, so the three
+// outcomes are classified identically no matter which one ran,
+// context_usage {percentage,totalTokens,maxTokens},
 // compacting {active,result?,error?}, plan_usage {subscription_type,
 // rate_limits} (Claude Code only — null/null when not on a real
 // subscription-backed session, e.g. LiteLLM/API-key/Bedrock/Vertex; account-
@@ -163,6 +166,17 @@ let streamSeq = 0;
 async function broadcastStatus(sessionId, payload) {
   if (payload.type === "stream_start" || payload.type === "stream_delta") {
     payload = { ...payload, seq: ++streamSeq };
+  }
+  // Observed here rather than tracked in runTurn because turn_start is the
+  // backend's to emit, at whatever moment suits its own process/request
+  // model. runTurn's finally reads this to avoid announcing the END of a
+  // turn the browser was never told had STARTED — which happens when a
+  // backend throws during setup (e.g. opencode's ensureSession when its
+  // server is unreachable), and would otherwise flip a Stop button back to
+  // Send in a tab that is legitimately mid-turn on the same session.
+  if (payload.type === "turn_start") {
+    const s = sessions.get(sessionId);
+    if (s) s.turnAnnounced = true;
   }
   return enqueueSend(sessionId, async () => {
     try {
@@ -738,7 +752,10 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     const backendId = explicitBackendId || sessionIdToBackend.get(sessionId) || defaultBackendId();
     const backend = getBackend(backendId);
     const cwd = explicitCwd || backend.cwdForSession(sessionId, null);
-    s = { bootstrapped: false, turnInFlight: false, abortController: null, cwd, backend };
+    // turnOutcome/abortRequested are the turn_end classification scratchpad
+    // runTurn() reads and clears on the way out (see its finally) — a backend
+    // sets turnOutcome from its own catch, /abort sets abortRequested.
+    s = { bootstrapped: false, turnInFlight: false, abortController: null, turnOutcome: null, abortRequested: false, turnAnnounced: false, cwd, backend };
     // Remember this as the new-chat picker's next pre-selected choice — but
     // only when this really is a brand-new session (explicitCwd is the
     // established signal for that; see /prompt) with a deliberate backend
@@ -852,21 +869,54 @@ setInterval(pollAccountUsageForAllBackends, PLAN_USAGE_POLL_INTERVAL_MS);
 // ── Drive one turn (backend-agnostic wrapper) ───────────────────────────
 // Delegates the actual work to state.backend.runTurn — this wrapper only
 // owns the bookkeeping that must happen identically regardless of which
-// backend ran: broadcasting turn_start/turn_end is left to the backend
-// itself (it already knows the precise moments that matter for its own
-// process/request model), but expiring orphaned approvals on the way out is
-// generic enough to live here once instead of duplicated in every backend.
+// backend ran. turn_START is still the backend's to broadcast (it alone
+// knows the precise moment that matters for its own process/request model),
+// but turn_END is broadcast here, once, for both backends: the browser now
+// distinguishes a clean finish from an error from a deliberate Stop, and
+// deriving that in one place beats duplicating the classification in every
+// backend — especially since opencode has no way to recognise its own
+// aborts at all (its abort() is a fire-and-forget POST), whereas /abort
+// below passes through this process for BOTH backends and can simply say so.
+// Expiring orphaned approvals on the way out is generic for the same reason.
 async function runTurn(sessionId, promptText) {
   const state = getSessionState(sessionId);
   // Generic across both backends (see stampSessionHost's own comment) —
   // every turn, any session, any backend, records which host path was
   // actually backing /workspace just now.
   stampSessionHost(sessionId, state.cwd);
+  state.turnAnnounced = false;
   try {
     await state.backend.runTurn(sessionId, promptText, state);
   } catch (e) {
+    // Both backends normally swallow their own turn errors (broadcasting an
+    // *(error: ...)* bubble and returning), so this catch is the belt to
+    // their braces: anything that DOES escape still has to end up classified
+    // as an error rather than silently reported to the browser as a clean
+    // finish.
     console.error(`[driver] runTurn failed for session ${sessionId}:`, e.message);
+    if (!state.turnOutcome) state.turnOutcome = { reason: "error", error: e.message };
   } finally {
+    // Ordering matters: this runs after the backend's own finally has
+    // finalized any still-streaming bubbles and cleared turnInFlight, so
+    // turn_end is the last word on the turn rather than racing that cleanup.
+    // abortRequested is checked FIRST, ahead of any error the backend
+    // recorded: opencode surfaces a Stop as a thrown error (its SSE waiter
+    // rejects when generation is cut short), so trusting turnOutcome here
+    // would report a deliberate Stop as reason:"error" on that backend while
+    // claude-code — which classifies its own aborts — correctly said
+    // "aborted". The user's stated intent outranks the symptom it produced.
+    const outcome = state.abortRequested
+      ? { reason: "aborted" }
+      : (state.turnOutcome || { reason: "completed" });
+    const announced = state.turnAnnounced;
+    state.turnOutcome = null;
+    state.abortRequested = false;
+    state.turnAnnounced = false;
+    // Paired strictly with turn_start (see broadcastStatus): a turn that
+    // failed before the backend ever announced it never reached the browser
+    // as "running", so telling it the turn ENDED would be news about
+    // something it never heard begin.
+    if (announced) broadcastStatus(sessionId, { type: "turn_end", ...outcome });
     expirePendingApprovals(sessionId);
     // Opportunistic refresh after every turn, any session, any backend —
     // piggybacks on refreshAccountUsage()'s own single-flight cache, so a
@@ -1511,7 +1561,20 @@ const server = createServer(async (req, res) => {
       return;
     }
     const state = sessions.get(body.sessionId);
-    if (state) state.backend.abort(body.sessionId, state);
+    if (state) {
+      // Recorded before delegating so the turn_end broadcast in runTurn's
+      // finally can report reason:"aborted" rather than mislabelling a
+      // deliberate Stop as a clean finish. claude-code can work this out for
+      // itself (it owns the AbortController), but opencode cannot — its
+      // abort() is a fire-and-forget POST with no feedback into the turn
+      // body — so capturing the user's intent here is what makes the two
+      // backends behave identically. Cleared by that same finally.
+      // Guarded on turnInFlight so a Stop clicked when nothing is running
+      // can't leave the flag set and mislabel the NEXT turn as aborted —
+      // runTurn's finally only clears it for turns that actually ran.
+      if (state.turnInFlight) state.abortRequested = true;
+      state.backend.abort(body.sessionId, state);
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end('{"ok":true}');
     return;

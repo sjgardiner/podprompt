@@ -1354,6 +1354,18 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   return {
     id: "opencode",
 
+    // The OpenCode plugin only ever knows OpenCode's OWN session id — that
+    // is what its runtime hands a tool, and deliberately so. PodPrompt keys
+    // everything (chains, peers, relations) by its own minted client id, so
+    // a `from` arriving over HTTP from the plugin has to be translated back
+    // here before any of that state can be found. Without this, a peer
+    // message from an OpenCode session fails with "no-chain": the real id
+    // matches no session PodPrompt knows about.
+    clientIdForReal(realId) {
+      if (!realId) return null;
+      return realToClient.get(realId) || childRealToPod.get(realId) || null;
+    },
+
     async runTurn(sessionId, promptText, state) {
       const realId = await ensureSession(sessionId, state.cwd, state.nativeSessionId);
       // Cheap, and only matters after a restart — see reconcileChildren.

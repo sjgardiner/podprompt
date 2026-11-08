@@ -67,7 +67,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
 import { spawn } from "node:child_process";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
@@ -785,6 +785,18 @@ function localPrincipal(sessionId) {
   return { realm: LOCAL_REALM, id: sessionId };
 }
 
+// A caller id as supplied by a backend's runtime, translated into the id
+// PodPrompt keys its own state by. Only OpenCode needs this: its plugin is
+// handed OpenCode's own `ses_...` id, while chains, peers and relations are
+// all keyed by the client id PodPrompt minted (C1). Claude Code's shim
+// closes over the PodPrompt id directly, so it passes through untouched.
+function podSessionIdFor(rawId) {
+  if (!rawId) return null;
+  if (sessions.has(rawId)) return rawId;
+  const translated = backends.opencode?.clientIdForReal?.(rawId);
+  return translated || rawId;
+}
+
 // Evaluated at DELIVERY time against the TARGET, never captured when the
 // sender decided to send: the user may have changed the target's settings
 // in between, and the newer intent is the real one.
@@ -1018,7 +1030,7 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
 const PEER_LIST_DEFAULT = 20;
 const PEER_LIST_MAX = 200;
 
-function toolMessage(fromSessionId, { to, text }) {
+function toolMessage(fromSessionId, { to, text, kind = "peer" }) {
   const state = sessions.get(fromSessionId);
   // Everything automatic belongs to the chain the caller is running under.
   // No chain means no budget to spend, which means this is not a turn that
@@ -1029,10 +1041,18 @@ function toolMessage(fromSessionId, { to, text }) {
   // but not fan-out, and fan-out is where the expensive failure lives.
   const fan = noteFanout(state);
   if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
-  peers.ensure(fromSessionId, { backend: sessionIdToBackend.get(fromSessionId) || null });
+  // A session's FIRST outbound message necessarily happens before it has a
+  // title, so its handle would otherwise be the provisional fallback and the
+  // recipient would see "@session". The chain is named after the prompt the
+  // user typed to start this work, which is both available here and exactly
+  // the kind of name a session title would have ended up with anyway.
+  peers.ensure(fromSessionId, {
+    backend: sessionIdToBackend.get(fromSessionId) || null,
+    title: peers.get(fromSessionId)?.title || chains.get(chainId)?.rootPrompt || null,
+  });
   return deliver(to, text, {
     from: localPrincipal(fromSessionId),
-    kind: "peer",
+    kind,
     chainId,
   });
 }
@@ -1152,10 +1172,71 @@ function nextRestartDelayMs() {
   return Math.min(OPENCODE_BACKOFF_BASE_MS * 2 ** (restartAttempts - 1), OPENCODE_BACKOFF_CEILING_MS);
 }
 
+// Minted per driver start, never written to disk, rotating on every restart.
+// It is how the OpenCode plugin identifies itself as a local-realm caller —
+// see PD10: the driver's routes are otherwise reachable by anything in the
+// container, including the agents those routes are meant to restrain.
+const PODPROMPT_TOKEN = randomUUID();
+
+// OpenCode only auto-discovers plugins from its own plugin directories —
+// verified live (1.18.30): a plugin listed in the config `plugin` array is
+// reported back by /config but never actually loaded, and its tools never
+// reach the model. OPENCODE_CONFIG does merge with the user's own config
+// (their providers and plugins survive), but merging a path in is not the
+// same as loading it.
+//
+// So the plugin is INSTALLED into OpenCode's global plugin directory. That
+// directory is shared with the user's own OpenCode, including native
+// non-Docker installs on this host, which is why the plugin registers no
+// tools at all unless PODPROMPT_DRIVER_URL is set below. Outside PodPrompt
+// it is inert.
+function opencodeConfigDir() {
+  return process.env.OPENCODE_CONFIG_DIR
+    || nodePath.join(process.env.XDG_CONFIG_HOME || nodePath.join(os.homedir(), ".config"), "opencode");
+}
+const OPENCODE_PLUGIN_SRC = nodePath.join(
+  nodePath.dirname(new URL(import.meta.url).pathname), "opencode-plugin.ts");
+const OPENCODE_PLUGIN_DEST = nodePath.join(opencodeConfigDir(), "plugin", "podprompt.ts");
+
+function installOpencodePlugin() {
+  try {
+    if (!existsSync(OPENCODE_PLUGIN_SRC)) {
+      // Deploy skew: an older viewer/ copy without the plugin. Say so once
+      // and carry on — opencode still works, it just has no peer tools.
+      console.error(`[driver] opencode plugin missing at ${OPENCODE_PLUGIN_SRC};`
+        + " opencode sessions will have no messaging tools (re-run --deploy-viewer)");
+      return false;
+    }
+    const src = readFileSync(OPENCODE_PLUGIN_SRC, "utf8");
+    let current = null;
+    try { current = readFileSync(OPENCODE_PLUGIN_DEST, "utf8"); } catch { /* not installed yet */ }
+    if (current === src) return true; // already current; don't churn the file
+    mkdirSync(nodePath.dirname(OPENCODE_PLUGIN_DEST), { recursive: true });
+    writeFileSync(`${OPENCODE_PLUGIN_DEST}.tmp`, src);
+    renameSync(`${OPENCODE_PLUGIN_DEST}.tmp`, OPENCODE_PLUGIN_DEST);
+    console.log(`[driver] installed opencode messaging plugin -> ${OPENCODE_PLUGIN_DEST}`);
+    return true;
+  } catch (e) {
+    console.error("[driver] failed to install opencode plugin:", e.message);
+    return false;
+  }
+}
+
 function spawnOpencode() {
   const args_ = ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodePort)];
   console.log(`[driver] spawning opencode serve on port ${args.opencodePort}`);
-  const child = spawn("opencode", args_, { stdio: ["ignore", "pipe", "pipe"] });
+  installOpencodePlugin();
+  const child = spawn("opencode", args_, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      // Both of these are what switch the plugin on. Without them it
+      // registers nothing, which is what keeps the user's own OpenCode
+      // unaffected by a file PodPrompt put in their config directory.
+      PODPROMPT_DRIVER_URL: `http://127.0.0.1:${args.port}`,
+      PODPROMPT_TOKEN,
+    },
+  });
   opencodeChild = child;
   let stderrTail = [];
   child.stderr.on("data", (d) => {
@@ -2225,6 +2306,19 @@ const server = createServer(async (req, res) => {
       // disagree — see SESSION_HOSTS_FILE's own comment for why this is a
       // soft, informational flag on an otherwise-normal session rather than
       // folded into `unreachable`.
+      // Keep peer records (and therefore handles) current off a poll the
+      // browser already makes. Without this, a session that messages before
+      // anyone calls list_peers has no title yet, so its handle stays the
+      // provisional fallback and the RECIPIENT sees something meaningless —
+      // the first cross-backend message arrived labelled with a raw id.
+      for (const s_ of allSessions) {
+        if (s_.archived || s_.unreachable) continue;
+        peers.ensure(s_.sessionId, {
+          title: s_.customTitle || s_.summary || s_.firstPrompt || null,
+          backend: s_.backend,
+        });
+      }
+
       const sessionHosts = loadSessionHosts();
       const currentHostPath = process.env.HOST_WORKSPACE_PATH || null;
       const annotateHost = (s) => {
@@ -2627,7 +2721,7 @@ const server = createServer(async (req, res) => {
   // The default cap lives in toolListPeers and nowhere else. A shim that
   // re-stated it would be a second copy to drift.
   if (req.method === "GET" && path === "/peers") {
-    const from = url.searchParams.get("from");
+    const from = podSessionIdFor(url.searchParams.get("from"));
     if (!from) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ realm: LOCAL_REALM, peers: peers.list(), total: peers.list().length }));
@@ -2729,29 +2823,26 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"invalid json"}');
       return;
     }
-    const fromId = body.from;
+    const fromId = podSessionIdFor(body.from);
     if (!fromId || !body.to) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end('{"error":"from and to are required"}');
       return;
     }
-    // The sender's own chain, unless one is named explicitly (delegation
-    // hands a child the chain it was created under). Never minted here —
-    // minting on delivery would make "send a message" a way to buy a fresh
-    // budget.
-    const chainId = body.chainId || sessions.get(fromId)?.chainId || null;
-    if (!chainId) {
-      res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "no chain for sender", reason: "no-chain" }));
-      return;
-    }
-    const receipt = deliver(body.to, body.text || "", {
-      from: localPrincipal(fromId),
+    // Goes through toolMessage, NOT deliver(), so this shim and the
+    // in-process one are the same code path. Calling deliver() directly
+    // skipped the fan-out cap and the sender's peer record — which is why
+    // a cross-backend message first arrived labelled with a raw session id
+    // instead of a handle.
+    const receipt = toolMessage(fromId, {
+      to: body.to,
+      text: body.text || "",
       kind: body.kind === "result" ? "result" : "peer",
-      chainId,
     });
     res.writeHead(receipt.ok ? 200 : 409, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(receipt));
+    // `describe` is the model-facing wording, owned here so the two backends
+    // explain the same outcome the same way.
+    res.end(JSON.stringify({ ...receipt, describe: describeReceipt(receipt, body.to) }));
     return;
   }
 

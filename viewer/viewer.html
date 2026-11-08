@@ -2136,7 +2136,12 @@ function renderPermissionCard(entry) {
   } else {
     const qText = document.createElement('div');
     qText.className = 'perm-q-text';
-    qText.innerHTML = `Approve <code>${escapeHtml(toolName || 'tool')}</code>?`;
+    // agentType is set only when a sub-agent asked but the card could not be
+    // routed into that sub-agent's own session — say so rather than letting
+    // it read as the main thread asking.
+    qText.innerHTML = data.agentType
+      ? `Approve <code>${escapeHtml(toolName || 'tool')}</code>? <span class="perm-asker">(asked by a <code>${escapeHtml(data.agentType)}</code> sub-agent)</span>`
+      : `Approve <code>${escapeHtml(toolName || 'tool')}</code>?`;
     card.appendChild(qText);
 
     const actions = document.createElement('div');

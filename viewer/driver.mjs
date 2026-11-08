@@ -257,7 +257,7 @@ const pendingApprovals = new Map(); // id -> { resolve, sessionId, kind, toolNam
 // every ask (its reply takes a scope). Inferring from `suggestions` alone
 // would silently hide the button on every opencode permission.
 function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
-  const { suggestions = null, canAlwaysAllow = false } = opts;
+  const { suggestions = null, canAlwaysAllow = false, agentType = null } = opts;
   const id = randomUUID();
   return new Promise((resolve) => {
     pendingApprovals.set(id, {
@@ -276,6 +276,10 @@ function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
     broadcast(sessionId, "permission", JSON.stringify({
       kind, toolName, toolInput,
       ...(canAlwaysAllow ? { canAlwaysAllow: true } : {}),
+      // Present only when the ask came from a sub-agent we could not pin to
+      // its own child session — the card then says which KIND of sub-agent
+      // is asking rather than silently implying the main thread asked.
+      ...(agentType ? { agentType } : {}),
     }), id);
   });
 }

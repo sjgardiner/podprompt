@@ -879,6 +879,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // a real cost/latency change (extended thinking tokens), not just a
       // display change. This only asks for whatever the model already
       // produces to be streamed instead of dropped.
+      // NOTE: the PermissionRequest hook (makePermissionRequestHook below) is
+      // written but deliberately NOT registered yet — see its comment. Until
+      // it is, canUseTool above remains the only permission path, exactly as
+      // before, and sub-agent asks stay unattributed on claude-code.
       includePartialMessages: true,
       // Without this the SDK forwards only a sub-agent's tool_use/tool_result
       // blocks — "enough for a heartbeat counter" in its own words — so a
@@ -908,6 +912,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // replayed view agree on which sub-agent they are looking at.
     const childIdForToolUse = new Map(); // tool_use_id -> podprompt child session id
     const childIdForTask = new Map();    // task_id      -> podprompt child session id
+    const childIdForAgent = new Map();   // agent_id     -> podprompt child session id
+
+    // The sub-agent id families do not meet. task_started speaks task_id and
+    // tool_use_id; the hooks speak agent_id; nothing live carries a pair of
+    // one from each. So the link is learned opportunistically from the few
+    // messages that DO carry both (SDKToolProgressMessage, and a denied
+    // permission), and until it is learned a sub-agent's ask is labelled by
+    // its agent TYPE rather than pinned to its child session. That is a
+    // smaller claim than guessing, which on a permission card is the worst
+    // thing to get wrong.
+    function linkAgentToToolUse(agentId, toolUseId) {
+      if (!agentId || !toolUseId) return;
+      const childId = childIdForToolUse.get(toolUseId);
+      if (childId && !childIdForAgent.has(agentId)) {
+        childIdForAgent.set(agentId, childId);
+        registerChild?.(childId, { parent: sessionId, native: { agentId } });
+      }
+    }
 
     function ensureChildSession(info) {
       const toolUseId = info.tool_use_id;
@@ -927,6 +949,63 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       }
       if (info.task_id) childIdForTask.set(info.task_id, childId);
       return childId;
+    }
+
+    // NOT REGISTERED YET — see baseOpts. Written and ready, but switching the
+    // permission path over is a safety-relevant change that cannot be
+    // verified from here: if this CLI build ignores PermissionRequest hooks,
+    // registering it and dropping canUseTool would silently remove tool
+    // gating altogether, and registering it ALONGSIDE canUseTool may prompt
+    // twice for one call. Both failure modes need a real CLI to rule out.
+    //
+    // Runs for every permission ask, main-thread or sub-agent. The card is
+    // routed to the asking sub-agent's own child session when the agent_id is
+    // resolvable (see linkAgentToToolUse), which is where D4 says the
+    // authoritative card belongs; otherwise it stays on the parent, labelled
+    // with the sub-agent's type so it is at least honest about who is asking.
+    function makePermissionRequestHook(parentSessionId, state) {
+      return async function permissionRequestHook(input) {
+        const toolName = input?.tool_name || "tool";
+        const toolInput = input?.tool_input || {};
+        const agentId = input?.agent_id || null;
+        const agentType = input?.agent_type || null;
+
+        if (toolName === "AskUserQuestion") {
+          const answer = await requestApproval(
+            childIdForAgent.get(agentId) || parentSessionId,
+            "question", toolName, toolInput);
+          // Same crafted deny as before: Claude reads the message as the
+          // real answer, and `allow` alone leaves the question unanswered.
+          return { hookSpecificOutput: { hookEventName: "PermissionRequest",
+            decision: { behavior: "deny", message: `The user answered: ${answer.text}` } } };
+        }
+
+        // Inherited down the tree, so a sub-agent of an auto-approved parent
+        // is covered without the user ticking anything per child.
+        if (autoApproveForSession?.(parentSessionId) || state.autoApprove) {
+          return { hookSpecificOutput: { hookEventName: "PermissionRequest",
+            decision: { behavior: "allow" } } };
+        }
+
+        const suggestions = Array.isArray(input?.permission_suggestions) ? input.permission_suggestions : null;
+        const target = (agentId && childIdForAgent.get(agentId)) || parentSessionId;
+        const decision = await requestApproval(target, "permission", toolName, toolInput, {
+          suggestions,
+          canAlwaysAllow: !!(suggestions && suggestions.length),
+          // Shown on the card when the ask could not be pinned to a child
+          // session, so "a sub-agent is asking" is still visible.
+          agentType: target === parentSessionId ? agentType : null,
+        });
+        if (decision?.allow) {
+          return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: {
+            behavior: "allow",
+            ...(decision.always && suggestions && suggestions.length
+              ? { updatedPermissions: suggestions } : {}),
+          } } };
+        }
+        return { hookSpecificOutput: { hookEventName: "PermissionRequest",
+          decision: { behavior: "deny", message: decision?.message || "Denied by user" } } };
+      };
     }
 
     function routeSubagentMessage(childId, msg) {
@@ -1045,6 +1124,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           streamTracker.handleStreamEvent(msg.event);
           continue;
         }
+
+        // Anything carrying BOTH ids teaches us the pairing the hook needs.
+        if (msg.agent_id && msg.tool_use_id) linkAgentToToolUse(msg.agent_id, msg.tool_use_id);
 
         if (msg.type === "system"
             && (msg.subtype === "task_started" || msg.subtype === "task_progress" || msg.subtype === "task_updated")) {

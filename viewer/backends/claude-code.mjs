@@ -1035,18 +1035,22 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         ? { hooks: { PermissionRequest: [{ hooks: [permissionAttributionHook] }] } }
         : {}),
       includePartialMessages: true,
-      // Declares that the viewer renders a per-sub-agent stop control, which
-      // it now does (the roster's stop button -> POST /abort-subagent).
-      //
-      // This INVERTS what Stop means for background tasks: declared, an
-      // interrupt spares them and they are stopped one at a time through our
-      // own affordance; undeclared, the CLI fails closed and an interrupt
-      // kills them. So it is only safe alongside the parent->child abort
-      // cascade in driver.mjs, which is what now stops a sub-agent when the
-      // parent is stopped. Declaring this WITHOUT that cascade would leave
-      // orphaned sub-agents running, which is exactly what the fail-closed
+      // NOT declared, deliberately. Declaring it INVERTS what Stop means:
+      // "an interrupt ... spares running background agents/workflows (Stop
+      // only aborts the turn)", leaving sub-agents to be stopped one at a
+      // time through the consumer's own affordance. It was declared once, on
+      // the reasoning that driver.mjs's parent->child abort cascade covered
+      // that. It does not. A claude-code sub-agent is a Task INSIDE this
+      // process, so there is no child session state and no abortController
+      // for the cascade to use — abort(childId, undefined) is a silent
+      // no-op. The result was a sub-agent that survived Stop and appeared to
+      // restart, which is precisely the runaway the CLI's fail-closed
       // default exists to prevent.
-      perTaskStopAffordance: true,
+      //
+      // Re-declaring it requires first wiring the Query's stopTask(taskId)
+      // control into the per-child stop path. Until then the fail-closed
+      // default is the correct behaviour, and the roster's Stop button is
+      // honest only for opencode children, which ARE real sessions.
       // Without this the SDK forwards only a sub-agent's tool_use/tool_result
       // blocks — "enough for a heartbeat counter" in its own words — so a
       // sub-agent's reasoning and its final report never arrive at all, and

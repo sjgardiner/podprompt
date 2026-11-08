@@ -3045,7 +3045,15 @@ function renderRoster() {
     // Only a running sub-agent can be stopped, and stopping one leaves its
     // siblings and the parent turn alone — that is the whole point of a
     // per-row control rather than the turn-level Stop.
-    if (sa.status === 'running' || sa.status === 'pending') {
+    // Stoppable only where stopping actually works. An opencode sub-agent is
+    // a real session, so aborting it is the ordinary abort path. A
+    // claude-code one is a Task inside the parent's process with no session
+    // state and no abortController of its own — stopping it needs the SDK's
+    // stopTask control, which is not wired yet, so offering the button would
+    // be a lie. The row still shows live status; it just cannot be stopped
+    // individually, and the turn-level Stop kills it along with the turn.
+    const stoppable = sa.backend === 'opencode' || sa.childKind === 'delegated-session';
+    if ((sa.status === 'running' || sa.status === 'pending') && stoppable) {
       const stop = document.createElement('button');
       stop.className = 'roster-stop';
       stop.textContent = 'Stop';
@@ -3062,7 +3070,7 @@ function renderRoster() {
         refreshSubAgents();
       });
       row.appendChild(stop);
-    } else {
+    } else if (sa.status !== 'running' && sa.status !== 'pending') {
       // Only once it has stopped. Shaped like archiving a session, not
       // deleting one: the transcript stays where it is, this just stops the
       // sub-agent being tracked so it leaves the roster. Actual deletion

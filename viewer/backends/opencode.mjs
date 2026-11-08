@@ -39,7 +39,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
-export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl }) {
+export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -193,6 +193,51 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // work, rather than solved with on-disk persistence here.
   const clientToReal = new Map(); // client-minted id -> real ses_... id
   const realToClient = new Map(); // real ses_... id -> client-minted id
+
+  // ── Sub-agent child sessions ───────────────────────────────────────────
+  // OpenCode runs a sub-agent as a real child session with parentID set
+  // ("Subagents run with fresh context in foreground or background child
+  // sessions", and "the child uses its own configured permissions").
+  //
+  // Every event for one used to be dropped on the floor: the dispatcher
+  // looks up turnWaiters by sessionID and a waiter is only ever registered
+  // under the PARENT's id, so a child's permission.asked found nothing —
+  // no card was shown, no reply was ever sent, and the turn hung until the
+  // 15s grace or forever. That is the bug this block exists to fix.
+  //
+  // Children get a PodPrompt-minted id of their own rather than being keyed
+  // on the `ses_…`, so the id space stays ours and a child could later live
+  // on a different backend from its parent.
+  const childRealToPod = new Map(); // real child ses_... id -> podprompt child id
+  const childInfo = new Map();      // podprompt child id -> { realId, parentPodId }
+
+  function noteChildSession(info) {
+    const realId = info?.id;
+    const parentReal = info?.parentID;
+    if (!realId || !parentReal) return null;
+    if (childRealToPod.has(realId)) return childRealToPod.get(realId);
+    // The parent must be a session we know about — otherwise this is a child
+    // of something in another project/window and not ours to surface.
+    const parentPodId = realToClient.get(parentReal) || childRealToPod.get(parentReal);
+    if (!parentPodId) return null;
+    const podId = randomUUID();
+    childRealToPod.set(realId, podId);
+    childInfo.set(podId, { realId, parentPodId });
+    // Both directions, so history/abort/model lookups translate for a child
+    // exactly as they do for a session the browser created.
+    clientToReal.set(podId, realId);
+    realToClient.set(realId, podId);
+    registerChild?.(podId, {
+      parent: parentPodId,
+      backend: "opencode",
+      childKind: "native-task",
+      subagentType: info.agent || null,
+      description: info.title || null,
+      native: { realSessionId: realId, parentRealSessionId: parentReal },
+    });
+    updateSubAgent?.(podId, { status: "running", startedAt: Date.now() });
+    return podId;
+  }
 
   function knownRealId(sessionId) {
     return clientToReal.get(sessionId) || sessionId;
@@ -380,13 +425,23 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       || props.info?.sessionID
       || props.part?.sessionID;
 
+    // A sub-agent announces itself here. Noted before any dispatch below, so
+    // the very first event for a child already resolves to a known child.
+    if (evt.type === "session.created" && props.info?.parentID) {
+      noteChildSession(props.info);
+      return;
+    }
+
     if (evt.type === "permission.asked") {
       // properties IS the PermissionRequest itself (id, sessionID, permission
       // [a string key like "edit"/"bash"], patterns, metadata, always, tool)
       // — not nested under a `permission` key, despite the event name.
       if (props.id && sessionID) permissionSessionOf.set(props.id, sessionID);
       const waiter = sessionID && turnWaiters.get(sessionID);
-      if (waiter) waiter.onPermission(props);
+      if (waiter) { waiter.onPermission(props); return; }
+      // No waiter means this is a child session's own ask. It used to stop
+      // here, which is precisely how a sub-agent could hang a turn forever.
+      if (sessionID && childRealToPod.has(sessionID)) childPermission(sessionID, props);
       return;
     }
 
@@ -397,12 +452,110 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // renders for the Claude backend, so it's passed through as-is.
       if (props.id && sessionID) permissionSessionOf.set(props.id, sessionID);
       const waiter = sessionID && turnWaiters.get(sessionID);
-      if (waiter) waiter.onQuestion(props);
+      if (waiter) { waiter.onQuestion(props); return; }
+      if (sessionID && childRealToPod.has(sessionID)) childQuestion(sessionID, props);
       return;
     }
 
     const waiter = sessionID && turnWaiters.get(sessionID);
-    if (waiter) waiter.onEvent(evt);
+    if (waiter) { waiter.onEvent(evt); return; }
+    if (sessionID && childRealToPod.has(sessionID)) childEvent(sessionID, evt, props);
+  }
+
+  // ── Child-session event handling ───────────────────────────────────────
+  // Deliberately a reduced version of the parent's turn handler rather than a
+  // reuse of it: that one closes over a turn's streaming state (live part
+  // buffers, tool tickers, finalization bookkeeping) which a child has no
+  // equivalent of here. What a child needs is that its content reaches its
+  // own session feed, its asks reach a human, and its status reaches the
+  // roster — not token-level streaming fidelity.
+  function childPermission(realId, perm) {
+    const podId = childRealToPod.get(realId);
+    if (!podId) return;
+    // Inherited from the parent, which is where the user ticked the box.
+    if (autoApproveForSession?.(podId)) {
+      replyPermission(perm.id, { allow: true });
+      return;
+    }
+    updateSubAgent?.(podId, { status: "running", awaiting: "permission" });
+    requestApproval(podId, "permission", perm.permission || "unknown", perm.metadata || {},
+      { canAlwaysAllow: true })
+      .then((decision) => {
+        updateSubAgent?.(podId, { awaiting: null });
+        return replyPermission(perm.id, decision);
+      })
+      .catch((e) => console.error("[opencode] child permission failed:", e.message));
+  }
+
+  function childQuestion(realId, q) {
+    const podId = childRealToPod.get(realId);
+    if (!podId) return;
+    updateSubAgent?.(podId, { status: "running", awaiting: "question" });
+    requestApproval(podId, "question", "AskUserQuestion", { questions: q.questions || [] })
+      .then((answer) => {
+        updateSubAgent?.(podId, { awaiting: null });
+        return replyQuestion(q.id, q.questions || [], answer);
+      })
+      .catch((e) => console.error("[opencode] child question failed:", e.message));
+  }
+
+  // session.created covers children spawned while this process is watching.
+  // This covers the rest: a driver restart loses childRealToPod, so a parent
+  // reopened afterwards would show no sub-agents at all even though the
+  // sessions still exist on the server. OpenCode exposes them directly.
+  async function reconcileChildren(parentPodId) {
+    const parentReal = knownRealId(parentPodId);
+    if (!parentReal || !parentReal.startsWith("ses_")) return;
+    try {
+      const kids = await api(`/session/${parentReal}/children`, { timeoutMs: 5000 });
+      for (const info of Array.isArray(kids) ? kids : []) {
+        if (info?.id && !childRealToPod.has(info.id)) {
+          noteChildSession({ ...info, parentID: info.parentID || parentReal });
+        }
+      }
+    } catch {
+      // Older server without the endpoint, or simply unreachable — live
+      // session.created still covers everything spawned from here on.
+    }
+  }
+
+  const childEmitted = new Map(); // podId -> Set of part ids already broadcast
+
+  function childEvent(realId, evt, props) {
+    const podId = childRealToPod.get(realId);
+    if (!podId) return;
+    if (evt.type === "session.idle") {
+      updateSubAgent?.(podId, { status: "completed", awaiting: null });
+      childEmitted.delete(podId);
+      return;
+    }
+    if (evt.type === "session.error") {
+      updateSubAgent?.(podId, { status: "failed", awaiting: null });
+      return;
+    }
+    if (evt.type !== "message.part.updated") return;
+    const part = props.part;
+    if (!part || !part.id) return;
+    // Terminal parts only: a child's feed is a record to read afterwards, so
+    // it is written once per part when settled rather than streamed, which
+    // keeps this handler small and avoids a second streaming state machine.
+    const settled = !part.state || ["completed", "error"].includes(part.state?.status);
+    if (!settled) {
+      if (part.type === "tool") updateSubAgent?.(podId, { lastTool: part.tool || part.name || null });
+      return;
+    }
+    let seen = childEmitted.get(podId);
+    if (!seen) { seen = new Set(); childEmitted.set(podId, seen); }
+    if (seen.has(part.id)) return;
+    seen.add(part.id);
+    if (part.type === "tool") {
+      updateSubAgent?.(podId, { lastTool: part.tool || part.name || null });
+      broadcast(podId, "tool", summarizeToolPart(part), part.id, null, null);
+    } else if (part.type === "text" && part.text) {
+      broadcast(podId, "assistant", part.text, part.id, null, null);
+    } else if (part.type === "reasoning" && part.text) {
+      broadcast(podId, "thinking", part.text, part.id, null, null);
+    }
   }
 
   // Optional explicit timeout (opts.timeoutMs) — some requests MUST be able to
@@ -1119,6 +1272,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
 
     async runTurn(sessionId, promptText, state) {
       const realId = await ensureSession(sessionId, state.cwd);
+      // Cheap, and only matters after a restart — see reconcileChildren.
+      // Not awaited into the turn's critical path: a slow or missing
+      // /children endpoint must not delay the prompt itself.
+      reconcileChildren(sessionId).catch(() => {});
       return runTurn(sessionId, realId, promptText, state);
     },
 

@@ -389,7 +389,15 @@ function expirePendingApprovals(sessionId) {
 // every session that picks it — a backend instance holds no per-session
 // state itself (that all lives in each session's own entry in `sessions`
 // below), so there's no problem with many sessions sharing one instance.
-const backendHooks = { cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval };
+// registerChild/autoApproveForSession are what let a backend surface a child
+// session without knowing anything about the relation index or how
+// auto-approve is resolved across a tree it cannot see.
+const backendHooks = {
+  cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval,
+  registerChild: registerChildSession,
+  autoApproveForSession,
+  updateSubAgent: upsertSubAgent,
+};
 const backends = {
   "claude-code": createClaudeCodeBackend(backendHooks),
   // driver.mjs itself spawns and supervises a headless `opencode serve`
@@ -1084,6 +1092,57 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
 // actually read), otherwise fall back to preSeeds. Never creates state, so
 // it's safe from any read-only route. `state` is an optional
 // already-looked-up SessionState, purely to save a second Map lookup.
+// Auto-approve inherits down the tree: ticking it on a parent means its
+// sub-agents are covered too. That matches what the flag means — it is an
+// accept-the-risk setting for a line of work, and a sub-agent's tool calls
+// are that work. On claude-code this is already true for free, since a
+// sub-agent's tool calls reach canUseTool on the parent's own state; opencode
+// gives each child session its own state, so the inheritance has to be
+// resolved explicitly. Walks the relation index, so it works just as well
+// when parent and child are on different backends.
+// Apply a session operation to every descendant as well as the target.
+// A sub-agent's transcript is hidden behind its parent, so a child left
+// behind by an archive or delete becomes unreachable rather than merely
+// untidy. Each child is dispatched through ITS OWN backend, never the
+// parent's — in a mixed tree they differ, and using the parent's would
+// silently no-op. Children first, so a failure part-way leaves the parent
+// (the thing the user can still see and retry from) untouched.
+async function cascadeToDescendants(parentId, op, label) {
+  const kids = descendantsOfSession(parentId);
+  for (const childId of kids.reverse()) {
+    try {
+      const rel = sessionRelations[childId] || {};
+      const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
+      await op(backend, childId, sessions.get(childId));
+    } catch (e) {
+      // Best effort: one unreachable child must not block the parent's own
+      // operation, which is what the user actually asked for.
+      console.error(`[driver] ${label} cascade failed for child ${childId}:`, e.message);
+    }
+  }
+  return kids.length;
+}
+
+function forgetSessionRelations(ids) {
+  let changed = false;
+  for (const id of ids) {
+    if (sessionRelations[id]) { delete sessionRelations[id]; changed = true; }
+    subAgents.delete(id);
+  }
+  if (changed) saveSessionRelations();
+}
+
+function autoApproveForSession(sessionId) {
+  let cur = sessionId;
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    if (effectiveAutoApprove(cur, sessions.get(cur))) return true;
+    cur = parentOfSession(cur);
+  }
+  return false;
+}
+
 function effectiveAutoApprove(sessionId, state) {
   const s = state !== undefined ? state : (sessionId ? sessions.get(sessionId) : null);
   if (s) return !!s.autoApprove;
@@ -1710,11 +1769,13 @@ const server = createServer(async (req, res) => {
     // exactly as before; it just shows under "Archived" in any sessions
     // panel that refreshes its list.
     try {
+      const cascaded = await cascadeToDescendants(targetId,
+        (backend, childId, childState) => backend.archiveSession(childId, childState?.cwd), "archive");
       const state = sessions.get(targetId);
       const backend = backendFor(targetId, body.backend);
       await backend.archiveSession(targetId, state?.cwd);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
+      res.end(JSON.stringify({ ok: true, cascaded }));
     } catch (e) {
       console.error("[driver] archive-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -1736,8 +1797,12 @@ const server = createServer(async (req, res) => {
       const state = sessions.get(body.sessionId);
       const backend = backendFor(body.sessionId, body.backend);
       await backend.unarchiveSession(body.sessionId, state?.cwd);
+      // Restoring a parent restores its sub-agents with it, so the tree the
+      // user archived comes back whole rather than with holes in it.
+      const cascaded = await cascadeToDescendants(body.sessionId,
+        (backend2, childId, childState) => backend2.unarchiveSession(childId, childState?.cwd), "unarchive");
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
+      res.end(JSON.stringify({ ok: true, cascaded }));
     } catch (e) {
       console.error("[driver] unarchive-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -1761,12 +1826,20 @@ const server = createServer(async (req, res) => {
       return;
     }
     try {
+      const doomed = descendantsOfSession(body.sessionId);
+      const cascaded = await cascadeToDescendants(body.sessionId,
+        (backend2, childId, childState) => backend2.deleteSession(childId, childState?.cwd), "delete");
       const state = sessions.get(body.sessionId);
       const backend = backendFor(body.sessionId, body.backend);
       await backend.deleteSession(body.sessionId, state?.cwd);
+      for (const childId of doomed) sessions.delete(childId);
       sessions.delete(body.sessionId);
+      // Drop the relation rows too — otherwise the index keeps naming
+      // children of a session that no longer exists, and depth/root walks
+      // start from a phantom.
+      forgetSessionRelations([...doomed, body.sessionId]);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
+      res.end(JSON.stringify({ ok: true, cascaded }));
     } catch (e) {
       console.error("[driver] delete-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -1964,6 +2037,25 @@ const server = createServer(async (req, res) => {
       // runTurn's finally only clears it for turns that actually ran.
       if (state.turnInFlight) state.abortRequested = true;
       state.backend.abort(body.sessionId, state);
+    }
+    // Cascade to descendants, each through its own backend. On claude-code a
+    // sub-agent dies with the parent's process anyway, but an opencode child
+    // is an independent session on a separate server that knows nothing
+    // about the parent — stopping the parent alone would leave it running,
+    // burning tokens on a report nobody will read. This is also the hard
+    // precondition for ever declaring perTaskStopAffordance, which flips
+    // claude-code's interrupt from killing background tasks to sparing them.
+    for (const childId of descendantsOfSession(body.sessionId)) {
+      try {
+        const childState = sessions.get(childId);
+        const rel = sessionRelations[childId] || {};
+        const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
+        if (childState?.turnInFlight) childState.abortRequested = true;
+        backend.abort(childId, childState);
+        upsertSubAgent(childId, { status: "killed" });
+      } catch (e) {
+        console.error(`[driver] abort cascade failed for child ${childId}:`, e.message);
+      }
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end('{"ok":true}');

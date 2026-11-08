@@ -1137,6 +1137,14 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // should hide this from the inline transcript") — they are not
         // sub-agents and must not appear as one.
         if (msg.skip_transcript || msg.ambient) return;
+        // task_started covers EVERY kind of registered task, not just
+        // sub-agents — a backgrounded Bash command is a local_bash task and
+        // arrives here too. Observed live: ordinary Bash calls were being
+        // registered as sub-agents and shown in the roster, identifiable
+        // only by having no subagent_type. Only a Task-tool sub-agent
+        // (local_agent) is one of ours.
+        if (msg.task_type && msg.task_type !== "local_agent") return;
+        if (!msg.task_type && !msg.subagent_type) return;
         const childId = ensureChildSession(msg);
         if (!childId) return;
         updateSubAgent?.(childId, {

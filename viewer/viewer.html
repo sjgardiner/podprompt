@@ -359,7 +359,9 @@
     text-transform: none;
     letter-spacing: normal;
     font-weight: 500;
-    color: var(--text);
+    /* No colour of its own: it inherits the label's, so the title reads as
+       part of "AGENT <title>" rather than as separate content. Same reason
+       .model carries no colour in a MODEL bubble. */
     margin-right: 6px;
   }
   /* The sub-agent's live status, in the bubble body. Deliberately at normal

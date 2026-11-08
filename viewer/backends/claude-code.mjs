@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  existsSync, readdirSync, readFileSync, realpathSync, statSync,
+  appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, statSync,
 } from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
@@ -58,6 +58,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // exist — the sub-agent lookups below probe several speculative paths.
   function safeReaddir(dir) {
     try { return readdirSync(dir); } catch { return []; }
+  }
+
+  // ── Permission-path experiment ─────────────────────────────────────────
+  // "off" | "observe" | "decide". Defaults to off, so this is inert unless
+  // deliberately switched on for a verification run. See baseOpts.
+  const PERM_HOOK_MODE = (process.env.PODPROMPT_PERM_HOOK || "off").toLowerCase();
+  const PERM_PROBE_LOG = process.env.PODPROMPT_PERM_PROBE_LOG || "/tmp/podprompt-perm-probe.log";
+
+  // The driver's own stdout goes to the container's console, which is awkward
+  // to read after the fact — the probe writes to a file instead so a
+  // verification run can be inspected directly.
+  function permProbe(event, detail) {
+    const line = `${new Date().toISOString()} ${event} ${JSON.stringify(detail)}\n`;
+    try { appendFileSync(PERM_PROBE_LOG, line); } catch { /* probe must never break a turn */ }
+    console.log(`[perm-probe] ${event}`, JSON.stringify(detail));
+  }
+  if (PERM_HOOK_MODE !== "off") {
+    permProbe("mode", { mode: PERM_HOOK_MODE, pid: process.pid });
   }
 
   // ── Multi-project discovery ─────────────────────────────────────────────
@@ -651,6 +669,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // the very next tool call, not just the next turn.
   function makeCanUseTool(sessionId, state) {
     return async function canUseTool(toolName, toolInput, options) {
+      // Logged alongside the hook so one run shows whether BOTH fire for the
+      // same call — the double-prompt failure mode — or only one does.
+      if (PERM_HOOK_MODE !== "off") {
+        permProbe("canUseTool-fired", { mode: PERM_HOOK_MODE, toolName });
+      }
       if (toolName === "AskUserQuestion") {
         // Deliberately NOT short-circuited by auto-approve — that flag only
         // concerns tool-permission gating, not answering substantive
@@ -872,17 +895,28 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       permissionMode: "default",
       maxTurns: 50,
       abortController,
-      canUseTool,
+      // Withheld only in "decide" mode, where the hook owns the decision.
+      // In "off" and "observe" this is the authoritative permission path
+      // exactly as it has always been.
+      ...(PERM_HOOK_MODE === "decide" ? {} : { canUseTool }),
       // Live typing + thinking-block visibility in the browser. Deliberately
       // not also setting `thinking:` here — adaptive thinking is already the
       // SDK's default for models that support it, and forcing it on would be
       // a real cost/latency change (extended thinking tokens), not just a
       // display change. This only asks for whatever the model already
       // produces to be streamed instead of dropped.
-      // NOTE: the PermissionRequest hook (makePermissionRequestHook below) is
-      // written but deliberately NOT registered yet — see its comment. Until
-      // it is, canUseTool above remains the only permission path, exactly as
-      // before, and sub-agent asks stay unattributed on claude-code.
+      // Permission path, selected by PODPROMPT_PERM_HOOK (see PERM_HOOK_MODE):
+      //   off     - canUseTool only. The long-standing behaviour, and the
+      //             default, so nothing changes unless the flag is set.
+      //   observe - hook registered but returns NO decision, so canUseTool
+      //             still decides. Zero gating risk; answers "do hooks fire
+      //             on this build at all, and does agent_id arrive".
+      //   decide  - hook decides and canUseTool is withheld. The real
+      //             migration, to be enabled only once observe has shown the
+      //             hook fires and defers cleanly.
+      ...(PERM_HOOK_MODE !== "off"
+        ? { hooks: { PermissionRequest: [{ hooks: [makePermissionRequestHook(sessionId, state)] }] } }
+        : {}),
       includePartialMessages: true,
       // Without this the SDK forwards only a sub-agent's tool_use/tool_result
       // blocks — "enough for a heartbeat counter" in its own words — so a
@@ -969,6 +1003,18 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         const toolInput = input?.tool_input || {};
         const agentId = input?.agent_id || null;
         const agentType = input?.agent_type || null;
+
+        // The whole point of "observe": prove the hook fires on this build
+        // and show whether agent_id/agent_type arrive, WITHOUT taking the
+        // decision away from canUseTool. Returning an empty object is "no
+        // opinion", so the normal path still runs and the user still sees
+        // exactly one card.
+        permProbe("hook-fired", {
+          mode: PERM_HOOK_MODE, toolName, agentId, agentType,
+          hasSuggestions: Array.isArray(input?.permission_suggestions) && input.permission_suggestions.length > 0,
+          resolvedChild: agentId ? (childIdForAgent.get(agentId) || null) : null,
+        });
+        if (PERM_HOOK_MODE === "observe") return {};
 
         if (toolName === "AskUserQuestion") {
           const answer = await requestApproval(

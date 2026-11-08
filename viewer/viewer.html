@@ -2528,6 +2528,21 @@ function connect() {
   // even if this tab reconnects mid-turn or another tab started it.
   es.addEventListener('status', e => {
     const s = JSON.parse(e.data);
+    // Sent once a completed assistant message makes the model certain, for
+    // bubbles that were streamed and so never got a final 'message' event to
+    // carry it. Applied to the entry, not just the DOM, so a later re-render
+    // or a settings change does not blank it again.
+    if (s.type === 'stream_model' && Array.isArray(s.ids) && s.model) {
+      for (const id of s.ids) {
+        const entry = msgs[id];
+        if (!entry) continue;
+        entry.model = s.model;
+        if (entry.modelEl) {
+          const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
+          entry.modelEl.textContent = show ? s.model : '';
+        }
+      }
+    }
     if (s.type === 'awaiting_input') { setAwaitingInput(s.kind, s.toolName); refreshPendingApprovals(); }
     if (s.type === 'turn_start') {
       setTurnInFlight(true); setAwaitingInput(null); setTurnIndicator('Thinking…'); pokeSessionsListIfOpen();

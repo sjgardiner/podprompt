@@ -1412,6 +1412,23 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             const thinkingIds = streamTracker.takeAnnouncedIds("thinking");
             const textIds = streamTracker.takeAnnouncedIds("text");
             uuidToBubbleId.set(msg.uuid, { thinking: thinkingIds, text: textIds[0] || null });
+            // Label those bubbles with the model now that it is known for
+            // certain. A streamed block never gets a final `message`
+            // broadcast (suppressed, so the bubble is not duplicated), so
+            // without this the model name was missing on every live turn and
+            // only appeared once history was re-read from disk.
+            //
+            // Done here rather than relying on stream_start's model, which is
+            // captured from message_start and may simply not arrive: THIS
+            // message demonstrably carries the model, since it is the same
+            // value the transcript later shows. The stream_start path stays
+            // as the faster option when it does work — whichever lands first
+            // sets the label, and the second is a harmless repaint.
+            const labelModel = modelByUuid.get(msg.uuid) || null;
+            const ids = [...thinkingIds, ...textIds];
+            if (labelModel && ids.length) {
+              broadcastStatus(sessionId, { type: "stream_model", ids, model: labelModel });
+            }
           }
         }
         // Deliberately not re-broadcasting: system/init (no visible bubble),

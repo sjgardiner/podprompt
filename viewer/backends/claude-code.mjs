@@ -1099,6 +1099,56 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             }
           },
         ),
+        tool(
+          "delegate",
+          "Create a NEW session on a chosen backend and give it a piece of work. "
+          + "Use this to hand a task to a different model or backend than your own. "
+          + "By default it waits and returns the result; set await=false to be told "
+          + "later by message instead, which is what you want when fanning out.",
+          {
+            backend: z.enum(["claude-code", "opencode"])
+              .describe("Which backend the new session should run on."),
+            prompt: z.string()
+              .describe("The work. Self-contained — the new session sees none of your context."),
+            title: z.string().optional()
+              .describe("Short label for the new session."),
+            await: z.boolean().optional()
+              .describe("Wait for the result (default true). false returns immediately."),
+          },
+          async (args) => {
+            try {
+              const receipt = await messaging.delegate(sessionId, {
+                backend: args.backend,
+                prompt: args.prompt,
+                title: args.title || null,
+                awaitResult: args.await !== false,
+              });
+              if (!receipt.ok) {
+                return { content: [{ type: "text", text: messaging.describeReceipt(receipt, args.backend) }] };
+              }
+              if (!receipt.awaited) {
+                return {
+                  content: [{
+                    type: "text",
+                    text: `Delegated to ${receipt.handle} on ${args.backend}. It is running now;`
+                      + ` its report will arrive as a message. You can also send it more`
+                      + ` instructions with the message tool.`,
+                  }],
+                };
+              }
+              return {
+                content: [{
+                  type: "text",
+                  text: `${receipt.handle} (${args.backend}) finished [${receipt.outcome}].\n\n`
+                    + (receipt.text || "(it produced no text output)")
+                    + `\n\nYou can follow up with it using the message tool and this handle.`,
+                }],
+              };
+            } catch (e) {
+              return { content: [{ type: "text", text: `Delegation failed: ${e.message}` }] };
+            }
+          },
+        ),
       ],
     }) : null;
 

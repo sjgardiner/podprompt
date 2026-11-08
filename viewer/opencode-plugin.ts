@@ -115,6 +115,70 @@ export default (async () => {
         },
       }),
 
+      delegate: tool({
+        description:
+          "Create a NEW session on a chosen backend and give it a piece of work. "
+          + "Use this to hand a task to a different model or backend than your own. "
+          + "By default it waits and returns the result; set await=false to be told "
+          + "later by message instead, which is what you want when fanning out.",
+        args: {
+          backend: tool.schema.enum(["claude-code", "opencode"])
+            .describe("Which backend the new session should run on."),
+          prompt: tool.schema.string()
+            .describe("The work. Self-contained — the new session sees none of your context."),
+          title: tool.schema.string().optional()
+            .describe("Short label for the new session."),
+          await: tool.schema.boolean().optional()
+            .describe("Wait for the result (default true). false returns immediately."),
+        },
+        async execute(args, context) {
+          try {
+            await context.ask({
+              permission: "podprompt-delegate",
+              patterns: [String(args.backend)],
+              always: ["podprompt-delegate"],
+              metadata: { backend: args.backend, preview: String(args.prompt).slice(0, 200) },
+            })
+          } catch (e: any) {
+            return `Not delegated: permission denied (${e?.message || "rejected"}).`
+          }
+          try {
+            const { body } = await driverFetch("/delegate", {
+              method: "POST",
+              body: JSON.stringify({
+                from: context.sessionID,
+                backend: args.backend,
+                prompt: args.prompt,
+                title: args.title || null,
+                awaitResult: args.await !== false,
+              }),
+            })
+            const r = (body || {}) as any
+            if (!r.ok) return r.describe || `Delegation failed (${r.reason || "unknown"}).`
+            if (!r.awaited) {
+              return {
+                title: `delegate → ${r.handle}`,
+                output: `Delegated to ${r.handle} on ${args.backend}. It is running now; its`
+                  + ` report will arrive as a message. You can also send it more instructions`
+                  + ` with the message tool.`,
+                metadata: { childId: r.childId, awaited: false },
+              }
+            }
+            return {
+              title: `delegate → ${r.handle}`,
+              output: `${r.handle} (${args.backend}) finished [${r.outcome}].\n\n`
+                + (r.text || "(it produced no text output)")
+                + `\n\nYou can follow up with it using the message tool and this handle.`,
+              // The adoption path opencode.mjs already uses for sub-agents
+              // reads exactly these keys off a completed tool part.
+              metadata: { sessionId: r.childId, parentSessionId: context.sessionID, awaited: true },
+            }
+          } catch (e: any) {
+            return `Delegation failed: ${e?.message || String(e)}`
+          }
+        },
+      }),
+
       message: tool({
         description:
           "Send a message to another PodPrompt session. It is delivered when that "

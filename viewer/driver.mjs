@@ -423,7 +423,9 @@ const backendHooks = {
   messaging: {
     message: (fromSessionId, args) => toolMessage(fromSessionId, args),
     listPeers: (fromSessionId, opts) => toolListPeers(fromSessionId, opts),
+    delegate: (fromSessionId, args) => toolDelegate(fromSessionId, args),
     describeReceipt,
+    backendIds: () => Object.keys(backends),
   },
 };
 const backends = {
@@ -1057,6 +1059,139 @@ function toolMessage(fromSessionId, { to, text, kind = "peer" }) {
   });
 }
 
+function parentBackendId(sessionId) {
+  return sessionIdToBackend.get(sessionId) || null;
+}
+
+// delegate: create a child session on a named backend and give it work.
+// Always CREATES — addressing an existing session is `message`. Keeping that
+// boundary sharp is what stops the parent-edge semantics from going
+// ambiguous, since a parent edge grants privilege and a peer edge does not.
+async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult = true, model = null }) {
+  const state = sessions.get(fromSessionId);
+  const chainId = state?.chainId;
+  if (!chainId) return { ok: false, reason: "no-chain" };
+  if (!backends[backend]) return { ok: false, reason: "unknown-backend", backend };
+  if (!String(prompt || "").trim()) return { ok: false, reason: "empty-prompt" };
+
+  // Breadth before depth: a step budget bounds how long a chain runs, not
+  // how wide it goes, and width is where the expensive failure lives.
+  const fan = noteFanout(state);
+  if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
+  // Counted along creation lineage, so promotion cannot reset it (PD9).
+  if (creationDepthExceeded(fromSessionId)) {
+    return { ok: false, reason: "depth-cap", max: MAX_CREATION_DEPTH };
+  }
+  const spent = chains.spend(chainId);
+  if (!spent.ok) return { ok: false, reason: spent.reason, chainId };
+
+  // PodPrompt mints the id (C1). The opencode backend expects its client
+  // ids to be distinguishable from its own ses_... ids.
+  const childId = backend === "opencode" ? `oc-${randomUUID()}` : randomUUID();
+  const childTitle = String(title || prompt).slice(0, 80);
+
+  // The parent has to be addressable for its own child's report to reach
+  // it in the async case.
+  peers.ensure(fromSessionId, {
+    backend: parentBackendId(fromSessionId),
+    title: peers.get(fromSessionId)?.title || chains.get(chainId)?.rootPrompt || null,
+  });
+  registerChildSession(childId, {
+    parent: fromSessionId,
+    backend,
+    // Distinct from "native-task": a delegated child is a REAL session on
+    // its backend, which is why promotion needs no seeding for it.
+    childKind: "delegated",
+    description: childTitle,
+    createdBy: fromSessionId,
+  });
+  peers.ensure(childId, { title: childTitle, backend });
+
+  // C7: a model id means nothing to another backend, so it is only carried
+  // across when the backends match. Otherwise the child takes its own
+  // backend's default.
+  const parentBackend = sessionIdToBackend.get(fromSessionId) || null;
+  const inherited = (!model && parentBackend === backend) ? state?.model : null;
+  const chosenModel = model || inherited || null;
+  if (chosenModel) preSeeds.set(childId, { ...(preSeeds.get(childId) || {}), model: chosenModel });
+
+  // Auto-approve is NOT set here: it resolves through the parent edge at
+  // decision time (autoApproveForSession), so a child is exactly as
+  // privileged as its parent and follows it if the user changes their mind
+  // mid-task.
+  // Registered BEFORE the turn starts, for both paths. Attaching afterwards
+  // races a child that finishes quickly: the waiter would be added after
+  // the resolve had already fired, and a blocking delegate would hang
+  // forever on a turn that was already over.
+  const waiter = awaitTurnEnd(childId);
+  const started = startTurn(childId, prompt, {
+    source: "delegate",
+    chainId,
+    backendId: backend,
+  });
+  if (!started.ok) {
+    return { ok: false, reason: started.reason, childId };
+  }
+
+  const handle = `@${peers.get(childId)?.handle || childId}`;
+  if (!awaitResult) {
+    // Async: the parent's turn ends now and the child's report arrives later
+    // as an ordinary inbox delivery. This costs almost nothing because peer
+    // messaging already built that wake path.
+    watchDelegateForReport(waiter, childId, fromSessionId, chainId);
+    return { ok: true, handle, childId, awaited: false, remaining: spent.remaining };
+  }
+
+  const outcome = await waiter;
+  const text = await finalAssistantText(childId);
+  return {
+    ok: true, handle, childId, awaited: true,
+    outcome: outcome?.reason || "completed",
+    text, remaining: spent.remaining,
+  };
+}
+
+// Reads the child's own transcript rather than tapping the stream: the
+// backends already store it, and whatever is on disk is what the user will
+// see when they open the child, so the parent cannot be told something the
+// transcript disagrees with.
+async function finalAssistantText(childId) {
+  try {
+    const st = sessions.get(childId);
+    const backend = st?.backend || getBackend(sessionIdToBackend.get(childId) || "claude-code");
+    const history = await backend.getSessionHistory(childId, st?.cwd, sessionRelations[childId] || null);
+    if (!Array.isArray(history)) return null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i]?.role === "assistant" && history[i].text) return history[i].text;
+    }
+    return null;
+  } catch (e) {
+    console.error(`[driver] could not read delegated child ${childId} transcript:`, e.message);
+    return null;
+  }
+}
+
+// Async delegation: when the child finishes, its report is delivered to the
+// parent as an ordinary inbox entry — kind "result" rather than "peer", so
+// the two stay distinguishable in storage even though they render alike.
+function watchDelegateForReport(waiter, childId, parentId, chainId) {
+  waiter.then(async (outcome) => {
+    const text = await finalAssistantText(childId);
+    const handle = peers.get(childId)?.handle || childId;
+    const body = text
+      ? `Delegated work finished (${outcome?.reason || "completed"}):\n\n${text}`
+      : `Delegated work ended with no output (${outcome?.reason || "completed"}).`;
+    const receipt = deliver(parentId, body, {
+      from: localPrincipal(childId),
+      kind: "result",
+      chainId,
+    });
+    if (!receipt.ok) {
+      console.error(`[driver] delegated report from @${handle} not delivered: ${receipt.reason}`);
+    }
+  }).catch((e) => console.error(`[driver] delegate watcher failed for ${childId}:`, e.message));
+}
+
 // What the model actually reads back. Every outcome is stated plainly,
 // including the refusals: a receipt a model cannot interpret gets retried.
 function describeReceipt(receipt, to) {
@@ -1065,6 +1200,13 @@ function describeReceipt(receipt, to) {
     const left = receipt.remaining === null ? "no step limit" : `${receipt.remaining} steps left`;
     return `Message ${where} to ${to}. ${left}.`;
   }
+  if (receipt.reason === "depth-cap") {
+    return `Delegation refused: already ${receipt.max} levels deep. Do the work here instead.`;
+  }
+  if (receipt.reason === "unknown-backend") {
+    return `No backend called "${receipt.backend}". Use "claude-code" or "opencode".`;
+  }
+  if (receipt.reason === "empty-prompt") return "Delegation needs a prompt describing the work.";
   const why = {
     "unknown-handle": `No peer called ${to} in this realm. Use list_peers to see who exists.`,
     "unknown-realm": `No such realm in ${to}. Only local peers are reachable right now.`,
@@ -1954,6 +2096,33 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     } catch (e) {
       console.error(`[driver] inbox drain failed for session ${sessionId}:`, e.message);
     }
+    // Wake anything blocking on this session's turn — a parent holding a
+    // delegate() call open. Resolved AFTER turn_end and the drain, so a
+    // waiter never observes a turn that the browser has not been told about
+    // yet. Always resolved, including on error and abort, because a waiter
+    // that only hears about success waits forever on failure.
+    resolveTurnWaiters(sessionId, outcome);
+  }
+}
+
+// sessionId -> [resolve]. Deliberately a list: nothing stops two callers
+// awaiting the same session.
+const turnWaiters = new Map();
+
+function awaitTurnEnd(sessionId) {
+  return new Promise((resolve) => {
+    const list = turnWaiters.get(sessionId) || [];
+    list.push(resolve);
+    turnWaiters.set(sessionId, list);
+  });
+}
+
+function resolveTurnWaiters(sessionId, outcome) {
+  const list = turnWaiters.get(sessionId);
+  if (!list?.length) return;
+  turnWaiters.delete(sessionId);
+  for (const resolve of list) {
+    try { resolve(outcome); } catch { /* a waiter's own failure is not ours */ }
   }
 }
 
@@ -2843,6 +3012,38 @@ const server = createServer(async (req, res) => {
     // `describe` is the model-facing wording, owned here so the two backends
     // explain the same outcome the same way.
     res.end(JSON.stringify({ ...receipt, describe: describeReceipt(receipt, body.to) }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/delegate") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const fromId = podSessionIdFor(body.from);
+    if (!fromId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"from is required"}');
+      return;
+    }
+    try {
+      const receipt = await toolDelegate(fromId, {
+        backend: body.backend,
+        prompt: body.prompt || "",
+        title: body.title || null,
+        model: body.model || null,
+        awaitResult: body.awaitResult !== false,
+      });
+      res.writeHead(receipt.ok ? 200 : 409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...receipt, describe: describeReceipt(receipt, body.backend) }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 

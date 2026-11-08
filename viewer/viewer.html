@@ -1099,6 +1099,16 @@
   .msg.tool.expanded .msg-tool-toggle::before { content: '▾ '; }
   .msg.tool .msg-tool-toggle:hover { text-decoration: underline; }
   .msg.tool .msg-tool-toggle .model { color: var(--muted); opacity: .8; margin-left: 0; margin-right: 0; }
+  /* The tool's own name, lifted out of the body into the label. Monospace
+     because it is an identifier, and inheriting the label's colour for the
+     same reason the Agent title does — it reads as part of "TOOL <name>". */
+  .msg.tool .msg-tool-toggle .tool-name {
+    font-family: var(--mono);
+    text-transform: none;
+    letter-spacing: normal;
+    margin-right: 6px;
+  }
+  .msg.tool .msg-tool-toggle .tool-name:empty { display: none; }
   .msg.tool .msg-label .ts { margin-left: auto; }
   .msg.tool .msg-body p { margin: 0; } /* dead now marked.parse() no longer runs here; harmless if a stray <p> ever appears */
 
@@ -1488,6 +1498,17 @@ function copyCode(btn) {
 // reinterpreted as markdown. Everything outside a fence is escaped and
 // inserted as literal text, unprocessed.
 const TOOL_FENCE_RE = /```([^\n`]*)\n([\s\S]*?)```/g;
+
+const TOOL_NAME_RE = /^`([^`\n]+)`[ \t]*/;
+
+// Splits "`Bash` ls -la" into its tool name and the rest. Returns null when
+// the text is not a tool summary at all — a *(stopped)* marker, an
+// *(error: ...)* bubble, a local notice — so those render unchanged.
+function splitToolName(text) {
+  const m = TOOL_NAME_RE.exec(text || '');
+  if (!m) return null;
+  return { name: m[1], rest: text.slice(m[0].length) };
+}
 
 function renderToolBody(text) {
   let out = '';
@@ -1888,14 +1909,16 @@ function getOrCreate(id, role, insertTop) {
     // (see settings.tools): hidden, collapsed with the header as the toggle,
     // or always-expanded. Content still renders via renderToolBody() so the
     // Edit/MultiEdit/Write diff fences keep their hljs highlighting.
-    wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="model"></span><span class="ts"></span></span></div>
+    wrap.innerHTML = `<div class="msg-label"><span class="msg-tool-toggle">Tool <span class="tool-name"></span><span class="model"></span><span class="ts"></span></span></div>
                       <div class="msg-body"></div>`;
     wrap.querySelector('.msg-tool-toggle').addEventListener('click', () => wrap.classList.toggle('expanded'));
+    const toolNameEl = wrap.querySelector('.tool-name');
     insertFeedItem(wrap, insertTop);
     msgs[id] = {
       el: wrap.querySelector('.msg-body'),
       tsEl: wrap.querySelector('.ts'),
       modelEl: wrap.querySelector('.model'),
+      toolNameEl,
       rawText: '', ts: null, role, revealTimer: null, permId: id, wrap,
     };
     applyToolsVisibility(msgs[id]);
@@ -1977,7 +2000,14 @@ function renderBody(entry) {
     // output/paths). Fenced code (the Edit/MultiEdit/Write diff blocks)
     // still gets hljs syntax highlighting via renderToolBody()'s own
     // fence extraction.
-    entry.el.innerHTML = renderToolBody(entry.rawText || '');
+    // The tool's name moves into the label, beside "Tool", so the body is
+    // just the arguments — "Bash" stops being repeated on every line of a
+    // feed that is mostly Bash. Falls back to rendering the text whole when
+    // there is no name to lift, which covers the synthesized tool bubbles
+    // (*(stopped)*, *(error: ...)*, local notices).
+    const split = splitToolName(entry.rawText || '');
+    if (entry.toolNameEl) entry.toolNameEl.textContent = split ? split.name : '';
+    entry.el.innerHTML = renderToolBody(split ? split.rest : (entry.rawText || ''));
     return;
   }
   const html = marked.parse(extractMath(entry.rawText || ''));

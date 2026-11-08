@@ -136,18 +136,52 @@ function enqueueSend(sessionId, doSend) {
   return next;
 }
 
-async function broadcast(sessionId, role, text, id, ts, model) {
+// `origin` records WHO caused this message to exist: "human" for something
+// typed in the browser, "parent" for a prompt a parent session delegated,
+// later "peer" if sessions ever message each other directly. Absent means
+// human, so every existing call site keeps its meaning. It matters for two
+// things that are hard to retrofit: a transcript that cannot distinguish
+// human input from agent input is ambiguous to read, and any future loop
+// detection between sessions has nothing to key on without it.
+async function broadcast(sessionId, role, text, id, ts, model, origin) {
   return enqueueSend(sessionId, async () => {
     try {
       await fetch(VIEWER_MESSAGE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, role, text, id, ts: ts || nowIso(), model }),
-      });
+        body: JSON.stringify({
+          sessionId, role, text, id, ts: ts || nowIso(), model,
+          ...(origin && origin !== "human" ? { origin } : {}),
+        }),
+      }).then(noteViewerLiveness);
     } catch (e) {
       console.error("[driver] failed to broadcast to viewer:", e.message);
     }
   });
+}
+
+// ── Viewer liveness ──────────────────────────────────────────────────────
+// server.py reports its subscriber count on every /message and /status POST
+// we already make (see its handler), so this is free to keep current — no
+// polling, no extra request. It exists because the driver can otherwise park
+// a permission request on a browser that closed hours ago and never know.
+// Deliberately a last-seen timestamp rather than a bare boolean: "no viewer
+// for the last N minutes" is the useful question, and a momentary gap while
+// a tab reconnects should not read as absence.
+const viewerLiveness = { viewers: 0, lastSeenWithViewer: Date.now(), lastCheck: 0 };
+
+async function noteViewerLiveness(res) {
+  try {
+    if (!res || !res.ok) return;
+    const data = await res.json();
+    if (typeof data?.viewers !== "number") return;
+    viewerLiveness.viewers = data.viewers;
+    viewerLiveness.lastCheck = Date.now();
+    if (data.viewers > 0) viewerLiveness.lastSeenWithViewer = Date.now();
+  } catch {
+    // A malformed or truncated body is not worth a log line here; the
+    // previous reading simply stands until the next broadcast refreshes it.
+  }
 }
 
 // Monotonic counter assigned to every stream_start/stream_delta payload, in
@@ -184,7 +218,7 @@ async function broadcastStatus(sessionId, payload) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, ...payload }),
-      });
+      }).then(noteViewerLiveness);
     } catch (e) {
       console.error("[driver] failed to broadcast status:", e.message);
     }
@@ -374,6 +408,178 @@ function stampSessionHost(sessionId, cwd) {
   } catch (e) {
     console.error("[driver] failed to write session-hosts file:", e.message);
   }
+}
+
+// ── Session relation index + sub-agent registry ──────────────────────────
+// A sub-agent is modelled as a CHILD SESSION: it gets a PodPrompt-minted
+// session id of its own, so opening one reuses /events?session=X, the
+// history path and the renderer unchanged, rather than needing a parallel
+// "nested transcript" mechanism inside the parent's feed.
+//
+// Two structures, deliberately separate because their lifetimes differ:
+//
+//   relations  — durable (this sidecar). Who is whose child, on which
+//                backend, and of which kind. Survives restarts because the
+//                sessions it describes do.
+//   subAgents  — live (memory only). Status, current tool, usage counters.
+//                Rebuilt from backend events; meaningless across a restart,
+//                since the processes it described are gone.
+//
+// Three rules this file has to keep, because breaking them is cheap now and
+// expensive later (see the design doc's forward constraints):
+//
+//   * Child ids are OURS. Backend-native identities (claude-code's task id
+//     and agent id, opencode's `ses_…`) are recorded as attributes, never
+//     used as the key — otherwise a child could never run on a different
+//     backend from its parent.
+//   * Relations are TYPED, and only `parent` cascades. A future peer edge
+//     between two sessions must not inherit archive/delete semantics.
+//   * Depth is computed from the chain here, never taken from a backend's
+//     own count, which only knows about its own nesting.
+const SESSION_TREE_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-tree.json");
+
+// childSessionId -> { rel, parent, backend, childKind, subagentType,
+//                     description, native: {...}, createdAt }
+// `rel` is always "parent" today; it exists so a later peer relation can
+// live in the same file without the cascade walkers silently picking it up.
+let sessionRelations = loadSessionRelations();
+
+function loadSessionRelations() {
+  try {
+    const raw = JSON.parse(readFileSync(SESSION_TREE_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {}; // missing or corrupt — start fresh rather than fail over this
+  }
+}
+
+function saveSessionRelations() {
+  try {
+    // Temp file + atomic rename, same as the session-hosts file above: a
+    // crash mid-write must not leave torn JSON that throws on next read.
+    writeFileSync(`${SESSION_TREE_FILE}.tmp`, JSON.stringify(sessionRelations));
+    renameSync(`${SESSION_TREE_FILE}.tmp`, SESSION_TREE_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write session-tree file:", e.message);
+  }
+}
+
+// `native` carries whatever the backend calls this thing. For claude-code
+// that is { toolUseId, agentId, taskId } — toolUseId being the one id present
+// BOTH in the live task_started event and in the on-disk
+// subagents/agent-<id>.meta.json, which is what lets a live view and a
+// replayed view agree on which child they are looking at.
+function registerChildSession(childId, info) {
+  if (!childId || !info?.parent) return;
+  const prev = sessionRelations[childId] || {};
+  sessionRelations[childId] = {
+    rel: "parent",
+    parent: info.parent,
+    backend: info.backend || prev.backend || null,
+    childKind: info.childKind || prev.childKind || null, // "native-task" | "delegated-session"
+    subagentType: info.subagentType ?? prev.subagentType ?? null,
+    description: info.description ?? prev.description ?? null,
+    native: { ...(prev.native || {}), ...(info.native || {}) },
+    createdAt: prev.createdAt || nowIso(),
+  };
+  saveSessionRelations();
+}
+
+function parentOfSession(sessionId) {
+  const r = sessionRelations[sessionId];
+  return r && r.rel === "parent" ? r.parent : null;
+}
+
+function isChildSession(sessionId) {
+  return !!parentOfSession(sessionId);
+}
+
+function childrenOfSession(parentId) {
+  return Object.entries(sessionRelations)
+    .filter(([, r]) => r.rel === "parent" && r.parent === parentId)
+    .map(([childId]) => childId);
+}
+
+// Every descendant, breadth-first, following ONLY parent edges. This is the
+// cascade walker — archive/unarchive/delete/abort all use it — so it must
+// never traverse a non-parent relation. Guarded against cycles, which a
+// corrupt sidecar could otherwise turn into a hang.
+function descendantsOfSession(parentId) {
+  const out = [];
+  const seen = new Set([parentId]);
+  let frontier = [parentId];
+  while (frontier.length) {
+    const next = [];
+    for (const id of frontier) {
+      for (const child of childrenOfSession(id)) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        out.push(child);
+        next.push(child);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+// Computed from the chain, never from a backend's own spawn_depth: in a
+// mixed-backend tree each backend can only count its own nesting. 0 = a
+// top-level session.
+function depthOfSession(sessionId) {
+  let depth = 0;
+  let cur = sessionId;
+  const seen = new Set([cur]);
+  while (true) {
+    const parent = parentOfSession(cur);
+    if (!parent || seen.has(parent)) return depth;
+    seen.add(parent);
+    cur = parent;
+    depth += 1;
+  }
+}
+
+function rootOfSession(sessionId) {
+  let cur = sessionId;
+  const seen = new Set([cur]);
+  while (true) {
+    const parent = parentOfSession(cur);
+    if (!parent || seen.has(parent)) return cur;
+    seen.add(parent);
+    cur = parent;
+  }
+}
+
+// Live sub-agent status. Keyed by the child session id (the same key the
+// relations index uses), so a roster row and a session view are talking
+// about the same thing without translation.
+const subAgents = new Map();
+
+function upsertSubAgent(childId, patch) {
+  const prev = subAgents.get(childId) || {};
+  const next = { ...prev, ...patch, agentId: childId, updatedAt: Date.now() };
+  subAgents.set(childId, next);
+  return next;
+}
+
+function subAgentsForParent(parentId) {
+  return childrenOfSession(parentId).map((childId) => {
+    const rel = sessionRelations[childId] || {};
+    const live = subAgents.get(childId) || {};
+    return {
+      agentId: childId,
+      parentSessionId: parentId,
+      backend: rel.backend || null,
+      childKind: rel.childKind || null,
+      subagentType: rel.subagentType || null,
+      description: rel.description || null,
+      depth: depthOfSession(childId),
+      status: live.status || "completed", // nothing live on this process ⇒ it is not running
+      lastTool: live.lastTool || null,
+      usage: live.usage || null,
+      startedAt: live.startedAt || null,
+    };
+  });
 }
 
 // ── opencode serve process ownership + crash recovery ────────────────────
@@ -878,13 +1084,34 @@ setInterval(pollAccountUsageForAllBackends, PLAN_USAGE_POLL_INTERVAL_MS);
 // aborts at all (its abort() is a fire-and-forget POST), whereas /abort
 // below passes through this process for BOTH backends and can simply say so.
 // Expiring orphaned approvals on the way out is generic for the same reason.
-async function runTurn(sessionId, promptText) {
+//
+// startTurn() is the single entry point. POST /prompt calls it, and so will
+// anything else that ever needs to begin a turn — a parent delegating to
+// another backend, or (if sessions ever message each other) a peer delivery.
+// Keeping one path matters because each of those would otherwise grow its
+// own copy of the in-flight check, the host stamp and the broadcast order,
+// and the copies would drift. `source` rides through to the user bubble's
+// `origin` so a transcript can say who actually asked.
+function startTurn(sessionId, promptText, { source = "human", explicitCwd, backendId } = {}) {
+  const state = getSessionState(sessionId, explicitCwd, backendId);
+  if (state.turnInFlight) {
+    return { ok: false, reason: "busy" };
+  }
+  // Deliberately not awaited: a turn runs for minutes and the caller (an
+  // HTTP handler, a delegating tool) must not be held open for it.
+  runTurn(sessionId, promptText, { source }).catch((e) =>
+    console.error(`[driver] startTurn failed for session ${sessionId}:`, e.message));
+  return { ok: true };
+}
+
+async function runTurn(sessionId, promptText, { source = "human" } = {}) {
   const state = getSessionState(sessionId);
   // Generic across both backends (see stampSessionHost's own comment) —
   // every turn, any session, any backend, records which host path was
   // actually backing /workspace just now.
   stampSessionHost(sessionId, state.cwd);
   state.turnAnnounced = false;
+  state.turnSource = source;
   try {
     await state.backend.runTurn(sessionId, promptText, state);
   } catch (e) {
@@ -1477,19 +1704,40 @@ const server = createServer(async (req, res) => {
         return;
       }
     }
-    if (getSessionState(sessionId, explicitCwd, body.backend).turnInFlight) {
+    // A sub-agent's transcript is a record of delegated work, not a
+    // conversation: the parent gave it a prompt and consumed its report, so
+    // a human message injected here would steer an agent whose output the
+    // parent already took, with no record of it on the parent's side. Refused
+    // with a reason the UI can act on — "promote this to its own session" is
+    // the supported way to carry on from a sub-agent's findings.
+    if (isChildSession(sessionId)) {
       res.writeHead(409, { "Content-Type": "application/json" });
-      res.end('{"error":"a turn is already in progress in this session"}');
+      res.end(JSON.stringify({
+        error: "this is a sub-agent transcript and cannot be prompted",
+        reason: "child-session",
+        parentSessionId: parentOfSession(sessionId),
+      }));
       return;
     }
-    const text = body.text || "";
-    res.writeHead(202, { "Content-Type": "application/json" });
-    res.end('{"ok":true}');
+    const started = startTurn(sessionId, body.text || "", {
+      source: "human",
+      explicitCwd,
+      backendId: body.backend,
+    });
+    if (!started.ok) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        error: "a turn is already in progress in this session",
+        reason: started.reason,
+      }));
+      return;
+    }
     // Fire-and-forget: the actual reply streams via server.py's SSE feed,
     // not this HTTP response. Different sessions' calls run fully
     // concurrently — only a second prompt to the SAME session is rejected
     // above.
-    runTurn(sessionId, text).catch((e) => console.error("[driver] runTurn failed:", e.message));
+    res.writeHead(202, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
     return;
   }
 

@@ -515,9 +515,18 @@ class Handler(BaseHTTPRequestHandler):
             role = payload.get("role", "assistant")
             text = payload.get("content", payload.get("text", ""))
             msg_id = payload.get("id") or f"{role}-{uuid.uuid4()}"
-            _emit(session_id, "message", {"type": "message", "role": role,
-                                           "text": text, "id": msg_id, "ts": payload.get("ts"),
-                                           "model": payload.get("model")})
+            # `origin` is who caused this message to exist — absent means a
+            # human typed it, which is every pre-existing call site. Carried
+            # into the stored entry (not just the live event) so a replayed
+            # transcript can still distinguish human input from a prompt an
+            # agent delegated; dropping it here would make the live and
+            # replayed views disagree.
+            entry = {"type": "message", "role": role,
+                     "text": text, "id": msg_id, "ts": payload.get("ts"),
+                     "model": payload.get("model")}
+            if payload.get("origin"):
+                entry["origin"] = payload["origin"]
+            _emit(session_id, "message", entry)
             # A permission/question card just appeared or got resolved (the
             # same role, rebroadcast with resolved:true) — either way, the
             # sessions-panel badge for this session may have just changed.
@@ -583,11 +592,26 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # The driver POSTs here for every message and status and has always
+        # discarded this body. Returning the current subscriber count turns
+        # that existing round-trip into a liveness channel at zero cost: no
+        # new endpoint, no polling, no reverse connection. The driver needs it
+        # because it otherwise has no idea whether anyone is listening — it
+        # can park a permission request forever with every tab closed.
+        # `clients` counts this session's own /events subscribers; `viewers`
+        # counts every connected tab anywhere, which is the right gate for
+        # "is a human reachable at all", since a user can navigate to any
+        # session to answer.
+        with sessions_lock:
+            session_clients = len(sessions.get(session_id, {}).get("clients", [])) if session_id else 0
+            total_viewers = sum(len(s["clients"]) for s in sessions.values()) + len(meta_clients)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_cors()
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        self.wfile.write(json.dumps({
+            "ok": True, "clients": session_clients, "viewers": total_viewers,
+        }).encode())
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

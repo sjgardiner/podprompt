@@ -927,13 +927,21 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           if (!entry) return;
           liveBlocks.delete(event.index);
           if (!entry.text.trim()) return; // never produced visible content — no bubble exists, nothing to finalize
-          broadcast(sessionId, entry.type === "thinking" ? "thinking" : "assistant", entry.text, entry.id, null, null);
+          // Carries the model. This finalizing broadcast lands on the SAME
+          // bubble id the stream_start already labelled, so passing null here
+          // actively erased it — the model name appeared while the bubble was
+          // being typed and vanished the moment it finished.
+          broadcast(sessionId, entry.type === "thinking" ? "thinking" : "assistant",
+            entry.text, entry.id, null, streamingModel);
         }
     }
 
     return {
       handleStreamEvent,
       get sawStreamEvents() { return sawStreamEvents; },
+      // Null when message_start carried no model, which is the only case the
+      // stream_model fallback below exists for.
+      get streamingModel() { return streamingModel; },
       // "Did a bubble of this type actually get streamed this turn?" — the
       // question each fallback below needs to ask about ITS OWN type.
       streamedType(type) { return !!announcedStreamByType[type]; },
@@ -1412,21 +1420,16 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             const thinkingIds = streamTracker.takeAnnouncedIds("thinking");
             const textIds = streamTracker.takeAnnouncedIds("text");
             uuidToBubbleId.set(msg.uuid, { thinking: thinkingIds, text: textIds[0] || null });
-            // Label those bubbles with the model now that it is known for
-            // certain. A streamed block never gets a final `message`
-            // broadcast (suppressed, so the bubble is not duplicated), so
-            // without this the model name was missing on every live turn and
-            // only appeared once history was re-read from disk.
-            //
-            // Done here rather than relying on stream_start's model, which is
-            // captured from message_start and may simply not arrive: THIS
-            // message demonstrably carries the model, since it is the same
-            // value the transcript later shows. The stream_start path stays
-            // as the faster option when it does work — whichever lands first
-            // sets the label, and the second is a harmless repaint.
+            // Fallback only. message_start normally supplies the model, and
+            // both stream_start and the finalizing broadcast carry it from
+            // there — that is the working path, and this stays silent on it.
+            // It exists for the case where message_start arrives WITHOUT a
+            // model: streamingModel is then null, nothing labels the bubble,
+            // and the completed message is the first place the model is known
+            // for certain. Gated so it costs nothing when it is not needed.
             const labelModel = modelByUuid.get(msg.uuid) || null;
             const ids = [...thinkingIds, ...textIds];
-            if (labelModel && ids.length) {
+            if (!streamTracker.streamingModel && labelModel && ids.length) {
               broadcastStatus(sessionId, { type: "stream_model", ids, model: labelModel });
             }
           }

@@ -2449,7 +2449,11 @@ function connect() {
     const { id, role, text, ts, model } = msg;
     const entry = getOrCreate(id, role);
     entry.ts = ts;
-    entry.model = model || null;
+    // A message with no model must not erase one the bubble already has.
+    // The same bubble id is written more than once — stream_start labels it
+    // while it types, and the finalizing broadcast rewrites it — so an
+    // absent model means "nothing to add here", not "forget what you knew".
+    if (model) entry.model = model;
     if (entry.modelEl) {
       const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
       if (show && entry.model) {

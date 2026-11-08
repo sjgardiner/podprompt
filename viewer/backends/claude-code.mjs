@@ -992,6 +992,14 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const canUseTool = makeCanUseTool(sessionId, state);
 
     const userMsgUuid = randomUUID();
+    // The bubble shows what the user actually typed. state.pendingSeed (set
+    // by driver.mjs on the first turn of a promoted sub-agent) carries that
+    // sub-agent's transcript to the MODEL only — otherwise the feed would
+    // open with a wall of replayed context the user did not write, directly
+    // above the transcript it was replayed from.
+    const seed = state.pendingSeed || null;
+    state.pendingSeed = null;
+    const modelPrompt = seed ? `${seed}\n\n${promptText}` : promptText;
     broadcast(sessionId, "user", promptText, userMsgUuid, null, null);
 
     function onePrompt() {
@@ -1001,7 +1009,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       return (async function* () {
         yield {
           type: "user",
-          message: { role: "user", content: promptText },
+          message: { role: "user", content: modelPrompt },
           parent_tool_use_id: null,
           uuid: userMsgUuid,
         };

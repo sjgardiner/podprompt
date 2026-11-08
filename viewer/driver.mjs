@@ -1307,8 +1307,84 @@ function startTurn(sessionId, promptText, { source = "human", explicitCwd, backe
   return { ok: true };
 }
 
+// Promotion detaches a sub-agent's RECORD, but on claude-code there is no
+// conversation to detach: the sub-agent ran as a Task inside its parent's
+// process, so a promoted session starts with an empty context and the
+// transcript above it is something the model has never read. That makes
+// promotion no better than copying the markdown out by hand.
+//
+// So the first prompt after promotion carries the sub-agent's own transcript
+// with it. Kept off the user's bubble (see state.pendingSeed in the backends)
+// so the feed still shows what the user typed, not a wall of replayed
+// context.
+const PROMOTED_SEED_BUDGET = 24000; // characters; a long sub-agent is easily larger
+
+// Only where there is no conversation behind the id to resume. That is the
+// real distinction, not "is a sub-agent": a claude-code sub-agent ran as a
+// Task inside its parent's process, so its PodPrompt session id is
+// synthesized and the CLI has never heard of it — prompting it starts an
+// empty session. An opencode sub-agent is a genuine session on the opencode
+// server with its own stored history, so prompting it simply continues that
+// conversation; seeding there would replay the whole transcript as text on
+// top of history the server already holds, paying twice for it and showing
+// the model everything twice. The same reasoning covers a future
+// cross-backend delegated child, which is likewise a real session.
+function needsPromotionSeed(rel) {
+  return rel.backend === "claude-code" && rel.childKind === "native-task";
+}
+
+async function buildPromotedSeed(sessionId, state) {
+  const rel = sessionRelations[sessionId];
+  if (!rel || !rel.promoted || rel.seeded) return null;
+  if (!needsPromotionSeed(rel)) return null;
+  let history;
+  try {
+    history = await state.backend.getSessionHistory(sessionId, state.cwd, rel);
+  } catch (e) {
+    console.error(`[driver] could not read transcript to seed promoted session ${sessionId}:`, e.message);
+    return null;
+  }
+  if (!Array.isArray(history) || !history.length) return null;
+
+  const lines = [];
+  for (const h of history) {
+    const who = h.role === "user" ? "Prompt"
+      : h.role === "assistant" ? "Sub-agent"
+      : h.role === "thinking" ? "Sub-agent (reasoning)"
+      : h.role === "tool" ? "Tool" : h.role;
+    lines.push(`### ${who}\n${h.text}`);
+  }
+  let body = lines.join("\n\n");
+  // Oldest content is dropped first: a sub-agent's conclusions are at the
+  // end, and those matter most to whoever is carrying the work on.
+  let truncated = false;
+  if (body.length > PROMOTED_SEED_BUDGET) {
+    body = body.slice(body.length - PROMOTED_SEED_BUDGET);
+    truncated = true;
+  }
+  const label = rel.description ? `"${rel.description}"` : "a sub-agent";
+  return [
+    `The following is the full transcript of ${label}, a sub-agent whose work you are`,
+    "taking over. It ran separately and you have not seen it before now.",
+    truncated ? "(Earlier parts were dropped to fit; this is the most recent portion.)" : "",
+    "",
+    "<sub-agent-transcript>",
+    body,
+    "</sub-agent-transcript>",
+    "",
+    "Continue from that work. The user's message follows.",
+  ].filter(Boolean).join("\n");
+}
+
 async function runTurn(sessionId, promptText, { source = "human" } = {}) {
   const state = getSessionState(sessionId);
+  // Once only: the seed is the handover, not a preamble on every turn.
+  const seed = await buildPromotedSeed(sessionId, state);
+  if (seed) {
+    state.pendingSeed = seed;
+    sessionRelations[sessionId] = { ...sessionRelations[sessionId], seeded: true, seededAt: nowIso() };
+    saveSessionRelations();
+  }
   // Generic across both backends (see stampSessionHost's own comment) —
   // every turn, any session, any backend, records which host path was
   // actually backing /workspace just now.

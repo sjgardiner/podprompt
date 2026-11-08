@@ -50,6 +50,12 @@
     --em-color:  #b0bcd8;
     --inline-code-color: #a5b4fc;
     --zebra-row: rgba(255,255,255,.02);
+    /* Defined in BOTH themes on purpose. A var() fallback would silently
+       win and ignore the theme — which is exactly how the sub-agent roster
+       stopped respecting light mode. */
+    --warn:      #fbbf24;
+    --warn-bg:   #2a2213;
+    --danger:    #f87171;
     --sans: 'Inter', 'Helvetica Neue', system-ui, sans-serif;
     --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
     --radius: 10px;
@@ -81,6 +87,9 @@
     --em-color:  #475569;
     --inline-code-color: #4338ca;
     --zebra-row: rgba(15,23,42,.035);
+    --warn:      #92400e;
+    --warn-bg:   #fef3c7;
+    --danger:    #dc2626;
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -392,6 +401,73 @@
      is unchanged for the ordinary case. */
   #roster-btn { display: none; font-size: 12px; padding: 2px 8px; white-space: nowrap; }
   #roster-btn.show { display: block; }
+
+  /* ── Messaging: inbox, budgets, pause ─────────────────────────────────
+     ONE header slot for the whole subsystem. The bar already carries four
+     icon buttons and three status widgets, and this UI has no generic panel
+     menu — panels are opened BY header buttons — so a second slot for the
+     same feature was not affordable. */
+  #messaging-btn { position: relative; font-size: 13px; padding: 2px 8px; }
+  /* The badge counts ONLY stuck mail — never messages queued behind a busy
+     target. Transient queueing resolves in seconds; a badge that counted it
+     would flicker all day, train the eye to ignore it, and then fail to be
+     noticed on the one night it matters. */
+  #messaging-btn .msg-badge {
+    display: none; position: absolute; top: -4px; right: -4px;
+    min-width: 15px; height: 15px; line-height: 15px; padding: 0 3px;
+    border-radius: 8px; background: var(--warn); color: var(--bg);
+    font-size: 10px; font-weight: 600; text-align: center;
+  }
+  #messaging-btn.has-stuck .msg-badge { display: block; }
+  #messaging-btn.paused { border-color: var(--warn); color: var(--warn); }
+
+  /* Exists ONLY while paused, which is why it can afford to be loud: it
+     costs nothing in the normal case. A forgotten pause means a day spent
+     wondering why delegation appears broken, so under-signalling here is far
+     more expensive than over-signalling. */
+  #paused-strip { display: none; }
+  #paused-strip.show {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px; background: var(--warn-bg);
+    border-bottom: 1px solid var(--warn); color: var(--warn);
+    font-size: 13px;
+  }
+  #paused-strip .ps-spacer { flex: 1; }
+  #paused-strip button {
+    font-size: 12px; padding: 2px 10px;
+    border-color: var(--warn); color: var(--warn); background: transparent;
+  }
+
+  #messaging-panel {
+    display: none; position: absolute; right: 10px; top: 44px; z-index: 41;
+    width: 400px; max-height: 70vh; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); padding: 10px;
+  }
+  #messaging-panel.open { display: block; }
+  .mp-section { margin-bottom: 12px; }
+  .mp-section:last-child { margin-bottom: 0; }
+  .mp-head {
+    font-size: var(--label-font-size); text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted); margin-bottom: 6px;
+  }
+  .mp-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+  .mp-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 6px; border-radius: 5px; border: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .mp-row.stuck { border-color: var(--warn); background: var(--warn-bg); }
+  .mp-main { flex: 1; min-width: 0; }
+  .mp-title {
+    font-size: 13px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mp-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .mp-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .mp-actions button { font-size: 11px; padding: 1px 6px; }
+  .mp-actions button.danger { color: var(--danger); border-color: var(--danger); }
+  .mp-chain-steps { font-variant-numeric: tabular-nums; }
   .settings-row.disabled label { opacity: .45; }
   /* Explains why notifications are unavailable or blocked. Hidden unless it
      has something to say, so the group stays as compact as the others when
@@ -1264,9 +1340,16 @@
     </div>
     <button id="roster-btn" title="Sub-agents in this session"></button>
     <button id="pending-approvals-btn" title="Approvals waiting on you"></button>
+    <button id="messaging-btn" title="Messages, budgets and pause">✉<span class="msg-badge"></span></button>
     <button id="export-btn" title="Export conversation as Markdown">⬇</button>
     <button id="settings-btn" title="Settings">⚙</button>
   </header>
+
+  <div id="paused-strip">
+    <span id="ps-text">Paused</span>
+    <span class="ps-spacer"></span>
+    <button id="ps-resume">Resume</button>
+  </div>
 
   <div id="sessions-panel">
     <div id="sessions-panel-header">
@@ -1428,6 +1511,7 @@
   </div>
 
   <div id="roster-panel"></div>
+  <div id="messaging-panel"></div>
 
   <div id="subagent-banner">
     <span class="sa-label">Sub-agent transcript<span id="sa-type"></span> &mdash; read-only</span>
@@ -2591,6 +2675,7 @@ function connect() {
     // A sub-agent's own progress is reported on the parent's stream, so the
     // roster can stay current without polling.
     if (s.type === 'sub_agents_changed' || s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
+    if (s.type === 'inbox_changed') refreshMessaging();
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
       refreshSubAgents();
@@ -3039,6 +3124,207 @@ notifySound.addEventListener('change', () => {
 // this adds is the two ways to reach one — a live status line on the Task
 // bubble that spawned it, and a roster of all of them — plus the banner that
 // makes a child session honest about being read-only.
+// ── Messaging: inbox, budgets, pause ────────────────────────────────────
+// The safety half of the messaging UI, and deliberately built BEFORE
+// anything can start a turn on its own: the breaker ships before the thing
+// it stops.
+const messagingBtn = document.getElementById('messaging-btn');
+const messagingPanel = document.getElementById('messaging-panel');
+const pausedStrip = document.getElementById('paused-strip');
+const psText = document.getElementById('ps-text');
+const psResume = document.getElementById('ps-resume');
+
+let messagingState = { entries: [], chains: [], globalPaused: false, stuckCount: 0 };
+
+function fmtAgo(ts) {
+  if (!ts) return '';
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
+  return `${Math.round(secs / 86400)}d ago`;
+}
+
+function fmtDeadline(ts) {
+  if (ts === null || ts === undefined) return 'no time limit';
+  const left = ts - Date.now();
+  if (left <= 0) return 'time is up';
+  if (left < 3600000) return `${Math.round(left / 60000)}m left`;
+  return `${Math.round(left / 3600000)}h left`;
+}
+
+// A chain is named after the prompt that created it. "Chain" is a word the
+// user should never have to see — from their side it is simply the thing
+// they asked for, which is also what makes extend unambiguous when several
+// chains involve the same session.
+function chainLabel(chain) {
+  if (!chain) return 'unknown work';
+  const p = (chain.rootPrompt || '').trim();
+  return p ? `"${p.length > 48 ? p.slice(0, 47) + '…' : p}"` : 'untitled work';
+}
+
+async function refreshMessaging() {
+  // driverBase resolves from /config after load; until then there is nothing
+  // to ask, and a failed poll must never blank a control the user may need.
+  if (!driverBase) return;
+  try {
+    const [inboxRes, chainsRes] = await Promise.all([
+      fetch(`${driverBase}/inbox`).then(r => r.json()),
+      fetch(`${driverBase}/chains`).then(r => r.json()),
+    ]);
+    messagingState = {
+      entries: inboxRes.entries || [],
+      stuckCount: inboxRes.stuckCount || 0,
+      globalPaused: !!chainsRes.globalPaused,
+      chains: chainsRes.chains || [],
+    };
+  } catch {
+    return; // a failed poll must not blank a control the user may need
+  }
+  renderMessagingIndicators();
+  if (messagingPanel.classList.contains('open')) renderMessagingPanel();
+}
+
+function renderMessagingIndicators() {
+  messagingBtn.classList.toggle('has-stuck', messagingState.stuckCount > 0);
+  messagingBtn.classList.toggle('paused', messagingState.globalPaused);
+  messagingBtn.querySelector('.msg-badge').textContent =
+    messagingState.stuckCount > 99 ? '99+' : String(messagingState.stuckCount);
+  const queued = messagingState.entries.filter(e => e.state === 'queued').length;
+  const stuck = messagingState.stuckCount;
+  pausedStrip.classList.toggle('show', messagingState.globalPaused);
+  if (messagingState.globalPaused) {
+    const waiting = queued + stuck;
+    // States what is about to happen rather than silently releasing a flood.
+    // If the number is alarming, that is the signal to purge instead.
+    psText.textContent = waiting
+      ? `Paused — ${waiting} message${waiting === 1 ? '' : 's'} waiting`
+      : 'Paused — automatic delivery is stopped';
+    psResume.textContent = waiting ? `Resume (${waiting})` : 'Resume';
+  }
+}
+
+function renderMessagingPanel() {
+  const { entries, chains, globalPaused } = messagingState;
+  const stuck = entries.filter(e => e.state === 'parked');
+  const queued = entries.filter(e => e.state === 'queued');
+  const activeChains = chains.filter(c => c.state !== 'exhausted' || c.paused);
+
+  const esc = (t) => String(t == null ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const msgRow = (e) => {
+    const from = e.fromHandle ? '@' + esc(e.fromHandle) : esc(e.from && e.from.id);
+    const to = e.toHandle ? '@' + esc(e.toHandle) : esc(e.to && e.to.id);
+    const why = e.state === 'parked'
+      ? ({ steps: 'out of steps', deadline: 'past the deadline',
+           global: 'paused', chain: 'this work is paused' }[e.parkedReason] || e.parkedReason)
+      : 'waiting for the recipient';
+    return `<div class="mp-row ${e.state === 'parked' ? 'stuck' : ''}">
+      <div class="mp-main">
+        <div class="mp-title">${from} → ${to}</div>
+        <div class="mp-sub">${esc(why)} · ${esc(chainLabel(e.chain))} · ${fmtAgo(e.createdAt)}</div>
+      </div>
+      <div class="mp-actions">
+        ${e.state === 'parked' ? `<button data-mp-deliver="${esc(e.id)}">Deliver now</button>` : ''}
+        <button class="danger" data-mp-discard="${esc(e.id)}">Discard</button>
+      </div>
+    </div>`;
+  };
+
+  const chainRow = (c) => {
+    const steps = c.steps.limit === null
+      ? `${c.steps.used} steps (no limit)`
+      : `${c.steps.used}/${c.steps.limit} steps`;
+    return `<div class="mp-row ${c.paused ? 'stuck' : ''}">
+      <div class="mp-main">
+        <div class="mp-title">${esc(chainLabel(c))}</div>
+        <div class="mp-sub"><span class="mp-chain-steps">${esc(steps)}</span> · ${esc(fmtDeadline(c.deadline))}${c.paused ? ' · paused' : ''}</div>
+      </div>
+      <div class="mp-actions">
+        <button data-mp-extend="${esc(c.id)}">Extend</button>
+        <button data-mp-chainpause="${esc(c.id)}" data-paused="${c.paused ? '1' : '0'}">${c.paused ? 'Resume' : 'Pause'}</button>
+      </div>
+    </div>`;
+  };
+
+  messagingPanel.innerHTML = `
+    <div class="mp-section">
+      <div class="mp-head">Automatic delivery</div>
+      <div class="mp-row">
+        <div class="mp-main">
+          <div class="mp-title">${globalPaused ? 'Paused' : 'Running'}</div>
+          <div class="mp-sub">Typed prompts always work${globalPaused ? '' : '. Pause stops everything automatic.'}</div>
+        </div>
+        <div class="mp-actions">
+          <button id="mp-toggle-pause">${globalPaused ? 'Resume all' : 'Pause all'}</button>
+          ${globalPaused ? '<button class="danger" id="mp-stop-running">Stop running turns</button>' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="mp-section">
+      <div class="mp-head">Stuck messages${stuck.length ? ` (${stuck.length})` : ''}</div>
+      ${stuck.length ? stuck.map(msgRow).join('') : '<div class="mp-empty">Nothing stuck.</div>'}
+    </div>
+    ${queued.length ? `<div class="mp-section">
+      <div class="mp-head">In transit (${queued.length})</div>
+      ${queued.map(msgRow).join('')}
+    </div>` : ''}
+    <div class="mp-section">
+      <div class="mp-head">Work in progress</div>
+      ${activeChains.length ? activeChains.map(chainRow).join('') : '<div class="mp-empty">Nothing running automatically.</div>'}
+    </div>`;
+}
+
+async function messagingPost(path, body) {
+  try {
+    await fetch(`${DRIVER}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+  await refreshMessaging();
+}
+
+messagingPanel.addEventListener('click', async (e) => {
+  const t = e.target.closest('button');
+  if (!t) return;
+  if (t.id === 'mp-toggle-pause') {
+    await messagingPost('/pause', { paused: !messagingState.globalPaused });
+  } else if (t.id === 'mp-stop-running') {
+    // The destructive half is a separate, deliberate second action — pause
+    // is reversible, aborting in-flight turns throws away work that may be
+    // nearly finished. The driver decides WHICH turns are running; guessing
+    // from chain origins here would miss any session running a turn it did
+    // not start.
+    await messagingPost('/pause', { paused: true, stopRunning: true });
+  } else if (t.dataset.mpDeliver) {
+    await messagingPost('/inbox-action', { entryId: t.dataset.mpDeliver, action: 'deliver-now' });
+  } else if (t.dataset.mpDiscard) {
+    await messagingPost('/inbox-action', { entryId: t.dataset.mpDiscard, action: 'discard' });
+  } else if (t.dataset.mpExtend) {
+    // Extend tops up the CHAIN, which is why the button sits on a row
+    // labelled by the original prompt rather than by a session.
+    await messagingPost('/extend-chain', { chainId: t.dataset.mpExtend, steps: 20, ms: 60 * 60 * 1000 });
+  } else if (t.dataset.mpChainpause) {
+    await messagingPost('/pause', { chainId: t.dataset.mpChainpause, paused: t.dataset.paused !== '1' });
+  }
+});
+
+messagingBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  rosterPanel.classList.remove('open');
+  messagingPanel.classList.toggle('open');
+  if (messagingPanel.classList.contains('open')) refreshMessaging();
+});
+document.addEventListener('click', (e) => {
+  if (!messagingPanel.contains(e.target) && e.target !== messagingBtn) {
+    messagingPanel.classList.remove('open');
+  }
+});
+psResume.addEventListener('click', () => messagingPost('/pause', { paused: false }));
+
 const rosterBtn = document.getElementById('roster-btn');
 const rosterPanel = document.getElementById('roster-panel');
 const subagentBanner = document.getElementById('subagent-banner');
@@ -3905,6 +4191,12 @@ async function loadDriverConfig() {
     loadModes();
     loadModels();
     refreshPendingApprovals();
+    // Pause state is global and survives restarts, so the strip has to be
+    // correct from first paint — not only after something happens to tick
+    // it. The poll is the backstop for state changed by another tab or by a
+    // chain hitting its deadline with nobody watching.
+    refreshMessaging();
+    setInterval(refreshMessaging, 20000);
   } catch (e) {
     console.error('Failed to load /config:', e);
   }

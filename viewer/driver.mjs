@@ -2427,12 +2427,25 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: result.reason }));
       return;
     }
-    // Resuming must actually move the mail that piled up while paused —
-    // otherwise "Resume" looks like it did nothing until something else
-    // happens to tick the drain.
+    // The destructive half, and a SEPARATE deliberate action rather than
+    // part of pausing: pause is reversible, while aborting in-flight turns
+    // throws away work that may be nearly finished. Done here rather than in
+    // the browser because the driver knows exactly which sessions are
+    // running — the browser would have to guess from chain origins and would
+    // miss any session running a turn it did not start.
+    let stopped = 0;
+    if (paused && body.stopRunning) {
+      for (const [sessionId, state] of sessions) {
+        if (!state.turnInFlight) continue;
+        state.abortRequested = true;
+        try { state.backend.abort(sessionId, state); stopped++; } catch (e) {
+          console.error(`[driver] stop-running abort failed for ${sessionId}:`, e.message);
+        }
+      }
+    }
     if (!paused) {
-      // Resuming must move the mail the pause was holding, not just the mail
-      // that happened to be queued: messages that ARRIVED while paused were
+      // Resuming must move the mail the pause was HOLDING, not just the mail
+      // that happened to be queued: messages that arrived while paused were
       // parked, and draining alone would leave them sitting there with the
       // pause visibly lifted.
       releaseParkedFor((e) => (body.chainId
@@ -2445,6 +2458,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       globalPaused: chains.isGloballyPaused(),
       chain: body.chainId ? chains.summary(chains.get(body.chainId)) : null,
+      stopped,
     }));
     return;
   }

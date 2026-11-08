@@ -1245,13 +1245,25 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                 + "message. Set true ONLY for quick work whose answer you need inside this "
                 + "turn — it holds your turn open until the new session finishes."),
           },
-          async (args) => {
+          async (args, extra) => {
             try {
               const receipt = await messaging.delegate(sessionId, {
                 backend: args.backend,
                 prompt: args.prompt,
                 title: args.title || null,
                 awaitResult: args.await === true,
+                // The assistant's own tool_use id for THIS call, which is
+                // also the id broadcast() keys this call's bubble by — so
+                // recording it on the child's relation row is all the
+                // browser needs to attach live status to the right bubble.
+                // Verified against this SDK rather than assumed: the handler
+                // is passed a second argument carrying
+                // _meta["claudecode/toolUseId"]. OpenCode has no equivalent
+                // — its ToolContext exposes sessionID and messageID but no
+                // per-call id — so delegate bubbles there carry no inline
+                // status, and the nested session row (HD5) is the surface
+                // that works on both.
+                toolUseId: extra?._meta?.["claudecode/toolUseId"] || null,
               });
               if (!receipt.ok) {
                 return { content: [{ type: "text", text: messaging.describeReceipt(receipt, args.backend) }] };

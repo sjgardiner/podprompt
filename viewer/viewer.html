@@ -422,9 +422,14 @@
      reaching for it — and this strip needs room to say WHICH failure
      happened, since that changes what you would do next. */
   #resume-bar { display: none; }
+  /* Appearance deliberately unchanged — still centred at the content width,
+     still warn-tinted. The vertical margin is ZERO because #feed is a flex
+     column with gap:20px: any margin here would STACK on that gap and the
+     bar would float away from the conversation it belongs to. Bubbles rely
+     on the same gap, which is what makes this sit flush among them. */
   #resume-bar.show {
     display: flex; align-items: center; gap: 10px;
-    margin: 0 auto 6px; max-width: var(--content-width, 860px);
+    margin: 0 auto; max-width: var(--content-width, 860px);
     padding: 6px 12px; border: 1px solid var(--warn); border-radius: 6px;
     background: var(--warn-bg); color: var(--warn); font-size: 13px;
   }
@@ -449,67 +454,48 @@
   .msg.user.from-peer .msg-label .role-name { color: var(--accent); }
   .msg.user.from-peer .msg-label .agent-title { color: var(--accent); }
 
-  #messaging-btn { position: relative; font-size: 13px; padding: 2px 8px; }
-  /* The badge counts ONLY stuck mail — never messages queued behind a busy
-     target. Transient queueing resolves in seconds; a badge that counted it
-     would flicker all day, train the eye to ignore it, and then fail to be
-     noticed on the one night it matters. */
-  #messaging-btn .msg-badge {
-    display: none; position: absolute; top: -4px; right: -4px;
-    min-width: 15px; height: 15px; line-height: 15px; padding: 0 3px;
-    border-radius: 8px; background: var(--warn); color: var(--bg);
-    font-size: 10px; font-weight: 600; text-align: center;
-  }
-  #messaging-btn.has-stuck .msg-badge { display: block; }
-  #messaging-btn.paused { border-color: var(--warn); color: var(--warn); }
-
   /* Exists ONLY while paused, which is why it can afford to be loud: it
      costs nothing in the normal case. A forgotten pause means a day spent
      wondering why delegation appears broken, so under-signalling here is far
      more expensive than over-signalling. */
   #paused-strip { display: none; }
   #paused-strip.show {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px; position: relative;
     padding: 6px 14px; background: var(--warn-bg);
     border-bottom: 1px solid var(--warn); color: var(--warn);
     font-size: 13px;
   }
   #paused-strip .ps-spacer { flex: 1; }
+  #paused-strip #ps-actions { display: flex; gap: 6px; align-items: center; }
   #paused-strip button {
     font-size: 12px; padding: 2px 10px;
     border-color: var(--warn); color: var(--warn); background: transparent;
   }
-
-  #messaging-panel {
-    display: none; position: absolute; right: 10px; top: 44px; z-index: 41;
-    width: 400px; max-height: 70vh; overflow-y: auto;
+  #paused-strip button.danger { border-color: var(--danger); color: var(--danger); }
+  /* Anchored to the strip rather than the button so it cannot be clipped by
+     the strip's own overflow, and positioned from the right because the
+     actions cluster sits at the right edge. */
+  #lift-menu {
+    position: absolute; right: 14px; top: 100%; z-index: 42;
+    min-width: 260px; padding: 4px;
     border: 1px solid var(--border); border-radius: 8px;
-    background: var(--surface); padding: 10px;
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 6px 20px rgba(0,0,0,.28);
   }
-  #messaging-panel.open { display: block; }
-  .mp-section { margin-bottom: 12px; }
-  .mp-section:last-child { margin-bottom: 0; }
-  .mp-head {
-    font-size: var(--label-font-size); text-transform: uppercase;
-    letter-spacing: .08em; color: var(--muted); margin-bottom: 6px;
+  .lift-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 6px 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
   }
-  .mp-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
-  .mp-row {
-    display: flex; align-items: flex-start; gap: 8px;
-    padding: 6px; border-radius: 5px; border: 1px solid var(--border);
-    margin-bottom: 6px;
+  .lift-row:hover { background: var(--code-bg); }
+  /* The resolved absolute time, shown on EVERY entry — "for 4 hours" crosses
+     midnight with the same ambiguity that makes a bare "8:00 AM" unclear at
+     7 AM, so showing it only on the named one would be the odd choice. */
+  .lift-when { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lift-row input[type="datetime-local"] {
+    font-size: 12px; background: var(--code-bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px;
   }
-  .mp-row.stuck { border-color: var(--warn); background: var(--warn-bg); }
-  .mp-main { flex: 1; min-width: 0; }
-  .mp-title {
-    font-size: 13px; color: var(--text);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .mp-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .mp-actions { display: flex; gap: 4px; flex-shrink: 0; }
-  .mp-actions button { font-size: 11px; padding: 1px 6px; }
-  .mp-actions button.danger { color: var(--danger); border-color: var(--danger); }
-  .mp-chain-steps { font-variant-numeric: tabular-nums; }
+
   .settings-row.disabled label { opacity: .45; }
   /* Explains why notifications are unavailable or blocked. Hidden unless it
      has something to say, so the group stays as compact as the others when
@@ -763,6 +749,62 @@
 
   /* Grouped-by-project layout: a section header per project, sorted (like
      the flat view) by that group's own most-recent session. */
+  /* HD5. The twisty is a sibling of the title text, not inside it, so the
+     text can still truncate independently. */
+  .session-twisty {
+    display: inline-block; width: 12px; flex-shrink: 0;
+    color: var(--muted); font-size: 10px; cursor: pointer; user-select: none;
+  }
+  .session-twisty:hover { color: var(--accent); }
+  .session-twisty.placeholder { cursor: default; }
+  .session-child { position: relative; }
+  /* A hairline rail, so several nested rows read as one family rather than
+     as rows that happen to be indented. */
+  .session-child::before {
+    content: ''; position: absolute; left: 4px; top: 0; bottom: 0;
+    border-left: 1px solid var(--border);
+  }
+  /* Carries a COUNT, unlike the per-row badges, so it needs width and a
+     readable numeral rather than being a bare dot. */
+  .session-agg {
+    min-width: 14px; height: 14px; line-height: 14px; padding: 0 3px;
+    border-radius: 7px; font-size: 9px; font-weight: 600; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* HD4's family-delete dialog. Deliberately a real modal rather than a
+     stacked confirm(): the whole point is to SHOW the blast radius, and
+     confirm() cannot render a list of checkboxes. */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 100; display: flex;
+    align-items: center; justify-content: center; background: rgba(0,0,0,.55);
+  }
+  .modal-box {
+    width: min(480px, 92vw); max-height: 80vh; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; color: var(--text);
+    box-shadow: 0 12px 40px rgba(0,0,0,.4);
+  }
+  .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .modal-sub { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
+  .modal-head {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 10px 0 6px;
+  }
+  .modal-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 4px; border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  .modal-row:hover { background: var(--code-bg); }
+  .modal-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .modal-row-why { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+  .modal-note {
+    font-size: 12px; color: var(--muted); margin-top: 12px;
+    padding: 8px 10px; background: var(--code-bg); border-radius: 6px;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .modal-actions button.danger { color: var(--danger); border-color: var(--danger); }
+
   .session-group-header {
     padding: 8px 14px 4px;
     font-size: 10px;
@@ -922,7 +964,6 @@
   #controls-row select.show { display: inline-block; }
   /* The model/mode pickers stay hidden until their options load; this one's
      options are fixed, so it is ready immediately. */
-  #controls-row select#budget-select { display: inline-block; }
   #auto-approve-row {
     display: flex;
     align-items: center;
@@ -1385,15 +1426,14 @@
     </div>
     <button id="roster-btn" title="Sub-agents in this session"></button>
     <button id="pending-approvals-btn" title="Approvals waiting on you"></button>
-    <button id="messaging-btn" title="Messages, budgets and pause">✉<span class="msg-badge"></span></button>
     <button id="export-btn" title="Export conversation as Markdown">⬇</button>
     <button id="settings-btn" title="Settings">⚙</button>
   </header>
 
   <div id="paused-strip">
-    <span id="ps-text">Paused</span>
+    <span id="ps-text"></span>
     <span class="ps-spacer"></span>
-    <button id="ps-resume">Resume</button>
+    <span id="ps-actions"></span>
   </div>
 
   <div id="sessions-panel">
@@ -1564,13 +1604,12 @@
   </div>
 
   <div id="roster-panel"></div>
-  <div id="messaging-panel"></div>
 
   <div id="subagent-banner">
     <span class="sa-label">Sub-agent transcript<span id="sa-type"></span> &mdash; read-only</span>
     <span class="sa-spacer"></span>
     <button id="sa-parent-btn" title="Go back to the session that spawned this sub-agent">↑ Parent session</button>
-    <button id="sa-promote-btn" title="Detach this sub-agent into a session of its own, so you can carry on from its findings">Promote to session</button>
+    <button id="sa-promote-btn" title="Keep as a session of its own">Keep</button>
   </div>
 
   <div id="feed">
@@ -1584,6 +1623,20 @@
       <p>Waiting for messages…</p>
       <p>Type a prompt below to get started.</p>
     </div>
+
+    <!-- Lives in the FEED, where a bubble would, rather than in the chrome
+         above the input bar. It is a statement about the conversation — this
+         turn ended badly, here is what to do about it — so it belongs with
+         the conversation, and the chrome stops competing with the status
+         bar for the space. Kept as the feed's LAST child by
+         placeResumeBar(), which re-appends it whenever it is shown, because
+         messages are appended after it. -->
+    <div id="resume-bar">
+      <span id="resume-text"></span>
+      <span class="rb-spacer"></span>
+      <button id="resume-btn">Continue</button>
+      <button id="resume-dismiss" title="Dismiss">×</button>
+    </div>
   </div>
   <button id="new-pill">↓ New messages</button>
   <div id="status-row">
@@ -1594,19 +1647,7 @@
       <label id="auto-approve-row" title="Automatically approve all tool permission requests for this session, until turned back off">
         <input type="checkbox" id="auto-approve-toggle"> Auto-approve
       </label>
-      <select id="budget-select" title="How far automatic work started by this session may go">
-        <option value="short">✉ Short</option>
-        <option value="normal">✉ Normal</option>
-        <option value="long">✉ Long</option>
-      </select>
     </div>
-  </div>
-
-  <div id="resume-bar">
-    <span id="resume-text"></span>
-    <span class="rb-spacer"></span>
-    <button id="resume-btn">Continue</button>
-    <button id="resume-dismiss" title="Dismiss">×</button>
   </div>
 
   <div id="input-bar">
@@ -2812,7 +2853,7 @@ function connect() {
     // A sub-agent's own progress is reported on the parent's stream, so the
     // roster can stay current without polling.
     if (s.type === 'sub_agents_changed' || s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
-    if (s.type === 'inbox_changed') refreshMessaging();
+    if (s.type === 'inbox_changed') refreshAutonomy();
     // Both edges: a turn ending may CREATE something to resume, and a turn
     // starting always retires it.
     if (s.type === 'turn_end' || s.type === 'turn_start') refreshResumeBar();
@@ -3012,8 +3053,8 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   // for the new session a moment later, and showing the previous session's
   // sub-agents in between would be wrong.
   subAgents = [];
+  delegatedChildren = [];
   currentSessionIsChild = knownChild;
-  loadBudgetPreset(sessionId);
   resumeBar.classList.remove('show');
   refreshResumeBar();
   currentSessionParent = knownParent;
@@ -3347,202 +3388,192 @@ if (deepHistoryToggle) {
   });
 }
 
-const messagingBtn = document.getElementById('messaging-btn');
-const messagingPanel = document.getElementById('messaging-panel');
-const pausedStrip = document.getElementById('paused-strip');
-const psText = document.getElementById('ps-text');
-const psResume = document.getElementById('ps-resume');
+// ── The autonomy strip (§10, AD4) ───────────────────────────────────────
+// What the envelope button, its panel, the budget chip and the preset menu
+// all collapsed into. The design rule: when nothing is wrong, this costs
+// NOTHING — no header button, no chip, no panel. The strip exists only while
+// autonomous work is paused, uncapped, or holding parked mail.
+//
+// It lives in the window chrome above the feed, deliberately not inside it:
+// the condition is global, so it must not scroll away, and whichever session
+// you happen to have open is where you should be able to unblock it.
+const autonomyStrip = document.getElementById('paused-strip');
+const asText = document.getElementById('ps-text');
+const asActions = document.getElementById('ps-actions');
 
-let messagingState = { entries: [], chains: [], globalPaused: false, stuckCount: 0 };
+let autonomyState = { state: 'open', count: 0, pauseAfter: 20, uncappedUntil: null, parked: 0, parkedSessions: 0 };
 
-function fmtAgo(ts) {
-  if (!ts) return '';
-  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (secs < 60) return `${secs}s ago`;
-  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
-  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
-  return `${Math.round(secs / 86400)}d ago`;
+// AD5: every absolute time is resolved HERE, in the browser, and the driver
+// only ever receives epoch ms. The container is almost certainly on UTC, so
+// a driver that tried to interpret "8 AM" would be wrong in a way that stays
+// invisible until it bites.
+function fmtWhen(ms) {
+  const d = new Date(ms);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  return sameDay ? time : `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}, ${time}`;
+}
+function fmtUntilRelative(ms) {
+  const mins = Math.max(0, Math.round((ms - Date.now()) / 60000));
+  if (mins < 60) return `in ${mins} min`;
+  const h = Math.round(mins / 60);
+  return `in ${h} hour${h === 1 ? '' : 's'}`;
+}
+// The next occurrence of a given local hour — so "8:00 AM" set at 7 AM means
+// an hour away, not tomorrow. Never a guess for the user either way, because
+// the menu renders the resolved date next to every entry.
+function nextLocalHour(hour) {
+  const d = new Date();
+  d.setHours(hour, 0, 0, 0);
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  return d.getTime();
 }
 
-function fmtDeadline(ts) {
-  if (ts === null || ts === undefined) return 'no time limit';
-  const left = ts - Date.now();
-  if (left <= 0) return 'time is up';
-  if (left < 3600000) return `${Math.round(left / 60000)}m left`;
-  return `${Math.round(left / 3600000)}h left`;
-}
-
-// A chain is named after the prompt that created it. "Chain" is a word the
-// user should never have to see — from their side it is simply the thing
-// they asked for, which is also what makes extend unambiguous when several
-// chains involve the same session.
-function chainLabel(chain) {
-  if (!chain) return 'unknown work';
-  const p = (chain.rootPrompt || '').trim();
-  return p ? `"${p.length > 48 ? p.slice(0, 47) + '…' : p}"` : 'untitled work';
-}
-
-async function refreshMessaging() {
-  // driverBase resolves from /config after load; until then there is nothing
-  // to ask, and a failed poll must never blank a control the user may need.
+async function refreshAutonomy() {
   if (!driverBase) return;
   try {
-    const [inboxRes, chainsRes] = await Promise.all([
-      fetch(`${driverBase}/inbox`).then(r => r.json()),
-      fetch(`${driverBase}/chains`).then(r => r.json()),
-    ]);
-    messagingState = {
-      entries: inboxRes.entries || [],
-      stuckCount: inboxRes.stuckCount || 0,
-      globalPaused: !!chainsRes.globalPaused,
-      chains: chainsRes.chains || [],
-    };
-  } catch {
-    return; // a failed poll must not blank a control the user may need
+    autonomyState = await (await fetch(`${driverBase}/autonomy`)).json();
+  } catch { return; }
+  renderAutonomyStrip();
+}
+
+function renderAutonomyStrip() {
+  const a = autonomyState;
+  const show = a.state === 'paused' || a.state === 'uncapped' || (a.parked || 0) > 0;
+  autonomyStrip.classList.toggle('show', show);
+  if (!show) return;
+
+  if (a.state === 'uncapped') {
+    asText.textContent = a.uncappedUntil
+      ? `⚡ Autonomous work is uncapped until ${fmtWhen(a.uncappedUntil)} (${fmtUntilRelative(a.uncappedUntil)}).`
+      : '⚡ Autonomous work is uncapped until you turn it back on.';
+  } else if (a.state === 'paused') {
+    const where = a.parkedSessions > 1 ? ` across ${a.parkedSessions} sessions` : '';
+    asText.textContent =
+      `⏸ Autonomous work paused — ${a.count} turns${where} since you were last active.`;
+  } else {
+    asText.textContent = `${a.parked} message${a.parked === 1 ? '' : 's'} waiting.`;
   }
-  renderMessagingIndicators();
-  if (messagingPanel.classList.contains('open')) renderMessagingPanel();
-}
 
-function renderMessagingIndicators() {
-  messagingBtn.classList.toggle('has-stuck', messagingState.stuckCount > 0);
-  messagingBtn.classList.toggle('paused', messagingState.globalPaused);
-  messagingBtn.querySelector('.msg-badge').textContent =
-    messagingState.stuckCount > 99 ? '99+' : String(messagingState.stuckCount);
-  const queued = messagingState.entries.filter(e => e.state === 'queued').length;
-  const stuck = messagingState.stuckCount;
-  pausedStrip.classList.toggle('show', messagingState.globalPaused);
-  if (messagingState.globalPaused) {
-    const waiting = queued + stuck;
-    // States what is about to happen rather than silently releasing a flood.
-    // If the number is alarming, that is the signal to purge instead.
-    psText.textContent = waiting
-      ? `Paused — ${waiting} message${waiting === 1 ? '' : 's'} waiting`
-      : 'Paused — automatic delivery is stopped';
-    psResume.textContent = waiting ? `Resume (${waiting})` : 'Resume';
+  asActions.innerHTML = '';
+  const btn = (label, title, fn, cls) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (title) b.title = title;
+    if (cls) b.className = cls;
+    b.addEventListener('click', fn);
+    asActions.appendChild(b);
+    return b;
+  };
+  if (a.state === 'uncapped') {
+    btn('Cap it now', 'Restore the pause-after limit', () => autonomyPost({}));
+  } else {
+    if (a.state === 'paused') {
+      btn(`Allow ${a.pauseAfter} more`, 'Let autonomous work continue', () => autonomyPost({ allow: true }));
+    }
+    btn("Don't pause ▾", 'Lift the limit for a while', (e) => { e.stopPropagation(); toggleLiftMenu(); });
   }
+  btn('Stop everything', 'Abort every running turn', async () => {
+    if (!confirm('Stop every running turn?\n\nWork in progress will be lost.')) return;
+    await fetch(`${driverBase}/stop-all`, { method: 'POST' });
+    refreshAutonomy();
+  }, 'danger');
 }
 
-function renderMessagingPanel() {
-  const { entries, chains, globalPaused } = messagingState;
-  const stuck = entries.filter(e => e.state === 'parked');
-  const queued = entries.filter(e => e.state === 'queued');
-  const activeChains = chains.filter(c => c.state !== 'exhausted' || c.paused);
-
-  const esc = (t) => String(t == null ? '' : t)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  const msgRow = (e) => {
-    const from = e.fromHandle ? '@' + esc(e.fromHandle) : esc(e.from && e.from.id);
-    const to = e.toHandle ? '@' + esc(e.toHandle) : esc(e.to && e.to.id);
-    const why = e.state === 'parked'
-      ? ({ steps: 'out of steps', deadline: 'past the deadline',
-           global: 'paused', chain: 'this work is paused' }[e.parkedReason] || e.parkedReason)
-      : 'waiting for the recipient';
-    return `<div class="mp-row ${e.state === 'parked' ? 'stuck' : ''}">
-      <div class="mp-main">
-        <div class="mp-title">${from} → ${to}</div>
-        <div class="mp-sub">${esc(why)} · ${esc(chainLabel(e.chain))} · ${fmtAgo(e.createdAt)}</div>
-      </div>
-      <div class="mp-actions">
-        ${e.state === 'parked' ? `<button data-mp-deliver="${esc(e.id)}">Deliver now</button>` : ''}
-        <button class="danger" data-mp-discard="${esc(e.id)}">Discard</button>
-      </div>
-    </div>`;
-  };
-
-  const chainRow = (c) => {
-    const steps = c.steps.limit === null
-      ? `${c.steps.used} steps (no limit)`
-      : `${c.steps.used}/${c.steps.limit} steps`;
-    return `<div class="mp-row ${c.paused ? 'stuck' : ''}">
-      <div class="mp-main">
-        <div class="mp-title">${esc(chainLabel(c))}</div>
-        <div class="mp-sub"><span class="mp-chain-steps">${esc(steps)}</span> · ${esc(fmtDeadline(c.deadline))}${c.paused ? ' · paused' : ''}</div>
-      </div>
-      <div class="mp-actions">
-        <button data-mp-extend="${esc(c.id)}">Extend</button>
-        <button data-mp-chainpause="${esc(c.id)}" data-paused="${c.paused ? '1' : '0'}">${c.paused ? 'Resume' : 'Pause'}</button>
-      </div>
-    </div>`;
-  };
-
-  messagingPanel.innerHTML = `
-    <div class="mp-section">
-      <div class="mp-head">Automatic delivery</div>
-      <div class="mp-row">
-        <div class="mp-main">
-          <div class="mp-title">${globalPaused ? 'Paused' : 'Running'}</div>
-          <div class="mp-sub">Typed prompts always work${globalPaused ? '' : '. Pause stops everything automatic.'}</div>
-        </div>
-        <div class="mp-actions">
-          <button id="mp-toggle-pause">${globalPaused ? 'Resume all' : 'Pause all'}</button>
-          ${globalPaused ? '<button class="danger" id="mp-stop-running">Stop running turns</button>' : ''}
-        </div>
-      </div>
-    </div>
-    <div class="mp-section">
-      <div class="mp-head">Stuck messages${stuck.length ? ` (${stuck.length})` : ''}</div>
-      ${stuck.length ? stuck.map(msgRow).join('') : '<div class="mp-empty">Nothing stuck.</div>'}
-    </div>
-    ${queued.length ? `<div class="mp-section">
-      <div class="mp-head">In transit (${queued.length})</div>
-      ${queued.map(msgRow).join('')}
-    </div>` : ''}
-    <div class="mp-section">
-      <div class="mp-head">Work in progress</div>
-      ${activeChains.length ? activeChains.map(chainRow).join('') : '<div class="mp-empty">Nothing running automatically.</div>'}
-    </div>`;
+// Four fixed choices plus a custom one. Every entry renders its RESOLVED
+// absolute time, not just the named one — "for 4 hours" crosses midnight
+// with exactly the same ambiguity that makes a bare "8:00 AM" unclear at
+// 7 AM. If the custom entry turns out to be the one always reached for, the
+// fixed list is wrong and should shrink; the presets this replaced had four
+// options and were never touched.
+function liftChoices() {
+  const now = Date.now();
+  return [
+    { label: 'for 1 hour',  until: now + 60 * 60 * 1000 },
+    { label: 'for 4 hours', until: now + 4 * 60 * 60 * 1000 },
+    { label: 'until 8:00 AM', until: nextLocalHour(8) },
+  ];
 }
 
-async function messagingPost(path, body) {
+function toggleLiftMenu() {
+  const existing = document.getElementById('lift-menu');
+  if (existing) { existing.remove(); return; }
+  const menu = document.createElement('div');
+  menu.id = 'lift-menu';
+  for (const c of liftChoices()) {
+    const row = document.createElement('div');
+    row.className = 'lift-row';
+    row.innerHTML = `<span>${c.label}</span><span class="lift-when">${fmtWhen(c.until)}</span>`;
+    row.addEventListener('click', () => { menu.remove(); autonomyPost({ lift: true, until: c.until }); });
+    menu.appendChild(row);
+  }
+  // Native datetime-local: date AND time, no library, and it covers "and the
+  // day, if needed" by construction.
+  const customRow = document.createElement('div');
+  customRow.className = 'lift-row';
+  customRow.innerHTML = '<span>until…</span>';
+  const input = document.createElement('input');
+  input.type = 'datetime-local';
+  const d = new Date(nextLocalHour(8));
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  input.value = d.toISOString().slice(0, 16);
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('change', () => {
+    const ms = new Date(input.value).getTime();
+    if (!Number.isFinite(ms) || ms <= Date.now()) { alert('Pick a time in the future.'); return; }
+    menu.remove();
+    autonomyPost({ lift: true, until: ms });
+  });
+  customRow.appendChild(input);
+  menu.appendChild(customRow);
+
+  const foreverRow = document.createElement('div');
+  foreverRow.className = 'lift-row';
+  foreverRow.innerHTML = '<span>until I turn it back on</span>';
+  foreverRow.addEventListener('click', () => { menu.remove(); autonomyPost({ lift: true, until: null }); });
+  menu.appendChild(foreverRow);
+
+  autonomyStrip.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', function once() {
+    menu.remove(); document.removeEventListener('click', once);
+  }), 0);
+}
+
+async function autonomyPost(body) {
   try {
-    await fetch(`${DRIVER}${path}`, {
+    // `allow` is not a server concept: allowing more IS interacting (AD3),
+    // so it posts presence and the counter reset falls out of the same path
+    // every keystroke uses. One mechanism, not two.
+    const path = body.allow ? '/presence' : '/autonomy-cap';
+    await fetch(`${driverBase}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body.allow ? {} : body),
     });
   } catch {}
-  await refreshMessaging();
+  refreshAutonomy();
 }
 
-messagingPanel.addEventListener('click', async (e) => {
-  const t = e.target.closest('button');
-  if (!t) return;
-  if (t.id === 'mp-toggle-pause') {
-    await messagingPost('/pause', { paused: !messagingState.globalPaused });
-  } else if (t.id === 'mp-stop-running') {
-    // The destructive half is a separate, deliberate second action — pause
-    // is reversible, aborting in-flight turns throws away work that may be
-    // nearly finished. The driver decides WHICH turns are running; guessing
-    // from chain origins here would miss any session running a turn it did
-    // not start.
-    await messagingPost('/pause', { paused: true, stopRunning: true });
-  } else if (t.dataset.mpDeliver) {
-    await messagingPost('/inbox-action', { entryId: t.dataset.mpDeliver, action: 'deliver-now' });
-  } else if (t.dataset.mpDiscard) {
-    await messagingPost('/inbox-action', { entryId: t.dataset.mpDiscard, action: 'discard' });
-  } else if (t.dataset.mpExtend) {
-    // Extend tops up the CHAIN, which is why the button sits on a row
-    // labelled by the original prompt rather than by a session.
-    await messagingPost('/extend-chain', { chainId: t.dataset.mpExtend, steps: 20, ms: 60 * 60 * 1000 });
-  } else if (t.dataset.mpChainpause) {
-    await messagingPost('/pause', { chainId: t.dataset.mpChainpause, paused: t.dataset.paused !== '1' });
-  }
-});
-
-messagingBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  rosterPanel.classList.remove('open');
-  messagingPanel.classList.toggle('open');
-  if (messagingPanel.classList.contains('open')) refreshMessaging();
-});
-document.addEventListener('click', (e) => {
-  if (!messagingPanel.contains(e.target) && e.target !== messagingBtn) {
-    messagingPanel.classList.remove('open');
-  }
-});
-psResume.addEventListener('click', () => messagingPost('/pause', { paused: false }));
+// ── Presence (AD1) ──────────────────────────────────────────────────────
+// The counter resets on human INPUT, never on "a request arrived". The
+// viewer polls /sessions on a timer, so inferring presence from traffic
+// would mean a laptop left open with the tab up resets the counter forever
+// and the gate is decorative. Debounced hard: this fires at most once a
+// minute no matter how much you type.
+let lastPresenceSent = 0;
+function notePresence() {
+  if (!driverBase) return;
+  const now = Date.now();
+  if (now - lastPresenceSent < 60000) return;
+  lastPresenceSent = now;
+  fetch(`${driverBase}/presence`, { method: 'POST' })
+    .then(() => refreshAutonomy())
+    .catch(() => {});
+}
+for (const ev of ['keydown', 'mousedown', 'focus']) {
+  window.addEventListener(ev, notePresence, { passive: true, capture: true });
+}
 
 // ── Continue after a turn that ended badly ──────────────────────────────
 // Sits above the input bar, never inside it: a control that appears and
@@ -3559,6 +3590,21 @@ const RESUME_WORDING = {
   aborted: 'You stopped the previous turn before it finished.',
   error: 'The previous turn ended with an error.',
 };
+
+
+// Messages are appended to the feed, so a resume bar that merely lives there
+// would drift upward as the turn's output arrives. Re-appending on every show
+// keeps it as the last thing in the conversation, which is the only position
+// that reads correctly ("...and that is where it stopped").
+function placeResumeBar() {
+  if (resumeBar.parentElement !== feed || feed.lastElementChild !== resumeBar) {
+    feed.appendChild(resumeBar);
+  }
+  // Only when already following along. Yanking the view down on someone who
+  // has deliberately scrolled back is the behaviour the pinning logic exists
+  // to prevent, and this is not important enough to be an exception.
+  if (pinnedToBottom) performAutoScroll();
+}
 
 async function refreshResumeBar() {
   // Never offered on a sub-agent transcript — its input bar is hidden for
@@ -3583,6 +3629,7 @@ async function refreshResumeBar() {
   const tool = d.lastTool ? ` (during ${d.lastTool})` : '';
   resumeText.textContent = `${why}${tool}${detail}`;
   resumeBar.classList.add('show');
+  placeResumeBar();
 }
 
 resumeBtn.addEventListener('click', async () => {
@@ -3611,29 +3658,6 @@ resumeDismiss.addEventListener('click', () => resumeBar.classList.remove('show')
 // Most turns spend no budget at all, and a number ticking during ordinary
 // chat is exactly the kind of signal people stop seeing — the same reason
 // the panel badge counts only genuinely stuck mail.
-const budgetSelect = document.getElementById('budget-select');
-
-async function loadBudgetPreset(sessionId) {
-  if (!driverBase || !sessionId) return;
-  try {
-    const d = await fetch(`${driverBase}/chains?session=${encodeURIComponent(sessionId)}`).then(r => r.json());
-    if (d.sessionPreset && d.sessionPreset.preset !== 'custom') {
-      budgetSelect.value = d.sessionPreset.preset;
-    }
-  } catch { /* a failed poll must not blank a control the user may need */ }
-}
-
-budgetSelect.addEventListener('change', async () => {
-  if (!driverBase || !currentSessionId) return;
-  try {
-    await fetch(`${driverBase}/budget-preset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId, preset: budgetSelect.value }),
-    });
-  } catch { /* the next load re-reads the real value */ }
-});
-
 const rosterBtn = document.getElementById('roster-btn');
 const rosterPanel = document.getElementById('roster-panel');
 const subagentBanner = document.getElementById('subagent-banner');
@@ -3642,6 +3666,10 @@ const saParentBtn = document.getElementById('sa-parent-btn');
 const saPromoteBtn = document.getElementById('sa-promote-btn');
 
 let subAgents = [];            // roster for the session being viewed
+// HD1's other half: delegated sessions this session created. Deliberately a
+// separate list from subAgents — they are not sub-agents, they are sessions,
+// and nothing should ever render them into the roster.
+let delegatedChildren = [];
 let currentSessionIsChild = false;
 let currentSessionParent = null;
 // True while the sub-agent being VIEWED is itself still running. A child
@@ -3655,12 +3683,15 @@ async function refreshSubAgents() {
   try {
     const res = await fetch(`${driverBase}/sub-agents?sessionId=${encodeURIComponent(currentSessionId)}`);
     if (!res.ok) return;
-    subAgents = (await res.json()).subAgents || [];
+    const data = await res.json();
+    subAgents = data.subAgents || [];
+    delegatedChildren = data.delegatedChildren || [];
   } catch {
     return; // transient; the next turn event retries
   }
   renderRoster();
   refreshTaskBubbles();
+  refreshDelegateBubbles();
   refreshChildLiveness();
 }
 
@@ -3845,6 +3876,43 @@ function refreshTaskBubbles() {
   }
 }
 
+// HD1: a delegated child is NOT in the roster, so its bubble cannot be fed by
+// refreshTaskBubbles(). Its status comes from the session record instead —
+// which the sessions poll already fetches, so this needs no new request and
+// no new endpoint. Matched by delegateToolUseId, the tool_use id of the
+// delegate_session call that created it, which is also that bubble's own id.
+//
+// Claude Code only: OpenCode's ToolContext exposes no per-call id, so
+// delegateToolUseId is null there and these bubbles simply keep their default
+// rendering. The nested row in the session list is the cross-backend surface.
+function refreshDelegateBubbles() {
+  for (const s of delegatedChildren) {
+    if (!s.toolUseId) continue;
+    const entry = msgs[s.toolUseId];
+    if (!entry || !entry.el) continue;
+    const bits = [];
+    if (s.pendingKind === 'question') bits.push('waiting for your answer');
+    else if (s.pendingKind === 'permission') bits.push('waiting for your approval');
+    else if (s.inFlight) bits.push('running');
+    else bits.push('idle');
+    if (s.backend) bits.push(s.backend);
+    entry.el.innerHTML = '';
+    const text = document.createElement('span');
+    text.textContent = bits.join(' · ') + ' · ';
+    const open = document.createElement('span');
+    open.className = 'task-open' + (s.pendingKind ? ' task-waiting' : '');
+    open.textContent = s.pendingKind ? 'review the request' : 'open session';
+    open.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Deliberately NOT knownChild: a delegated session is promptable, so
+      // it must open with its input bar and controls intact.
+      viewSession(s.sessionId);
+    });
+    entry.el.appendChild(text);
+    entry.el.appendChild(open);
+  }
+}
+
 // Matched by the spawning tool_use id, which IS the Task bubble's own id —
 // broadcast() uses the tool_use id for tool bubbles, so no extra bookkeeping
 // is needed to tie the two together.
@@ -3869,17 +3937,21 @@ function applySubAgentBanner() {
   // running, however idle it looks.
   const busy = turnInFlight || !!awaitingInput || currentSessionBlocked;
   saPromoteBtn.disabled = busy;
+  // HD6: "Keep", not "Promote". The roster's other action is Forget, and
+  // Keep/Forget is a true antonym pair — both remove the row, differing only
+  // in where it ends up. ("Session" was rejected as a button word: it is a
+  // noun, so it reads as a label rather than an action.)
   saPromoteBtn.title = busy
-    ? 'This sub-agent is still running — stop it, or answer what it is waiting on, before promoting.'
-    : 'Detach this sub-agent into a session of its own, so you can carry on from its findings';
+    ? 'This sub-agent is still running — stop it, or answer what it is waiting on, before keeping it.'
+    : 'Keep as a session of its own';
   const inputBar = document.getElementById('input-bar') || promptInput.closest('div');
   if (inputBar) inputBar.style.display = currentSessionIsChild ? 'none' : '';
   // The model picker, mode picker and Auto-approve all change how a session
   // RUNS, and a sub-agent transcript is not something the user runs — its
   // model and permissions were decided by the parent that delegated to it.
   // Leaving them live would offer settings that either do nothing or, worse,
-  // quietly alter a child's next turn after it is promoted. Hidden with the
-  // input bar, and restored by Promote.
+  // quietly alter a child's next turn after it is kept. Hidden with the
+  // input bar, and restored by Keep.
   const controlsRow = document.getElementById('controls-row');
   if (controlsRow) controlsRow.style.display = currentSessionIsChild ? 'none' : '';
 }
@@ -3892,7 +3964,7 @@ saPromoteBtn.addEventListener('click', async () => {
   if (!currentSessionParent) return;
   saPromoteBtn.disabled = true;
   try {
-    const res = await fetch(`${driverBase}/promote-session`, {
+    const res = await fetch(`${driverBase}/keep-session`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: currentSessionId }),
     });
@@ -4500,12 +4572,13 @@ async function loadDriverConfig() {
     loadModes();
     loadModels();
     refreshPendingApprovals();
-    // Pause state is global and survives restarts, so the strip has to be
+    // Gate state is global and survives restarts, so the strip has to be
     // correct from first paint — not only after something happens to tick
-    // it. The poll is the backstop for state changed by another tab or by a
-    // chain hitting its deadline with nobody watching.
-    refreshMessaging();
-    setInterval(refreshMessaging, 20000);
+    // it. The poll is the backstop for the two changes nothing notifies this
+    // tab about: another tab acting, and an uncapped window lapsing on its
+    // own deadline with nobody watching.
+    refreshAutonomy();
+    setInterval(refreshAutonomy, 20000);
     loadDeepHistorySetting();
     // The restart case is precisely when the page has just been reloaded,
     // so this has to be correct from first paint rather than only after
@@ -4615,7 +4688,10 @@ async function resyncTurnStatus() {
     // Whether this session is a sub-agent's is the driver's to say — the
     // browser cannot know, and a child must not offer an input bar that the
     // driver will refuse.
-    currentSessionIsChild = !!data.isChild;
+    // HD1: true only for a ROSTER child — a native sub-agent. A delegated
+    // child also has a parent but is a real session, so it keeps its input
+    // bar, controls and Continue strip.
+    currentSessionIsChild = !!data.rosterChild;
     currentSessionParent = data.parentSessionId || null;
     applySubAgentBanner();
     refreshSubAgents();
@@ -5057,7 +5133,7 @@ function startRenameEdit(titleEl, session) {
 
 // Builds one session row — shared by both the flat and grouped layouts
 // (only the surrounding structure differs between them).
-function buildSessionItem(s, wantArchived) {
+function buildSessionItem(s, wantArchived, tree = {}) {
   // "Current" is purely this tab's own local choice now — there's no
   // server-reported notion of it anymore, so a second tab viewing a
   // different session correctly shows its OWN current session highlighted
@@ -5065,10 +5141,33 @@ function buildSessionItem(s, wantArchived) {
   const isCurrent = s.sessionId === currentSessionId;
   const item = document.createElement('div');
   item.className = 'session-item' + (isCurrent ? ' current' : '');
+  const depth = tree.depth || 0;
+  if (depth) {
+    item.classList.add('session-child');
+    item.style.paddingLeft = `${8 + depth * 14}px`;
+  }
   const title = s.customTitle || s.summary || s.firstPrompt || '(untitled)';
 
   const titleEl = document.createElement('div');
   titleEl.className = 'session-title';
+
+  // The disclosure triangle is its OWN click target, with stopPropagation,
+  // exactly like the open-in-new-tab anchor below. Expanding a family must
+  // never be one mis-aimed pixel away from opening the parent session.
+  if (tree.familyCount) {
+    const tw = document.createElement('span');
+    tw.className = 'session-twisty';
+    tw.textContent = tree.collapsed ? '\u25B8' : '\u25BE';
+    tw.title = tree.collapsed
+      ? `Show ${tree.familyCount} delegated session${tree.familyCount === 1 ? '' : 's'}`
+      : 'Hide delegated sessions';
+    tw.addEventListener('click', (e) => { e.stopPropagation(); toggleFamily(s.sessionId); });
+    titleEl.appendChild(tw);
+  } else if (depth) {
+    const sp = document.createElement('span');
+    sp.className = 'session-twisty placeholder';
+    titleEl.appendChild(sp);
+  }
 
   const titleTextEl = document.createElement('span');
   titleTextEl.className = 'session-title-text';
@@ -5092,9 +5191,26 @@ function buildSessionItem(s, wantArchived) {
     badge.className = 'session-badge';
     badge.title = 'A turn is running';
   }
+  // HD5's aggregate. Only on a COLLAPSED parent — once expanded, each child
+  // shows its own badge and a summary on the parent would double-count. The
+  // count is rendered only when the state comes from descendants rather than
+  // this row, so "●2" always reads "two sessions under here want something"
+  // and never "this row, plus one".
+  let aggBadge = null;
+  const agg = tree.aggregate;
+  if (tree.collapsed && agg && agg.severity > 0 && agg.severity >= rowSeverity(s)) {
+    aggBadge = document.createElement('span');
+    aggBadge.className = 'session-badge session-agg'
+      + (agg.severity === 3 ? ' needs-question' : '');
+    if (agg.count > 1) aggBadge.textContent = String(agg.count);
+    aggBadge.title = agg.severity === 3
+      ? `${agg.count} delegated session${agg.count === 1 ? '' : 's'} waiting on you`
+      : `${agg.count} delegated session${agg.count === 1 ? '' : 's'} running`;
+  }
   if (badge && settings.badgePosition === 'before') titleEl.appendChild(badge);
   titleEl.appendChild(titleTextEl);
   if (badge && settings.badgePosition !== 'before') titleEl.appendChild(badge);
+  if (aggBadge) titleEl.appendChild(aggBadge);
   titleEl.addEventListener('dblclick', (e) => {
     e.stopPropagation();
     startRenameEdit(titleEl, s);
@@ -5106,7 +5222,10 @@ function buildSessionItem(s, wantArchived) {
   // only needs to appear in the flat layout, where sessions from different
   // projects can sit right next to each other.
   const metaParts = [formatSessionWhen(s.lastModified)];
-  if (settings.sessionsLayout !== 'grouped' && s.projectLabel) metaParts.push(s.projectLabel);
+  // Suppressed on a child for the same reason the grouped layout suppresses
+  // it: HD1's cwd inheritance means a delegated child is ALWAYS in its
+  // parent's project, so repeating it on every nested row is noise.
+  if (settings.sessionsLayout !== 'grouped' && s.projectLabel && !depth) metaParts.push(s.projectLabel);
   // Soft heads-up, not a block (this session is still perfectly reachable
   // and resumable) — driver.mjs only ever sets this when it actually knows
   // both the current and last-recorded host paths and they disagree, which
@@ -5152,6 +5271,32 @@ function buildSessionItem(s, wantArchived) {
     actions.appendChild(unarchiveBtn);
     actions.appendChild(deleteBtn);
   } else {
+    // HD6: Detach lives HERE, beside Archive and Delete — the durable
+    // operations on a durable relationship — rather than in the roster,
+    // where Keep lives. The row visibly un-indents, which is exactly what
+    // the word promises. Only ever offered on a nested row, because a root
+    // session has nothing to detach from.
+    if (depth) {
+      const detachBtn = document.createElement('button');
+      detachBtn.className = 'session-action-btn';
+      detachBtn.textContent = 'Detach';
+      detachBtn.title = 'Make this a session of its own, no longer nested under its parent';
+      detachBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const res = await fetch(`${driverBase}/detach-session`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: s.sessionId }),
+          });
+          if (!res.ok) {
+            const b = await res.json().catch(() => ({}));
+            alert(b.error || 'Could not detach that session.');
+          }
+        } catch { /* a failed detach must not take the panel down */ }
+        refreshSessionsList({ full: true });
+      });
+      actions.appendChild(detachBtn);
+    }
     const archiveBtn = document.createElement('button');
     archiveBtn.className = 'session-action-btn';
     archiveBtn.textContent = 'Archive';
@@ -5236,6 +5381,107 @@ function renderUnreachableFooterAsCount(data) {
   sessionsList.appendChild(note);
 }
 
+
+// ── HD5: families in the session list ───────────────────────────────────
+// Families nest INSIDE the existing Flat / Grouped-by-project layouts rather
+// than adding a third mode, because a delegated child inherits its parent's
+// cwd (toolDelegate never passes one), so a family can never span projects.
+//
+// Collapse state is persisted per parent. A new child arriving under a
+// collapsed parent bumps the aggregate badge; it never forces the family
+// open. That is deliberate — rows that appear and disappear on their own
+// make the list a moving target, and you go to click one session and hit
+// another. The aggregate badge solves the same visibility problem without
+// anything moving.
+const COLLAPSED_KEY = 'podprompt.collapsedFamilies';
+let collapsedFamilies = new Set();
+try { collapsedFamilies = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]')); } catch {}
+function saveCollapsed() {
+  try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedFamilies])); } catch {}
+}
+// Collapsed by DEFAULT: a parent not yet recorded either way is collapsed.
+function isFamilyCollapsed(id) { return !collapsedFamilies.has(`open:${id}`); }
+function toggleFamily(id) {
+  const k = `open:${id}`;
+  if (collapsedFamilies.has(k)) collapsedFamilies.delete(k); else collapsedFamilies.add(k);
+  saveCollapsed();
+  renderSessionsList();
+}
+
+// MAX_CREATION_DEPTH is 6, and six indents walk the title off the right edge
+// of a narrow panel, so deeper descendants share the deepest indent.
+const MAX_INDENT_LEVELS = 3;
+
+// Severity order, matching the badge classes the rows already use:
+// question/permission outrank in-flight, which outranks idle.
+function rowSeverity(s) {
+  if (s.pendingKind === 'question') return 3;
+  if (s.pendingKind === 'permission') return 3;
+  if (s.inFlight) return 2;
+  return 0;
+}
+
+// Parent id -> children, built once per render from parentSessionId, which
+// the driver stamps on every listed row (Phase 17).
+function buildFamilyIndex(sessions) {
+  const byParent = new Map();
+  const present = new Set(sessions.map((x) => x.sessionId));
+  for (const s of sessions) {
+    // A child whose parent is filtered out of this view (archived vs not)
+    // is shown at top level rather than hidden — losing a row entirely is
+    // far worse than showing it unnested.
+    const pid = s.parentSessionId && present.has(s.parentSessionId) ? s.parentSessionId : null;
+    if (!pid) continue;
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(s);
+  }
+  return byParent;
+}
+
+function subtreeOf(s, byParent, out = []) {
+  for (const kid of byParent.get(s.sessionId) || []) { out.push(kid); subtreeOf(kid, byParent, out); }
+  return out;
+}
+
+// The aggregate the collapsed parent row carries: the highest severity
+// anywhere in its subtree, and how many descendants are at that level. The
+// count appears only when it comes from DESCENDANTS, so "●2" always reads
+// "two sessions under here want something".
+function familyAggregate(s, byParent) {
+  const kids = subtreeOf(s, byParent);
+  let best = 0, count = 0;
+  for (const k of kids) {
+    const sev = rowSeverity(k);
+    if (sev > best) { best = sev; count = 1; }
+    else if (sev === best && sev > 0) count++;
+  }
+  return { severity: best, count, descendants: kids.length };
+}
+
+// Family recency: a parent sorts by the most recent activity ANYWHERE in its
+// subtree. Without this a parent untouched for a week sinks while its child
+// runs hard, and the active work becomes the hardest thing in the list to
+// find. Mirrors the Math.max() the project grouping already uses.
+function familyRecency(s, byParent, sortKey) {
+  return Math.max(s[sortKey] || 0, ...subtreeOf(s, byParent).map((k) => k[sortKey] || 0));
+}
+
+// Emits a row and, unless collapsed, its descendants — depth-first, so a
+// child always renders directly beneath its parent.
+function emitFamily(s, byParent, wantArchived, depth, sortKey, into) {
+  const kids = (byParent.get(s.sessionId) || [])
+    .slice().sort((a, b) => familyRecency(b, byParent, sortKey) - familyRecency(a, byParent, sortKey));
+  const agg = familyAggregate(s, byParent);
+  into.appendChild(buildSessionItem(s, wantArchived, {
+    depth, familyCount: kids.length, aggregate: agg,
+    collapsed: kids.length ? isFamilyCollapsed(s.sessionId) : false,
+  }));
+  if (!kids.length || isFamilyCollapsed(s.sessionId)) return;
+  for (const kid of kids) {
+    emitFamily(kid, byParent, wantArchived, Math.min(depth + 1, MAX_INDENT_LEVELS), sortKey, into);
+  }
+}
+
 function renderSessionsList() {
   const data = lastSessionsResult;
   if (!data) return;
@@ -5273,10 +5519,20 @@ function renderSessionsList() {
         header.className = 'session-group-header';
         header.textContent = `${label} (${groupSessions.length})`;
         sessionsList.appendChild(header);
-        for (const s of groupSessions) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+        // Families nest inside the project group. Because a family never
+        // spans projects, every member is in this group already.
+        const byParent = buildFamilyIndex(groupSessions);
+        const roots = groupSessions.filter((x) => !byParent.has(x.sessionId) || !x.parentSessionId
+          || !groupSessions.some((y) => y.sessionId === x.parentSessionId));
+        roots.sort((a, b) => familyRecency(b, byParent, sortKey) - familyRecency(a, byParent, sortKey));
+        for (const r of roots) emitFamily(r, byParent, wantArchived, 0, sortKey, sessionsList);
       }
     } else {
-      for (const s of sessionsSorted) sessionsList.appendChild(buildSessionItem(s, wantArchived));
+      const byParent = buildFamilyIndex(sessionsSorted);
+      const roots = sessionsSorted.filter((x) => !x.parentSessionId
+        || !sessionsSorted.some((y) => y.sessionId === x.parentSessionId));
+      roots.sort((a, b) => familyRecency(b, byParent, sortKey) - familyRecency(a, byParent, sortKey));
+      for (const r of roots) emitFamily(r, byParent, wantArchived, 0, sortKey, sessionsList);
     }
   }
 
@@ -5406,6 +5662,13 @@ function startMetaSubscription() {
     }
     handleMetaChange(e);
     if (sessionsPanel.classList.contains('open')) refreshSessionsList({ full: false });
+    // A delegated child runs in its OWN session, so its turn_start/turn_end
+    // never reaches this tab's per-session /events stream — only the meta
+    // channel sees it. Without this, a delegate_session bubble would freeze
+    // at whatever status it had when the session was opened. Gated on
+    // actually having delegated children so an ordinary session adds no
+    // request per cross-session event.
+    if (delegatedChildren.length) refreshSubAgents();
   });
 }
 
@@ -5542,14 +5805,115 @@ async function unarchiveSession(sessionId) {
   }
 }
 
+
+// Returns { keep: [ids] } or null if cancelled. Checkboxes start pre-checked
+// for "delete" exactly when the child has no user turns; roster children are
+// shown as a count with no checkbox, because HD1 leaves them no other way to
+// be reached and keeping one would strand it on disk forever.
+function familyDeleteDialog(title, preview) {
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'modal-backdrop';
+    const box = document.createElement('div');
+    box.className = 'modal-box';
+
+    const h = document.createElement('div');
+    h.className = 'modal-title';
+    h.textContent = `Permanently delete "${title}"?`;
+    const sub = document.createElement('div');
+    sub.className = 'modal-sub';
+    sub.textContent = 'This cannot be undone.';
+    box.appendChild(h); box.appendChild(sub);
+
+    const boxes = [];
+    if (preview.delegated.length) {
+      const lab = document.createElement('div');
+      lab.className = 'modal-head';
+      lab.textContent = 'Also delete these delegated sessions?';
+      box.appendChild(lab);
+      for (const d of preview.delegated) {
+        const row = document.createElement('label');
+        row.className = 'modal-row';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !d.hadUserTurn;
+        cb.dataset.sessionId = d.sessionId;
+        boxes.push(cb);
+        const name = document.createElement('span');
+        name.className = 'modal-row-title';
+        name.textContent = d.title || '(untitled)';
+        const why = document.createElement('span');
+        why.className = 'modal-row-why';
+        why.textContent = d.hadUserTurn ? 'you have messaged this one' : 'no messages from you';
+        row.appendChild(cb); row.appendChild(name); row.appendChild(why);
+        box.appendChild(row);
+      }
+    }
+    if (preview.rosterCount) {
+      const note = document.createElement('div');
+      note.className = 'modal-note';
+      note.textContent = `${preview.rosterCount} sub-agent transcript`
+        + `${preview.rosterCount === 1 ? '' : 's'} will be deleted with it `
+        + `(sub-agents can't outlive their parent).`;
+      box.appendChild(note);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'modal-actions';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    const go = document.createElement('button');
+    go.className = 'danger';
+    go.textContent = 'Delete';
+    actions.appendChild(cancel); actions.appendChild(go);
+    box.appendChild(actions);
+
+    const close = (v) => { back.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    cancel.addEventListener('click', () => close(null));
+    back.addEventListener('click', (e) => { if (e.target === back) close(null); });
+    document.addEventListener('keydown', onKey);
+    go.addEventListener('click', () => {
+      // UNCHECKED means keep — the checkbox asks "also delete this?".
+      close({ keep: boxes.filter((b) => !b.checked).map((b) => b.dataset.sessionId) });
+    });
+
+    back.appendChild(box);
+    document.body.appendChild(back);
+    go.focus();
+  });
+}
+
+// HD4. The one-line confirm survives for a CHILDLESS session, which is the
+// overwhelmingly common case; a session with a family escalates to a dialog
+// that names what else is about to go.
+//
+// The heuristic ("no messages from you" => pre-checked) is good enough to be
+// a default and not good enough to be silent: before this, the dialog said
+// "delete this session" while the server destroyed the whole subtree, and
+// which children vanished depended on invisible history. Surprise plus
+// irreversibility is the pairing worth spending a dialog on.
 async function deleteSessionFromUi(sessionId, title) {
   if (!driverBase) return;
-  if (!confirm(`Permanently delete "${title}"? This cannot be undone.`)) return;
+  let preview = { rosterCount: 0, delegated: [] };
+  try {
+    preview = await (await fetch(
+      `${driverBase}/delete-preview?sessionId=${encodeURIComponent(sessionId)}`)).json();
+  } catch { /* fall through to the plain confirm rather than blocking */ }
+
+  let keep = [];
+  if (preview.delegated.length || preview.rosterCount) {
+    const chosen = await familyDeleteDialog(title, preview);
+    if (!chosen) return;
+    keep = chosen.keep;
+  } else if (!confirm(`Permanently delete "${title}"? This cannot be undone.`)) {
+    return;
+  }
   try {
     const res = await fetch(`${driverBase}/delete-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, backend: sessionBackends.get(sessionId) }),
+      body: JSON.stringify({ sessionId, backend: sessionBackends.get(sessionId), keep }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

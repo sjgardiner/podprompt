@@ -73,9 +73,8 @@ import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 import {
-  createChains, BUDGET_PRESETS, DEFAULT_PRESET,
-  FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH,
-} from "./chains.mjs";
+  createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
+} from "./autonomy.mjs";
 import { createPeers, createInbox, LOCAL_REALM } from "./messaging.mjs";
 
 function parseArgs(argv) {
@@ -283,7 +282,7 @@ function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
     // states, and only one of them resolves without you. The approval's own
     // id rides along so a link can jump straight to that card rather than
     // just to the session containing it.
-    if (isChildSession(sessionId)) {
+    if (isRosterChild(sessionId)) {
       upsertSubAgent(sessionId, { awaiting: kind, awaitingId: id });
     }
     // A turn parked on a human is NOT a turn that is working, and the
@@ -400,7 +399,7 @@ function expirePendingApprovals(sessionId) {
   }
   if (expired) {
     persistPendingApprovals();
-    if (isChildSession(sessionId)) {
+    if (isRosterChild(sessionId)) {
       upsertSubAgent(sessionId, { awaiting: null, awaitingId: null });
     }
     // Nothing is waiting on the user here any more, whatever the UI last
@@ -610,10 +609,23 @@ function registerChildSession(childId, info) {
     rel: "parent",
     parent: info.parent,
     backend: info.backend || prev.backend || null,
-    childKind: info.childKind || prev.childKind || null, // "native-task" | "delegated-session"
+    // "native-task" (both backends) | "delegated" (toolDelegate) | null
+    // (legacy rows predating the field). HD1's isRosterChild/isTreeChild
+    // split keys off this, and the ONLY value either tests for is
+    // "native-task" — so a null or unrecognised kind lands on the tree side,
+    // which is the recoverable direction.
+    childKind: info.childKind || prev.childKind || null,
     subagentType: info.subagentType ?? prev.subagentType ?? null,
     description: info.description ?? prev.description ?? null,
     native: { ...(prev.native || {}), ...(info.native || {}) },
+    // HD2/HD3. Carried explicitly because this function builds its row field
+    // by field — anything merely passed in `info` is dropped, silently, with
+    // no error anywhere. (That is how these two were lost the first time.)
+    parentTurnId: info.parentTurnId ?? prev.parentTurnId ?? null,
+    awaitedByParentTurn: info.awaitedByParentTurn ?? prev.awaitedByParentTurn ?? false,
+    // HD4. Never reset by re-registration: a child that a human has typed
+    // into stays typed-into, and this flag only ever travels one way.
+    hadUserTurn: prev.hadUserTurn || info.hadUserTurn || false,
     createdAt: prev.createdAt || nowIso(),
     // Written once, never rewritten — not even by promotion, which clears
     // the parent edge. This is what the depth guard counts along, so if
@@ -637,8 +649,35 @@ function parentOfSession(sessionId) {
   return r && r.rel === "parent" && !r.promoted ? r.parent : null;
 }
 
-function isChildSession(sessionId) {
-  return !!parentOfSession(sessionId);
+// HD1: surfaces are assigned by ROLE, not by implementation. These two
+// predicates are the whole of that decision, and they are deliberately NOT
+// "is this a child" — that question (parentOfSession) is still the right one
+// for the cascade walkers, the depth guard and auto-approve inheritance,
+// because those are about the durable relationship, which all children share.
+//
+//   ROSTER child  — a native sub-agent, on EITHER backend. Turn-scoped work
+//                   its parent is blocked on. Read-only, roster-only, never
+//                   listed as a session of its own. OpenCode implements these
+//                   as real ses_... sessions, which is exactly the
+//                   implementation detail HD1 refuses to leak: what it IS to
+//                   the user is a sub-agent, so it belongs in the roster.
+//
+//   TREE child    — a delegated session. A real conversation the user asked
+//                   for, so it is listed, nested under its parent, and
+//                   promptable like any other session.
+//
+// Unknown childKind (a legacy row from before the field existed) counts as a
+// TREE child. That is the safe direction: the failure mode HD1 exists to
+// prevent is a session becoming unreachable, and a stray visible row is
+// recoverable where an invisible one is not.
+function isRosterChild(sessionId) {
+  const r = sessionRelations[sessionId];
+  return !!(r && r.rel === "parent" && !r.promoted && r.childKind === "native-task");
+}
+
+function isTreeChild(sessionId) {
+  const r = sessionRelations[sessionId];
+  return !!(r && r.rel === "parent" && !r.promoted && r.childKind !== "native-task");
 }
 
 function childrenOfSession(parentId) {
@@ -730,8 +769,12 @@ function isSubAgentRunning(childId) {
   return !TERMINAL_SUBAGENT_STATES.has(live.status);
 }
 
+// HD1: the roster holds native sub-agents only. Before this filter it mapped
+// EVERY child relation, so a delegated session appeared both here and as a
+// row in the session list — two surfaces with different affordances, fed by
+// different code paths, free to disagree about the same session.
 function subAgentsForParent(parentId) {
-  return childrenOfSession(parentId).map((childId) => {
+  return childrenOfSession(parentId).filter(isRosterChild).map((childId) => {
     const rel = sessionRelations[childId] || {};
     const live = subAgents.get(childId) || {};
     return {
@@ -759,14 +802,62 @@ function subAgentsForParent(parentId) {
   });
 }
 
+// HD2's rule, in one place so /abort and anything later cannot drift. Applied
+// recursively: stopping a child applies the same test inside it.
+function abortCascadeTargets(sessionId, seen = new Set()) {
+  if (seen.has(sessionId)) return [];
+  seen.add(sessionId);
+  const out = [];
+  const parentTurnId = sessions.get(sessionId)?.turnId || null;
+  for (const childId of childrenOfSession(sessionId)) {
+    const rel = sessionRelations[childId] || {};
+    // A roster child is this turn's own work, by definition.
+    let blocking = isRosterChild(childId);
+    // A delegated child only counts while its parent's CURRENT turn is the
+    // one waiting on it. Both halves matter: awaitedByParentTurn rules out
+    // async delegations, and the turn-id match rules out an awaited one from
+    // an earlier turn. After a restart no id matches, so nothing is killed —
+    // the safe direction, deliberately.
+    if (!blocking && rel.awaitedByParentTurn && rel.parentTurnId
+        && parentTurnId && rel.parentTurnId === parentTurnId) {
+      blocking = true;
+    }
+    if (!blocking) continue;
+    out.push(childId);
+    out.push(...abortCascadeTargets(childId, seen));
+  }
+  return out;
+}
+
+// The tree-side counterpart to subAgentsForParent. Status comes from the
+// session's own live state rather than the subAgents registry, because a
+// delegated child IS a session — the registry only ever described work
+// running inside somebody else's turn.
+function delegatedChildrenForParent(parentId) {
+  return childrenOfSession(parentId).filter(isTreeChild).map((childId) => {
+    const rel = sessionRelations[childId] || {};
+    const state = sessions.get(childId);
+    return {
+      sessionId: childId,
+      backend: rel.backend || sessionIdToBackend.get(childId) || null,
+      title: peers.get(childId)?.title || rel.description || null,
+      // Null on OpenCode (no per-call id in its ToolContext), in which case
+      // the browser leaves that bubble's default rendering alone.
+      toolUseId: rel.native?.toolUseId || null,
+      inFlight: !!state?.turnInFlight,
+      pendingKind: pendingKindForSession(childId),
+    };
+  });
+}
+
 // ── Chains, budgets & pause ──────────────────────────────────────────────
-// The store itself lives in chains.mjs so it can be unit-tested without
+// The store itself lives in autonomy.mjs so it can be unit-tested without
 // starting a server or spawning `opencode serve`. This is the code where a
 // quiet logic error costs real money, so it is the code that most needs
 // tests that do not depend on a running system.
-const chains = createChains({
-  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-chains.json"),
-  onError: (e) => console.error("[driver] failed to write chains file:", e.message),
+const autonomy = createAutonomy({
+  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-autonomy.json"),
+  onError: (e) => console.error("[driver] failed to write autonomy file:", e.message),
 });
 
 // ── Deep-history display setting ─────────────────────────────────────────
@@ -853,9 +944,32 @@ function reconcileTurnStateOnStartup() {
   }
 }
 
+// HD3: every turn gets an id. Three things read it, and all three were
+// previously guessing:
+//   * awaitTurnEnd binds a waiter to THE turn it meant, not to the session;
+//   * toolDelegate stamps parentTurnId on its child, which is what HD2's
+//     Stop cascade reads to know what this turn is actually blocked on;
+//   * nothing has to CLEAR any of it — a new turn overwrites the id, and
+//     after a restart no id matches, so stranded state is inert rather than
+//     dangerous. That asymmetry is the whole argument for an id over a flag:
+//     a stale flag causes a wrongful kill, a stale id causes nothing.
 function markTurnStarted(sessionId) {
-  turnState[sessionId] = { inFlight: true, startedAt: nowIso(), lastTool: null };
+  const turnId = randomUUID();
+  turnState[sessionId] = { inFlight: true, startedAt: nowIso(), lastTool: null, turnId };
+  const state = sessions.get(sessionId);
+  if (state) state.turnId = turnId;
   saveTurnState();
+  return turnId;
+}
+
+// HD4 needs this to survive a restart: the family-delete dialog pre-checks
+// children with no user turns, and state.turnOrigin is in-memory only. Written
+// at most once per child, and only ever flipped true.
+function noteUserTurn(sessionId) {
+  const rel = sessionRelations[sessionId];
+  if (!rel || rel.hadUserTurn) return;
+  rel.hadUserTurn = true;
+  saveSessionRelations();
 }
 
 function noteTurnTool(sessionId, toolName) {
@@ -872,6 +986,10 @@ function markTurnEnded(sessionId, outcome) {
   const bad = outcome?.reason === "error" || outcome?.reason === "aborted";
   turnState[sessionId] = {
     inFlight: false,
+    // Carried across so a reader of turnState can still say WHICH turn this
+    // record describes. Nothing depends on it today; leaving it out made the
+    // record silently lossy.
+    ...(rec.turnId ? { turnId: rec.turnId } : {}),
     ...(bad ? { resumable: {
       reason: outcome.reason,
       error: outcome.error || null,
@@ -1015,12 +1133,21 @@ function composeDelivery(entries) {
 }
 
 function maybeDrainInbox(sessionId) {
-  // Global pause halts automatic delivery while leaving typed prompts
-  // working, so this check belongs here and not in startTurn.
-  if (chains.isGloballyPaused()) return false;
   if (!sessionIsIdle(sessionId)) return false;
-  const group = inbox.nextDrainGroup(sessionId);
+  // Everything pending, not a per-chain slice. nextDrainGroup existed solely
+  // so one chain's budget could not pay for another's work; with a single
+  // global counter (AD2) there is nothing left to keep apart, and coalescing
+  // the lot into one turn is strictly cheaper than one turn per sender.
+  const group = inbox.pendingFor(sessionId);
   if (!group.length) return false;
+  // Parked rather than left queued, so the strip can show it as stuck. A
+  // queued message is merely waiting its turn; a parked one is waiting on
+  // the USER, and those must not look alike.
+  if (autonomy.status().paused) {
+    for (const e of group) inbox.park(e.id, "autonomy");
+    broadcastStatus(sessionId, { type: "inbox_changed" });
+    return false;
+  }
   // One sender gets named; several become "peer" without a handle, since no
   // single name would be honest about a coalesced delivery.
   const senders = new Set(group.map((e) => describeSender(e)));
@@ -1030,13 +1157,13 @@ function maybeDrainInbox(sessionId) {
   const started = startTurn(sessionId, composeDelivery(group), {
     source: "peer",
     origin: originLabel,
-    chainId: group[0].chainId,
   });
   console.log(`[driver] drain -> ${sessionId}: ${group.length} msg(s), startTurn=${JSON.stringify(started)}`);
   if (!started.ok) {
-    // Left queued on purpose. A refusal here is a transient condition (the
-    // chain was paused between enqueue and drain, the session became busy),
-    // and the next idle moment retries.
+    // Left queued on purpose. A refusal here is transient — the session
+    // became busy between the idle check and the call — and the next idle
+    // moment retries. The one NON-transient refusal, the gate being shut,
+    // was already handled above by parking.
     return false;
   }
   inbox.markDelivered(group.map((e) => e.id));
@@ -1047,23 +1174,20 @@ function drainAllInboxes() {
   for (const sessionId of inbox.sessionsWithPending()) maybeDrainInbox(sessionId);
 }
 
-// Conditions a user can lift. Anything else is a hard failure, not a thing
-// to park: there would be nothing to press.
-const PARKABLE_REASONS = new Set(["steps", "deadline", "global", "chain"]);
+// There is now exactly ONE condition a user can lift, so this is a set of
+// one rather than four. Kept as a named set because the distinction it draws
+// still matters: a parkable reason is something the user can press a button
+// about, and anything else must fail outright rather than become permanently
+// stuck garbage inflating a badge the user is supposed to trust.
+const PARKABLE_REASONS = new Set(["autonomy"]);
 
-// A parked message has NOT been charged, so releasing it has to re-attempt
-// the spend. Doing it here rather than at each call site is what stops a
-// release path from quietly starting a turn for free — which is what the
-// first cut of /extend-chain did.
+// Releasing no longer charges anything. Under §10 the ONLY place an
+// automatic turn is charged is startTurn, which every delivery goes through
+// — so a release path can no longer start a turn for free, structurally,
+// rather than because this function remembered to re-attempt a spend. (That
+// bug was real: the first cut of /extend-chain did exactly that.)
 function releaseParked(entry) {
-  const spent = chains.spend(entry.chainId);
-  if (!spent.ok) {
-    // Still blocked, possibly for a different reason than before (extended
-    // past the step limit but the deadline has since passed). Re-label it so
-    // the UI explains the CURRENT obstacle rather than the original one.
-    if (PARKABLE_REASONS.has(spent.reason)) inbox.park(entry.id, spent.reason);
-    return { ok: false, reason: spent.reason };
-  }
+  if (autonomy.status().paused) return { ok: false, reason: "autonomy-paused" };
   inbox.release(entry.id);
   return { ok: true };
 }
@@ -1084,7 +1208,7 @@ function releaseParkedFor(predicate) {
 // always told what happened, because a silently dropped message is
 // indistinguishable to a model from a peer that chose not to answer, and it
 // responds to that by retrying.
-function deliver(toAddr, text, { from, kind = "peer", chainId }) {
+function deliver(toAddr, text, { from, kind = "peer" }) {
   const resolved = peers.resolve(toAddr);
   if (!resolved.ok) return { ok: false, reason: resolved.reason, to: toAddr };
   const to = resolved.ref;
@@ -1092,33 +1216,22 @@ function deliver(toAddr, text, { from, kind = "peer", chainId }) {
   const auth = authorizeDelivery(from, to);
   if (!auth.allowed) return { ok: false, reason: auth.reason, to };
 
-  const spent = chains.spend(chainId);
-  if (!spent.ok) {
-    // Parking is only meaningful for a condition the user can later LIFT:
-    // out of steps, past the deadline, or paused. A message naming a chain
-    // that does not exist has nothing to extend or resume, so parking it
-    // would leave permanently stuck garbage inflating the badge the user is
-    // supposed to trust. Those are rejected outright.
-    if (!PARKABLE_REASONS.has(spent.reason)) {
-      return { ok: false, reason: spent.reason, chainId };
-    }
-    // PARKED, not failed: the message becomes an inbox entry marked
-    // undelivered, which extending or resuming releases and ignoring costs
-    // nothing. The sender is still told immediately so it can wrap up
-    // rather than wait. No step is spent — the spend is re-attempted at
-    // release, so a parked message cannot be charged twice or charged for
-    // work that never happened.
-    const entry = inbox.enqueue({
-      to, from, fromHandle: peers.get(from.id)?.handle || null, text, kind, chainId,
-    });
-    inbox.park(entry.id, spent.reason);
-    broadcastStatus(to.id, { type: "inbox_changed" });
-    return { ok: false, reason: spent.reason, parked: true, entryId: entry.id, chainId };
-  }
-
   const entry = inbox.enqueue({
-    to, from, fromHandle: peers.get(from.id)?.handle || null, text, kind, chainId,
+    to, from, fromHandle: peers.get(from.id)?.handle || null, text, kind,
   });
+
+  // Deliberately NOT charged here. §10 charges in startTurn and nowhere
+  // else, which matters because sending a message and running a turn are
+  // different events: the old design charged at send time for a turn that
+  // might never happen, and then had to be careful not to charge again at
+  // release. One charge point removes the whole class of double-spend.
+  if (autonomy.status().paused) {
+    // PARKED, not failed. The sender is still told immediately so it can
+    // wrap up rather than wait on a reply that is not coming yet.
+    inbox.park(entry.id, "autonomy");
+    broadcastStatus(to.id, { type: "inbox_changed" });
+    return { ok: false, reason: "autonomy-paused", parked: true, entryId: entry.id };
+  }
   const deliveredNow = maybeDrainInbox(to.id);
   broadcastStatus(to.id, { type: "inbox_changed" });
   return {
@@ -1126,8 +1239,36 @@ function deliver(toAddr, text, { from, kind = "peer", chainId }) {
     entryId: entry.id,
     delivered: deliveredNow,
     queued: !deliveredNow,
-    remaining: spent.remaining,
+    remaining: autonomy.status().remaining,
     to,
+  };
+}
+
+// Every surface that represents THE USER ACTING has to do two things, not
+// one: reset the counter (startTurn does that) and MOVE the mail the gate was
+// holding. Splitting them was a real bug — typing a prompt opened the gate but
+// left parked mail sitting there, so the system looked unblocked while the
+// messages it was blocking stayed stuck. Kept out of startTurn deliberately:
+// releasing drains, draining calls startTurn, and that is a loop.
+function releaseAutonomyParked() {
+  const released = releaseParkedFor((e) => e.parkedReason === "autonomy");
+  if (released.length) drainAllInboxes();
+  return released;
+}
+
+// One shape for every autonomy response, so a caller can read any of them
+// the same way. /presence and /autonomy-cap previously returned a strict
+// subset of /autonomy, which is the kind of difference nothing notices until
+// something indexes the missing field.
+function autonomySnapshot() {
+  const stuck = inbox.stuck();
+  return {
+    ...autonomy.status(),
+    defaultPauseAfter: DEFAULT_PAUSE_AFTER,
+    fanoutCap: FANOUT_CAP_PER_TURN,
+    maxCreationDepth: MAX_CREATION_DEPTH,
+    parked: stuck.length,
+    parkedSessions: [...new Set(stuck.map((e) => e.to?.id).filter(Boolean))].length,
   };
 }
 
@@ -1176,7 +1317,7 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
       // Addressable, but marked: a sub-agent its parent is blocking on will
       // queue your message behind that delegation, and what the parent
       // receives is unaffected by it.
-      subAgent: isChildSession(s.sessionId),
+      subAgent: isRosterChild(s.sessionId),
     });
   }
   // Most recently active first: a live container can easily hold dozens of
@@ -1212,23 +1353,23 @@ const PEER_LIST_MAX = 200;
 
 function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false }) {
   const state = sessions.get(fromSessionId);
-  // Everything automatic belongs to the chain the caller is running under.
-  // No chain means no budget to spend, which means this is not a turn that
-  // should be able to cause more work.
-  const chainId = state?.chainId;
-  if (!chainId) return { ok: false, reason: "no-chain" };
-  // Breadth, checked before the step is spent: a step budget bounds depth
-  // but not fan-out, and fan-out is where the expensive failure lives.
+  // No chain check any more: §10 asks "is this turn allowed to start" in
+  // startTurn, once, for every automatic turn however it arises. Guarding
+  // here as well would have been a second gate measuring a different thing.
+  //
+  // Breadth is still checked here, and still BEFORE anything is charged: the
+  // counter bounds how long a cascade runs, not how wide a single turn fans
+  // out, and width is where the expensive failure lives.
   const fan = noteFanout(state);
   if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
   // A session's FIRST outbound message necessarily happens before it has a
   // title, so its handle would otherwise be the provisional fallback and the
-  // recipient would see "@session". The chain is named after the prompt the
-  // user typed to start this work, which is both available here and exactly
-  // the kind of name a session title would have ended up with anyway.
+  // recipient would see "@session". The prompt that started this work is the
+  // same string a chain used to be named after, and is exactly the kind of
+  // name a session title would have ended up with anyway.
   peers.ensure(fromSessionId, {
     backend: sessionIdToBackend.get(fromSessionId) || null,
-    title: peers.get(fromSessionId)?.title || chains.get(chainId)?.rootPrompt || null,
+    title: peers.get(fromSessionId)?.title || state?.rootPromptText || null,
   });
   let body = text;
   if (resume) {
@@ -1247,7 +1388,6 @@ function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false })
   return deliver(to, body, {
     from: localPrincipal(fromSessionId),
     kind,
-    chainId,
   });
 }
 
@@ -1328,23 +1468,26 @@ function parentBackendId(sessionId) {
 // IN-MEMORY, so a driver restart loses the result entirely while the async
 // path returns it through the durable inbox. Async is the more robust default,
 // not merely the more parallel one.
-async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult = false, model = null }) {
+async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult = false, model = null, toolUseId = null }) {
   const state = sessions.get(fromSessionId);
-  const chainId = state?.chainId;
-  if (!chainId) return { ok: false, reason: "no-chain" };
   if (!backends[backend]) return { ok: false, reason: "unknown-backend", backend };
   if (!String(prompt || "").trim()) return { ok: false, reason: "empty-prompt" };
 
-  // Breadth before depth: a step budget bounds how long a chain runs, not
+  // Breadth before depth: the counter bounds how long a cascade runs, not
   // how wide it goes, and width is where the expensive failure lives.
   const fan = noteFanout(state);
   if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
-  // Counted along creation lineage, so promotion cannot reset it (PD9).
+  // Counted along creation lineage, so detaching cannot reset it (HD6).
   if (creationDepthExceeded(fromSessionId)) {
     return { ok: false, reason: "depth-cap", max: MAX_CREATION_DEPTH };
   }
-  const spent = chains.spend(chainId);
-  if (!spent.ok) return { ok: false, reason: spent.reason, chainId };
+  // Checked, not charged. The child's turn is charged by its own startTurn
+  // below — charging here too would bill one delegation twice. Reported up
+  // front anyway so the model is told plainly rather than having the child
+  // silently fail to start.
+  if (autonomy.status().paused) {
+    return { ok: false, reason: "autonomy-paused" };
+  }
 
   // PodPrompt mints the id (C1). The opencode backend expects its client
   // ids to be distinguishable from its own ses_... ids.
@@ -1355,7 +1498,7 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   // it in the async case.
   peers.ensure(fromSessionId, {
     backend: parentBackendId(fromSessionId),
-    title: peers.get(fromSessionId)?.title || chains.get(chainId)?.rootPrompt || null,
+    title: peers.get(fromSessionId)?.title || state?.rootPromptText || null,
   });
   registerChildSession(childId, {
     parent: fromSessionId,
@@ -1365,6 +1508,17 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
     childKind: "delegated",
     description: childTitle,
     createdBy: fromSessionId,
+    // HD2/HD3: which of the PARENT's turns this delegation belongs to, and
+    // whether that turn is blocked on it. Only an awaited delegation is
+    // something the parent's Stop should reach — an async one outlives the
+    // turn that made it, which is precisely the Monday-delegation/
+    // Tuesday-Stop failure HD2 exists to remove.
+    parentTurnId: awaitResult ? (state?.turnId || null) : null,
+    awaitedByParentTurn: !!awaitResult,
+    // Null on OpenCode, which has no per-call id to give us. Stored under
+    // `native` alongside the backends' own ids because it is exactly that:
+    // the spawning call's identity in the parent's transcript.
+    ...(toolUseId ? { native: { toolUseId } } : {}),
   });
   peers.ensure(childId, { title: childTitle, backend });
 
@@ -1384,11 +1538,14 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   // races a child that finishes quickly: the waiter would be added after
   // the resolve had already fired, and a blocking delegate would hang
   // forever on a turn that was already over.
+  // Unbound on purpose: registered BEFORE startTurn, so the turn it wants
+  // has no id yet. See awaitTurnEnd — "the next turn for this session" is
+  // the only thing that can be meant at this point, and it is correct here
+  // because the child session is brand new and cannot already be running.
   const waiter = awaitTurnEnd(childId);
   const started = startTurn(childId, prompt, {
     source: "delegate",
     origin: `delegate:@${peers.get(fromSessionId)?.handle || fromSessionId}`,
-    chainId,
     backendId: backend,
   });
   if (!started.ok) {
@@ -1400,8 +1557,8 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
     // Async: the parent's turn ends now and the child's report arrives later
     // as an ordinary inbox delivery. This costs almost nothing because peer
     // messaging already built that wake path.
-    watchDelegateForReport(waiter, childId, fromSessionId, chainId);
-    return { ok: true, handle, childId, awaited: false, remaining: spent.remaining };
+    watchDelegateForReport(waiter, childId, fromSessionId);
+    return { ok: true, handle, childId, awaited: false, remaining: autonomy.status().remaining };
   }
 
   const outcome = await waiter;
@@ -1409,7 +1566,7 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   return {
     ok: true, handle, childId, awaited: true,
     outcome: outcome?.reason || "completed",
-    text, remaining: spent.remaining,
+    text, remaining: autonomy.status().remaining,
   };
 }
 
@@ -1436,7 +1593,7 @@ async function finalAssistantText(childId) {
 // Async delegation: when the child finishes, its report is delivered to the
 // parent as an ordinary inbox entry — kind "result" rather than "peer", so
 // the two stay distinguishable in storage even though they render alike.
-function watchDelegateForReport(waiter, childId, parentId, chainId) {
+function watchDelegateForReport(waiter, childId, parentId) {
   waiter.then(async (outcome) => {
     const text = await finalAssistantText(childId);
     const handle = peers.get(childId)?.handle || childId;
@@ -1451,7 +1608,6 @@ function watchDelegateForReport(waiter, childId, parentId, chainId) {
     const receipt = deliver(parentId, body, {
       from: localPrincipal(childId),
       kind: "result",
-      chainId,
     });
     if (!receipt.ok) {
       console.error(`[driver] delegated report from @${handle} not delivered: ${receipt.reason}`);
@@ -2225,9 +2381,9 @@ function forgetSessionRelations(ids) {
     subAgents.delete(id);
   }
   if (changed) saveSessionRelations();
-  // Per-session budget defaults are keyed by session id too, so they would
-  // otherwise outlive the sessions they describe.
-  chains.forgetSessions(ids);
+  // The autonomy gate holds no per-session state at all — one global counter
+  // — so there is nothing here to forget for it. That absence is the point
+  // of AD2, not an omission.
   peers.forget(ids);
   inbox.forgetSessions(ids);
 }
@@ -2345,45 +2501,46 @@ reportAbandonedApprovals();
 // and the copies would drift. `source` rides through to the user bubble's
 // `origin` so a transcript can say who actually asked.
 function startTurn(sessionId, promptText, {
-  source = "human", explicitCwd, backendId,
-  chainId = null, preset = null, custom = null, origin = null, chainLabel = null,
+  source = "human", explicitCwd, backendId, origin = null,
 } = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
   if (state.turnInFlight) {
     return { ok: false, reason: "busy" };
   }
-  // Chain assignment lives here precisely BECAUSE this is the single entry
-  // point. Putting it in the /prompt handler would mean every later caller
-  // — a delegation, a peer delivery — needed its own copy, and the copies
-  // would drift apart exactly the way the in-flight check would have.
-  let chain;
-  // "resume" mints its own chain alongside "human": clicking Continue IS the
-  // user acting, and the trust root is the human, not the keystrokes.
+  // §10 — the whole of the autonomy gate, in one place, precisely BECAUSE
+  // this is the single entry point. The chain machinery this replaced needed
+  // a mint path, a lookup path, a status check and a chainId threaded through
+  // every caller; the question it was really asking was only ever "is this
+  // turn allowed to start".
+  //
+  // A human turn is never gated: "resume" counts as human alongside "human"
+  // because clicking Continue IS the user acting. Both also RESET the
+  // counter, since typing and clicking are exactly the input events the gate
+  // measures absence of — and that unifies what used to be two concepts
+  // (minting a fresh budget vs. spending from one).
   if (source === "human" || source === "resume") {
-    const fallback = chains.getSessionPreset(sessionId);
-    chain = chains.mint({
-      // Chains are named after the prompt that created them, which is what
-      // makes Extend and Pause legible. A resume's prompt is boilerplate, so
-      // it supplies its own label — otherwise the panel fills with rows all
-      // called "Your previous turn was interrupted...".
-      rootPrompt: chainLabel || promptText,
-      originSession: sessionId,
-      preset: preset || fallback.preset,
-      custom: preset ? custom : fallback.custom,
-    });
-    if (!chain) return { ok: false, reason: "invalid-budget" };
+    autonomy.noteHumanAction();
+    // What a chain's `rootPrompt` used to supply: a human-meaningful name
+    // for this line of work, available before the session has a title. Its
+    // one consumer is the peer-handle fallback, so a session's first
+    // outbound message is not labelled "@session". Only human turns set it —
+    // an automatic turn's text is a delivery envelope, not a name.
+    if (promptText && String(promptText).trim()) state.rootPromptText = String(promptText);
+    // HD4: durable evidence that a human has typed into this session, which
+    // is what the family-delete dialog pre-checks on. Must be persisted —
+    // state.turnOrigin is in-memory and would be gone after a restart.
+    noteUserTurn(sessionId);
   } else {
-    // Everything automatic must name the chain it belongs to. Minting one
-    // here instead would make "create a session and prompt it" a way to buy
-    // an unlimited fresh budget for the price of one tool call.
-    chain = chains.get(chainId);
-    if (!chain) return { ok: false, reason: "no-such-chain" };
-    const status = chains.status(chain);
-    if (status.state !== "active") {
-      return { ok: false, reason: status.reason, chainState: status.state, chainId: chain.id };
+    const charged = autonomy.chargeAutomaticTurn();
+    if (!charged.ok) {
+      return {
+        ok: false,
+        reason: charged.reason,
+        count: charged.count,
+        pauseAfter: charged.pauseAfter,
+      };
     }
   }
-  state.chainId = chain.id;
   state.fanoutThisTurn = 0;
   // A new turn by ANY route — typed, Continue, or a peer message — retires
   // the old failure. One rule rather than three separate clearing paths.
@@ -2397,7 +2554,7 @@ function startTurn(sessionId, promptText, {
   // HTTP handler, a delegating tool) must not be held open for it.
   runTurn(sessionId, promptText, { source }).catch((e) =>
     console.error(`[driver] startTurn failed for session ${sessionId}:`, e.message));
-  return { ok: true, chainId: chain.id };
+  return { ok: true };
 }
 
 // Promotion detaches a sub-agent's RECORD, but on claude-code there is no
@@ -2538,7 +2695,12 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // waiter never observes a turn that the browser has not been told about
     // yet. Always resolved, including on error and abort, because a waiter
     // that only hears about success waits forever on failure.
-    resolveTurnWaiters(sessionId, outcome);
+    // Read from the SESSION state, not turnState: markTurnEnded replaces
+    // turnState[sessionId] wholesale and runs before this, so turnState has
+    // no turnId left by now. That would not have thrown — it would have
+    // quietly passed null and un-bound every waiter, restoring exactly the
+    // behaviour HD3 exists to remove.
+    resolveTurnWaiters(sessionId, outcome, sessions.get(sessionId)?.turnId || null);
   }
 }
 
@@ -2546,20 +2708,33 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
 // awaiting the same session.
 const turnWaiters = new Map();
 
-function awaitTurnEnd(sessionId) {
+// `turnId` may be null, which means "the next turn, whichever it is". That
+// is NOT a loophole, it is the only correct answer for toolDelegate: it has
+// to register the waiter BEFORE startTurn (attaching afterwards races a child
+// that finishes fast), and at that moment the turn it wants does not exist
+// yet. The waiter latches onto the first turn to end for that session and
+// every later turn finds nothing — which is exactly the old behaviour, now
+// confined to the one case that needs it instead of being universal.
+function awaitTurnEnd(sessionId, turnId = null) {
   return new Promise((resolve) => {
     const list = turnWaiters.get(sessionId) || [];
-    list.push(resolve);
+    list.push({ turnId, resolve });
     turnWaiters.set(sessionId, list);
   });
 }
 
-function resolveTurnWaiters(sessionId, outcome) {
+function resolveTurnWaiters(sessionId, outcome, turnId = null) {
   const list = turnWaiters.get(sessionId);
   if (!list?.length) return;
+  // Keep only waiters bound to a DIFFERENT, still-possible turn. A waiter
+  // naming the turn that just ended fires; an unbound one fires; one naming
+  // some other turn is stale by definition, because a session runs one turn
+  // at a time — so it is dropped rather than left to fire on an unrelated
+  // turn later.
+  const firing = list.filter((w) => !w.turnId || !turnId || w.turnId === turnId);
   turnWaiters.delete(sessionId);
-  for (const resolve of list) {
-    try { resolve(outcome); } catch { /* a waiter's own failure is not ours */ }
+  for (const w of firing) {
+    try { w.resolve(outcome); } catch { /* a waiter's own failure is not ours */ }
   }
 }
 
@@ -2583,6 +2758,30 @@ function readBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+// §11 — PD10 is DEFERRED, against a named condition rather than a queue
+// position: it is required before the first non-local realm becomes
+// reachable, and not before. Verified in code, not assumed — KNOWN_REALMS
+// rejects any non-local realm, authorizeDelivery refuses unless BOTH ends are
+// LOCAL_REALM, and toolMessage returns realm-unreachable. There is exactly
+// one principal today, so authenticating would be distinguishing nothing from
+// nothing.
+//
+// This stub exists so that deferring stays cheap. The expensive part of the
+// retrofit is not the token; it is re-deciding, route by route, which of ~30
+// handlers is control plane and which is agent plane. That judgement is
+// cheapest while a route is being written, so every route added by §9 and §10
+// is classified NOW by routing through here. Turning it on later is a change
+// in this one function instead of an audit of thirty.
+//
+// Note what it cannot buy even then: agent Bash runs as the same uid as this
+// process, so any container-local secret is readable from /proc. A token
+// raises the bar against a confused agent and does nothing against a
+// determined one. A real boundary needs uid separation — see §11.
+// eslint-disable-next-line no-unused-vars
+function requireControl(req) {
+  return true;
 }
 
 const server = createServer(async (req, res) => {
@@ -2638,7 +2837,10 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify({
       inFlight: !!state?.turnInFlight,
       awaitingInput: sessionId ? pendingKindForSession(sessionId) : null,
-      isChild: sessionId ? isChildSession(sessionId) : false,
+      // HD1: named for what it actually gates — the read-only chrome — not
+      // for "has a parent". A delegated child HAS a parent and is still
+      // promptable, so the old `isChild` would now be a lie for it.
+      rosterChild: sessionId ? isRosterChild(sessionId) : false,
       parentSessionId: sessionId ? parentOfSession(sessionId) : null,
       autoApprove: effectiveAutoApprove(sessionId, state),
     }));
@@ -2656,7 +2858,16 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/sub-agents") {
     const sessionId = url.searchParams.get("sessionId");
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ subAgents: sessionId ? subAgentsForParent(sessionId) : [] }));
+    res.end(JSON.stringify({
+      subAgents: sessionId ? subAgentsForParent(sessionId) : [],
+      // HD1: delegated children are NOT sub-agents and deliberately do not
+      // appear above — they are real sessions, listed and promptable. They
+      // ride along on this response purely because the browser already
+      // refreshes it at the two moments that matter (session switch, and
+      // sub_agents_changed), which is what lets a delegate_session bubble
+      // show live status without a second endpoint or a second poll.
+      delegatedChildren: sessionId ? delegatedChildrenForParent(sessionId) : [],
+    }));
     return;
   }
 
@@ -2737,7 +2948,21 @@ const server = createServer(async (req, res) => {
   // found on disk. What changes is that it stops being treated as a child:
   // it can be prompted, it no longer appears in its old parent's roster, and
   // archiving or deleting that parent no longer touches it.
-  if (req.method === "POST" && path === "/promote-session") {
+  // HD6 — Keep and Detach. ONE mechanism underneath (the relation row is
+  // kept, with promoted:true, because it still holds the backend ids that
+  // locate this session's transcript on disk); two user actions above it,
+  // because HD1 split what `promote` used to mean into two different things:
+  //
+  //   Keep    roster child -> tree session. "This sub-agent turned out to be
+  //           worth keeping." Seeds on claude-code native tasks, because
+  //           there is no conversation behind that id to resume.
+  //   Detach  tree child -> root session. "This is its own thing now." Never
+  //           seeds: it is already a real session with its own history.
+  //
+  // Their GUARDS differ, which is most of why they are separate routes.
+  if (req.method === "POST" && (path === "/keep-session" || path === "/detach-session")) {
+    requireControl(req);
+    const detaching = path === "/detach-session";
     let body;
     try {
       body = await readBody(req);
@@ -2750,22 +2975,59 @@ const server = createServer(async (req, res) => {
     const rel = childId ? sessionRelations[childId] : null;
     if (!rel || rel.rel !== "parent" || rel.promoted) {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end('{"error":"not a promotable sub-agent"}');
+      res.end(JSON.stringify({ error: detaching ? "not a detachable session" : "not a keepable sub-agent" }));
       return;
     }
-    // Not while it is still working. Promotion severs the parent link, so a
-    // running sub-agent promoted mid-flight drops out of the parent's abort
-    // cascade and its roster — the parent could no longer stop it, and the
-    // work would carry on somewhere nobody is watching. The same reasoning
-    // as refusing to Forget a running sub-agent.
-    if (isSubAgentRunning(childId)) {
+    // Each action must be aimed at the kind it is for, or the guards below
+    // are protecting the wrong thing.
+    if (detaching && !isTreeChild(childId)) {
       res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "stop this sub-agent before promoting it", reason: "still-running" }));
+      res.end(JSON.stringify({ error: "that is a sub-agent — use Keep", reason: "wrong-kind" }));
       return;
     }
+    if (!detaching && !isRosterChild(childId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "that is already a session — use Detach", reason: "wrong-kind" }));
+      return;
+    }
+
+    if (detaching) {
+      // HD2 made this guard both MORE PERMISSIVE and more correct. The old
+      // blanket "not while running" was right for a sub-agent but wrong for
+      // a delegated session: under HD2 an async delegated child is not in
+      // its parent's Stop cascade at all, so detaching it mid-run strands
+      // nobody. The only case that still matters is a child its parent's
+      // CURRENT turn is blocked on — detach that and the parent waits on
+      // something it can no longer reach.
+      const parentTurnId = sessions.get(rel.parent)?.turnId || null;
+      if (rel.awaitedByParentTurn && rel.parentTurnId && parentTurnId
+          && rel.parentTurnId === parentTurnId) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "its parent is waiting on this session right now — stop that turn first",
+          reason: "awaited",
+        }));
+        return;
+      }
+    } else if (isSubAgentRunning(childId)) {
+      // Unchanged, and for the original reason: a running Task cut out of
+      // its parent's cascade becomes unstoppable — the parent can no longer
+      // reach it and the work carries on where nobody is watching.
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "stop this sub-agent before keeping it", reason: "still-running" }));
+      return;
+    }
+
+    // Auto-approve is deliberately NOT carried across. autoApproveForSession
+    // walks parentOfSession, which returns null once promoted, so a
+    // separated session stops inheriting it. That fails in the SAFE
+    // direction — more prompting, not less — and is arguably what severing a
+    // link should mean. Left silent on purpose: no confirm, no snapshot.
     sessionRelations[childId] = { ...rel, promoted: true, promotedAt: nowIso() };
     saveSessionRelations();
     subAgents.delete(childId);
+    // A detached node takes its own subtree with it: the rows below still
+    // point at a node that exists, so nothing needs rewriting.
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, sessionId: childId, backend: rel.backend || null }));
     return;
@@ -2929,6 +3191,36 @@ const server = createServer(async (req, res) => {
         });
       }
 
+      // HD1: native sub-agents are roster-only and must not appear as rows of
+      // their own. Applied AFTER peers.ensure above, deliberately: a native
+      // sub-agent can still be a message target, and dropping it from the
+      // peer refresh here would strand its handle at the provisional
+      // fallback. This filter is about the session LIST, nothing else.
+      //
+      // Promoted/kept children are unaffected — isRosterChild returns false
+      // for them, which is the whole point of keeping the relation row.
+      const listed = allSessions.filter((s) => !isRosterChild(s.sessionId));
+      const hiddenRosterChildren = allSessions.length - listed.length;
+
+      // Shape for the nested rows HD5 renders. Carried from Phase 17 so the
+      // data is verifiable a phase before anything draws it: depth is counted
+      // along the same parent edges the cascade walkers use, so a row's
+      // indent and its delete blast radius can never disagree.
+      for (const s_ of listed) {
+        const parentId = parentOfSession(s_.sessionId);
+        s_.parentSessionId = parentId;
+        s_.treeDepth = parentId ? depthOfSession(s_.sessionId) : 0;
+        // Lets the parent's feed attach this child's live status to the
+        // delegate_session bubble that created it. Replaces the roster as
+        // the bubble's status source: under HD1 a delegated child is not in
+        // the roster at all, and before that it carried no status anyway —
+        // subAgentsForParent read rel.native?.toolUseId, which toolDelegate
+        // never set, so the value was always null.
+        s_.delegateToolUseId = parentId
+          ? (sessionRelations[s_.sessionId]?.native?.toolUseId || null)
+          : null;
+      }
+
       const sessionHosts = loadSessionHosts();
       const currentHostPath = process.env.HOST_WORKSPACE_PATH || null;
       const annotateHost = (s) => {
@@ -2937,7 +3229,7 @@ const server = createServer(async (req, res) => {
         s.hostMismatch = !!(currentHostPath && rec?.hostPath && rec.hostPath !== currentHostPath);
         return s;
       };
-      allSessions.forEach(annotateHost);
+      listed.forEach(annotateHost);
       if (unreachableSessions) unreachableSessions.forEach(annotateHost);
 
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -2946,9 +3238,12 @@ const server = createServer(async (req, res) => {
         // chunk all of one backend/project's sessions before another's,
         // regardless of actual recency — merge by lastModified instead so
         // "flat, sorted by recency" is true globally, not just per source.
-        sessions: allSessions.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0)),
+        sessions: listed.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0)),
         unreachableCount,
         unreachableSessions,
+        // Diagnostic only, and the number that tells you HD1 is working:
+        // how many rows the roster/tree split kept out of this list.
+        hiddenRosterChildren,
       }));
     } catch (e) {
       console.error("[driver] /sessions failed:", e.message);
@@ -3213,31 +3508,43 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Chains, budgets & pause ───────────────────────────────────────────
-  // NOTE (PD10): these routes are presently reachable unauthenticated by any
-  // agent with Bash, exactly like every other driver route. That is a
-  // pre-existing exposure, but these are the routes it matters most for,
-  // since they are the controls meant to restrain agents. Hardening (a
-  // browser-held token, `authenticate(request) -> principal`) is Phase 16.
-  if (req.method === "GET" && path === "/chains") {
+  // ── The autonomy gate ─────────────────────────────────────────────────
+  // §10. Replaces /chains, /pause, /extend-chain and /budget-preset. Four
+  // routes became three, and the three take one number between them.
+  //
+  // §11: PD10 is deferred against a condition (the first non-local realm),
+  // not postponed indefinitely — but these are still the routes it would
+  // matter most for, since an agent that can POST its own lift has switched
+  // off its own governor. They are classified NOW via requireControl() so
+  // enabling it later is a change in one function rather than an audit.
+  if (req.method === "GET" && path === "/autonomy") {
+    requireControl(req);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      chains: chains.list(),
-      globalPaused: chains.isGloballyPaused(),
-      globalPausedAt: chains.globalPausedAt(),
-      presets: Object.fromEntries(
-        Object.entries(BUDGET_PRESETS).map(([k, v]) => [k, { label: v.label, steps: v.steps, ms: v.ms }])),
-      defaultPreset: DEFAULT_PRESET,
-      fanoutCap: FANOUT_CAP_PER_TURN,
-      maxCreationDepth: MAX_CREATION_DEPTH,
-      sessionPreset: url.searchParams.get("session")
-        ? chains.getSessionPreset(url.searchParams.get("session"))
-        : null,
-    }));
+    res.end(JSON.stringify(autonomySnapshot()));
     return;
   }
 
-  if (req.method === "POST" && path === "/pause") {
+  // The presence ping. Deliberately NOT inferred from any other request:
+  // the viewer polls /sessions on a timer, so treating "a request arrived"
+  // as presence would mean a laptop left open with the tab up resets the
+  // counter forever and the gate is purely decorative. The browser sends
+  // this only on debounced INPUT events — keydown, click, focus.
+  if (req.method === "POST" && path === "/presence") {
+    requireControl(req);
+    autonomy.noteHumanAction();
+    // Being here is also the moment parked mail should move: the user is
+    // back, which is the entire condition the gate was waiting on.
+    const released = releaseAutonomyParked();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, released: released.length, ...autonomySnapshot() }));
+    return;
+  }
+
+  // Lift the cap, or put it back. One route, because they are one decision.
+  // `until` is EPOCH MS resolved by the browser (AD5) — this process is
+  // almost certainly on UTC and must never interpret a wall-clock time.
+  if (req.method === "POST" && path === "/autonomy-cap") {
+    requireControl(req);
     let body;
     try {
       body = await readBody(req);
@@ -3246,78 +3553,46 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"invalid json"}');
       return;
     }
-    const paused = !!body.paused;
-    // Global pause is the breaker you reach for before you know which chain
-    // is at fault; per-chain is the one that stops a runaway without
-    // freezing unrelated overnight work. Both, from one route.
-    const result = body.chainId ? chains.setPaused(body.chainId, paused) : chains.setGlobalPaused(paused);
+    let result;
+    if (body.lift) {
+      result = autonomy.liftCap({ until: body.until === null || body.until === undefined ? null : Number(body.until) });
+    } else if (body.pauseAfter !== undefined) {
+      result = autonomy.setPauseAfter(Number(body.pauseAfter));
+    } else {
+      result = autonomy.capNow();
+    }
     if (!result.ok) {
-      res.writeHead(404, { "Content-Type": "application/json" });
+      res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: result.reason }));
       return;
     }
-    // The destructive half, and a SEPARATE deliberate action rather than
-    // part of pausing: pause is reversible, while aborting in-flight turns
-    // throws away work that may be nearly finished. Done here rather than in
-    // the browser because the driver knows exactly which sessions are
-    // running — the browser would have to guess from chain origins and would
-    // miss any session running a turn it did not start.
+    // Lifting the cap, allowing more, or capping-now are all human actions
+    // that unblock work, so each has to MOVE the mail it was holding —
+    // otherwise the button visibly changes the state and nothing happens.
+    const released = releaseAutonomyParked();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, released: released.length, ...autonomySnapshot() }));
+    return;
+  }
+
+  // The destructive half, kept as a SEPARATE deliberate action rather than
+  // folded into capping: capping is reversible, while aborting in-flight
+  // turns throws away work that may be nearly finished. Done here rather
+  // than in the browser because the driver knows exactly which sessions are
+  // running — the browser would have to guess and would miss any session
+  // running a turn it did not start.
+  if (req.method === "POST" && path === "/stop-all") {
+    requireControl(req);
     let stopped = 0;
-    if (paused && body.stopRunning) {
-      for (const [sessionId, state] of sessions) {
-        if (!state.turnInFlight) continue;
-        state.abortRequested = true;
-        try { state.backend.abort(sessionId, state); stopped++; } catch (e) {
-          console.error(`[driver] stop-running abort failed for ${sessionId}:`, e.message);
-        }
+    for (const [sessionId, state] of sessions) {
+      if (!state.turnInFlight) continue;
+      state.abortRequested = true;
+      try { state.backend.abort(sessionId, state); stopped++; } catch (e) {
+        console.error(`[driver] stop-all abort failed for ${sessionId}:`, e.message);
       }
     }
-    if (!paused) {
-      // Resuming must move the mail the pause was HOLDING, not just the mail
-      // that happened to be queued: messages that arrived while paused were
-      // parked, and draining alone would leave them sitting there with the
-      // pause visibly lifted.
-      releaseParkedFor((e) => (body.chainId
-        ? e.chainId === body.chainId && e.parkedReason === "chain"
-        : e.parkedReason === "global"));
-      drainAllInboxes();
-    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      ok: true,
-      globalPaused: chains.isGloballyPaused(),
-      chain: body.chainId ? chains.summary(chains.get(body.chainId)) : null,
-      stopped,
-    }));
-    return;
-  }
-
-  if (req.method === "POST" && path === "/extend-chain") {
-    let body;
-    try {
-      body = await readBody(req);
-    } catch {
-      res.writeHead(400);
-      res.end('{"error":"invalid json"}');
-      return;
-    }
-    const result = chains.extend(body.chainId, {
-      steps: Number(body.steps) || 0,
-      ms: Number(body.ms) || 0,
-    });
-    if (!result.ok) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: result.reason }));
-      return;
-    }
-    // Extending is what RELEASES the messages that were parked for running
-    // out — the parked entry is the work waiting to resume, so topping up
-    // the chain without releasing them would be a button that appears to do
-    // nothing.
-    const released = releaseParkedFor((e) =>
-      e.chainId === body.chainId && (e.parkedReason === "steps" || e.parkedReason === "deadline"));
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, chain: chains.summary(result.chain), released: released.length }));
+    res.end(JSON.stringify({ ok: true, stopped, ...autonomySnapshot() }));
     return;
   }
 
@@ -3362,7 +3637,6 @@ const server = createServer(async (req, res) => {
       ...e,
       fromHandle: e.fromHandle || peers.get(e.from?.id)?.handle || null,
       toHandle: peers.get(e.to?.id)?.handle || null,
-      chain: chains.summary(chains.get(e.chainId)),
     }));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
@@ -3371,7 +3645,7 @@ const server = createServer(async (req, res) => {
       // target resolves in seconds, and a badge that counted it would
       // flicker all day until the user stopped seeing it.
       stuckCount: inbox.stuck().length,
-      globalPaused: chains.isGloballyPaused(),
+      ...autonomy.status(),
     }));
     return;
   }
@@ -3396,14 +3670,14 @@ const server = createServer(async (req, res) => {
       if (!entry) result = { ok: false, reason: "no-such-entry" };
       else {
         // A deliberate user override: it lets ONE message through without
-        // re-arming the work that produced it. It still charges a step when
-        // the chain can pay, so the budget keeps describing what actually
-        // ran; when the chain cannot pay, the user's explicit instruction
-        // wins and the release happens anyway.
-        const spent = chains.spend(entry.chainId);
+        // lifting the cap for everything else. Nothing is charged here —
+        // the turn this releases is charged by startTurn when it actually
+        // drains, which is the single charge point §10 relies on. Clicking
+        // a button is also a human action, so the drain below will not be
+        // re-blocked by the very gate the user just overrode.
+        autonomy.noteHumanAction();
         result = inbox.release(entryId);
         if (result.ok) maybeDrainInbox(entry.to?.id);
-        if (result.ok) result.charged = spent.ok;
       }
     } else result = { ok: false, reason: "unknown-action" };
     if (!result.ok) {
@@ -3500,7 +3774,7 @@ const server = createServer(async (req, res) => {
       // Never offered for a sub-agent transcript: it is a record of
       // delegated work, not a conversation, and its input bar is hidden for
       // the same reason. Its parent is told the outcome and can re-prompt it.
-      ...(resumable && !isChildSession(sessionId) ? {
+      ...(resumable && !isRosterChild(sessionId) ? {
         reason: resumable.reason,
         error: resumable.error || null,
         lastTool: resumable.lastTool || null,
@@ -3522,7 +3796,7 @@ const server = createServer(async (req, res) => {
     }
     const sessionId = body.sessionId;
     const resumable = sessionId ? resumableFor(sessionId) : null;
-    if (!resumable || isChildSession(sessionId)) {
+    if (!resumable || isRosterChild(sessionId)) {
       res.writeHead(409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "nothing to resume", reason: "not-resumable" }));
       return;
@@ -3538,15 +3812,16 @@ const server = createServer(async (req, res) => {
     const started = startTurn(sessionId, resumePromptFor(resumable), {
       source: "resume",
       origin: `resume:${resumable.reason}`,
-      chainLabel: label,
     });
     if (!started.ok) {
       res.writeHead(409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "could not resume", reason: started.reason }));
       return;
     }
+    // Clicking Continue is the user acting, same as typing.
+    releaseAutonomyParked();
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, chainId: started.chainId }));
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 
@@ -3647,25 +3922,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "POST" && path === "/budget-preset") {
-    let body;
-    try {
-      body = await readBody(req);
-    } catch {
-      res.writeHead(400);
-      res.end('{"error":"invalid json"}');
-      return;
-    }
-    const result = chains.setSessionPreset(body.sessionId, body.preset, body.custom || null);
-    if (!result.ok) {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: result.reason }));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, preset: result.preset, custom: result.custom }));
-    return;
-  }
 
   if (req.method === "POST" && path === "/archive-session") {
     let body;
@@ -3730,6 +3986,36 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // What HD4's dialog reads. The browser must never derive a delete's blast
+  // radius itself — the driver owns the relation index, and a dialog that
+  // disagreed with what the server actually deletes would be worse than no
+  // dialog at all.
+  if (req.method === "GET" && path === "/delete-preview") {
+    const sessionId = url.searchParams.get("sessionId");
+    const kids = sessionId ? descendantsOfSession(sessionId) : [];
+    const rosterKids = kids.filter(isRosterChild);
+    const treeKids = kids.filter(isTreeChild);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      // Non-negotiable: HD1 leaves these no other way to be reached, so NOT
+      // deleting them strands transcripts on disk that nothing can ever list
+      // or open again.
+      rosterCount: rosterKids.length,
+      // Offered individually, pre-checked by "no user turns".
+      delegated: treeKids.map((id) => {
+        const rel = sessionRelations[id] || {};
+        return {
+          sessionId: id,
+          title: peers.get(id)?.title || rel.description || null,
+          backend: rel.backend || sessionIdToBackend.get(id) || null,
+          hadUserTurn: !!rel.hadUserTurn,
+          depth: depthOfSession(id),
+        };
+      }),
+    }));
+    return;
+  }
+
   if (req.method === "POST" && path === "/delete-session") {
     let body;
     try {
@@ -3745,20 +4031,66 @@ const server = createServer(async (req, res) => {
       return;
     }
     try {
-      const doomed = descendantsOfSession(body.sessionId);
-      const cascaded = await cascadeToDescendants(body.sessionId,
-        (backend2, childId, childState) => backend2.deleteSession(childId, childState?.cwd), "delete");
+      // HD4. `keep` names delegated descendants the user unchecked; they
+      // survive as ROOT sessions. Everything else under this session goes.
+      //
+      // Keeping a child keeps its whole subtree with it: the recursion
+      // follows the parent's fate, so a kept child's own children are not
+      // orphaned into deletion behind its back.
+      const keep = new Set(Array.isArray(body.keep) ? body.keep : []);
+      const kept = new Set();
+      for (const id of keep) {
+        if (!isTreeChild(id)) continue;   // roster children are not optional
+        kept.add(id);
+        for (const sub of descendantsOfSession(id)) kept.add(sub);
+      }
+      const doomed = descendantsOfSession(body.sessionId).filter((id) => !kept.has(id));
+
+      let cascaded = 0;
+      const gone = [];
+      for (const childId of doomed.slice().reverse()) {
+        try {
+          const rel = sessionRelations[childId] || {};
+          const b = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
+          await b.deleteSession(childId, sessions.get(childId)?.cwd);
+          cascaded++;
+          gone.push(childId);
+        } catch (e) {
+          // Best effort: one unreachable child must not block the delete the
+          // user actually asked for.
+          console.error(`[driver] delete cascade failed for child ${childId}:`, e.message);
+        }
+      }
+      // Forget what ACTUALLY went, before attempting the parent. If the
+      // parent's own delete then throws, the index still matches reality
+      // instead of naming children whose transcripts are already gone —
+      // found by testing a delete whose parent transcript was missing, which
+      // left the tree half-deleted and permanently uncleanable.
+      if (gone.length) {
+        for (const id of gone) sessions.delete(id);
+        forgetSessionRelations(gone);
+      }
       const state = sessions.get(body.sessionId);
       const backend = backendFor(body.sessionId, body.backend);
       await backend.deleteSession(body.sessionId, state?.cwd);
-      for (const childId of doomed) sessions.delete(childId);
       sessions.delete(body.sessionId);
-      // Drop the relation rows too — otherwise the index keeps naming
-      // children of a session that no longer exists, and depth/root walks
-      // start from a phantom.
-      forgetSessionRelations([...doomed, body.sessionId]);
+      // A kept child becomes a root: its relation row is dropped so nothing
+      // still thinks it is a child of a session that no longer exists.
+      for (const id of kept) {
+        if (sessionRelations[id]?.parent === body.sessionId) delete sessionRelations[id];
+      }
+      if (kept.size) saveSessionRelations();
+      // Drop the relation rows of everything deleted too — otherwise the
+      // index keeps naming children of a session that no longer exists, and
+      // depth/root walks start from a phantom.
+      forgetSessionRelations([body.sessionId]);
+      // Mail addressed to a session that no longer exists can never be
+      // delivered, so it would sit stuck forever inflating the parked count.
+      const orphanMail = inbox.open().filter((e) => !sessions.has(e.to?.id)
+        && (doomed.includes(e.to?.id) || e.to?.id === body.sessionId));
+      for (const e of orphanMail) inbox.discard(e.id);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, cascaded }));
+      res.end(JSON.stringify({ ok: true, cascaded, kept: [...kept], droppedMail: orphanMail.length }));
     } catch (e) {
       console.error("[driver] delete-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -3826,7 +4158,7 @@ const server = createServer(async (req, res) => {
     // parent already took, with no record of it on the parent's side. Refused
     // with a reason the UI can act on — "promote this to its own session" is
     // the supported way to carry on from a sub-agent's findings.
-    if (isChildSession(sessionId)) {
+    if (isRosterChild(sessionId)) {
       res.writeHead(409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         error: "this is a sub-agent transcript and cannot be prompted",
@@ -3848,6 +4180,10 @@ const server = createServer(async (req, res) => {
       }));
       return;
     }
+    // Typing IS presence, so this turn has already reset the counter — and
+    // therefore has to move the mail that reset unblocks. See
+    // releaseAutonomyParked.
+    releaseAutonomyParked();
     // Fire-and-forget: the actual reply streams via server.py's SSE feed,
     // not this HTTP response. Different sessions' calls run fully
     // concurrently — only a second prompt to the SAME session is rejected
@@ -3874,7 +4210,7 @@ const server = createServer(async (req, res) => {
     }
     pendingApprovals.delete(body.id);
     persistPendingApprovals();
-    if (isChildSession(pending.sessionId)) {
+    if (isRosterChild(pending.sessionId)) {
       upsertSubAgent(pending.sessionId, { awaiting: null, awaitingId: null });
     }
     // Clear the parked-on-a-human state as soon as this session has nothing
@@ -3936,6 +4272,62 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // HD2's scoped kill. Originally "Stop chain", walking chainId — but §10
+  // deleted chains, so it walks the PARENT EDGE instead, which is arguably
+  // the better scope: the parent edge is a thing the user can SEE in the
+  // session tree and aim at. A chain was never visible as a thing to aim at.
+  //
+  // Deliberately separate from /abort rather than a flag on it. Plain Stop
+  // means "stop what this turn is doing"; this means "stop this whole line of
+  // work, including sessions that are running on their own account". Those
+  // are different enough that fat-fingering one for the other should not be
+  // possible.
+  if (req.method === "POST" && path === "/stop-subtree") {
+    requireControl(req);
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const rootId = body.sessionId;
+    if (!rootId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"sessionId required"}');
+      return;
+    }
+    let stopped = 0;
+    // The root itself first, then everything below it, so nothing it is
+    // actively waiting on gets a chance to start new work after we pass it.
+    for (const id of [rootId, ...descendantsOfSession(rootId)]) {
+      const st = sessions.get(id);
+      if (!st?.turnInFlight) continue;
+      try {
+        st.abortRequested = true;
+        const rel = sessionRelations[id] || {};
+        const backend = st.backend
+          || getBackend(rel.backend || sessionIdToBackend.get(id) || defaultBackendId());
+        backend.abort(id, st);
+        if (isRosterChild(id)) upsertSubAgent(id, { status: "killed" });
+        stopped++;
+      } catch (e) {
+        console.error(`[driver] stop-subtree failed for ${id}:`, e.message);
+      }
+    }
+    // Mail addressed into this subtree would otherwise wake it straight back
+    // up, which would make the button look like it had not worked.
+    const doomed = new Set([rootId, ...descendantsOfSession(rootId)]);
+    // discard() takes ONE id, not a list — passing an array matched nothing
+    // and returned no-such-entry, silently leaving the mail in place.
+    const dropped = inbox.open().filter((e) => doomed.has(e.to?.id));
+    for (const e of dropped) inbox.discard(e.id);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, stopped, droppedMail: dropped.length }));
+    return;
+  }
+
   if (req.method === "POST" && path === "/abort") {
     let body;
     try {
@@ -3960,14 +4352,24 @@ const server = createServer(async (req, res) => {
       if (state.turnInFlight) state.abortRequested = true;
       state.backend.abort(body.sessionId, state);
     }
-    // Cascade to descendants, each through its own backend. On claude-code a
-    // sub-agent dies with the parent's process anyway, but an opencode child
-    // is an independent session on a separate server that knows nothing
-    // about the parent — stopping the parent alone would leave it running,
-    // burning tokens on a report nobody will read. This is also the hard
-    // precondition for ever declaring perTaskStopAffordance, which flips
-    // claude-code's interrupt from killing background tasks to sparing them.
-    for (const childId of descendantsOfSession(body.sessionId)) {
+    // HD2: the cascade follows THE WAIT, not the parent edge.
+    //
+    // The parent edge is DURABLE — who started whom, outliving any turn.
+    // Stop is TURN-SCOPED. Walking one along the other produced a real
+    // failure: delegate a long job on Monday (async, so the parent's turn
+    // ends immediately), prompt that parent about something unrelated on
+    // Tuesday, hit Stop, and the cascade found Monday's delegate still
+    // running and killed it. Nothing about Tuesday's turn had anything to do
+    // with it, and the better HD1 makes delegated children feel like real
+    // sessions, the more wrong that is.
+    //
+    // So: this turn's roster children (a native sub-agent IS this turn —
+    // on claude-code it dies with the process anyway, and an opencode one is
+    // an independent session that would otherwise keep burning tokens on a
+    // report nobody will read), plus any delegated child THIS turn is
+    // blocked on via await=true. Async delegated children are left alone;
+    // you stop those from their own session, or with /stop-subtree.
+    for (const childId of abortCascadeTargets(body.sessionId)) {
       // Only ones actually running. Cascading unconditionally re-labelled
       // finished sub-agents as "killed" — so stopping a turn turned every
       // completed row in the roster red, rewriting history for work that had
@@ -3981,7 +4383,10 @@ const server = createServer(async (req, res) => {
         const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
         if (childState?.turnInFlight) childState.abortRequested = true;
         backend.abort(childId, childState);
-        upsertSubAgent(childId, { status: "killed" });
+        // Roster entries only. A delegated child has no roster row under
+        // HD1, and writing one here would conjure a sub-agent into a panel
+        // that is supposed to contain nothing but native sub-agents.
+        if (isRosterChild(childId)) upsertSubAgent(childId, { status: "killed" });
       } catch (e) {
         console.error(`[driver] abort cascade failed for child ${childId}:`, e.message);
       }

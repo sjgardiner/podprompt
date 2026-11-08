@@ -143,7 +143,6 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
     from: { realm: LOCAL_REALM, id: "sender" },
     fromHandle: "sender-handle",
     text: "hello",
-    chainId: "chn_1",
   });
   eq("starts queued", e.state, "queued");
   eq("kind defaults to peer", e.kind, "peer");
@@ -153,7 +152,7 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   // not need a migration.
   const r = ib.enqueue({
     to: { realm: LOCAL_REALM, id: "target" }, from: { realm: LOCAL_REALM, id: "child" },
-    text: "report", kind: "result", chainId: "chn_1",
+    text: "report", kind: "result",
   });
   eq("result kind is preserved", ib.byId(r.id).kind, "result");
 
@@ -162,30 +161,37 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   eq("delivered leaves nothing pending", ib.pendingFor("target").length, 0);
 }
 
-// ── a drain must never mix chains ────────────────────────────────────────
+// ── a drain takes EVERYTHING pending for that session ────────────────────
 {
-  const ib = createInbox({ file: file("inbox-chains"), now });
+  // This used to assert the opposite: drains were sliced per chain so one
+  // chain's budget could not pay for another's work. §10 (AD2) removed
+  // chains entirely for a single global counter, so there is nothing left to
+  // keep apart — and coalescing is now strictly better, since one turn
+  // carrying three messages costs one charge instead of three.
+  const ib = createInbox({ file: file("inbox-drain"), now });
   const to = { realm: LOCAL_REALM, id: "target" };
-  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "a" }, text: "1", chainId: "chn_A" });
-  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "b" }, text: "2", chainId: "chn_B" });
-  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "c" }, text: "3", chainId: "chn_A" });
+  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "a" }, text: "1" });
+  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "b" }, text: "2" });
+  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "c" }, text: "3" });
 
-  const group = ib.nextDrainGroup("target");
-  eq("drain group takes the oldest chain only", group.length, 2);
-  check("drain group is single-chain", group.every((g) => g.chainId === "chn_A"));
-  // A turn belongs to exactly one chain; mixing would make one chain's
-  // budget silently pay for another's work.
+  const group = ib.pendingFor("target");
+  eq("a drain takes all pending mail at once", group.length, 3);
   ib.markDelivered(group.map((g) => g.id));
-  const next = ib.nextDrainGroup("target");
-  eq("the other chain drains next", next.length, 1);
-  eq("and it is the right one", next[0].chainId, "chn_B");
+  eq("and leaves nothing behind", ib.pendingFor("target").length, 0);
+
+  // Other sessions' mail is still untouched — coalescing is per TARGET, not
+  // global, which is the one distinction that still matters.
+  ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "a" }, text: "mine" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "other" }, from: { realm: LOCAL_REALM, id: "a" }, text: "theirs" });
+  eq("drain is scoped to one target", ib.pendingFor("target").length, 1);
+  eq("the other target keeps its own", ib.pendingFor("other").length, 1);
 }
 
 // ── parking, releasing, discarding ───────────────────────────────────────
 {
   const ib = createInbox({ file: file("inbox-park"), now });
   const to = { realm: LOCAL_REALM, id: "t" };
-  const e = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "x", chainId: "chn" });
+  const e = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "x" });
   ib.park(e.id, "steps");
   eq("parked is not pending", ib.pendingFor("t").length, 0);
   eq("parked counts as stuck", ib.stuck().length, 1);
@@ -207,8 +213,8 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   const f = file("inbox-restart");
   const i1 = createInbox({ file: f, now });
   const to = { realm: LOCAL_REALM, id: "t" };
-  const queued = i1.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "still here", chainId: "c" });
-  const parked = i1.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "parked", chainId: "c" });
+  const queued = i1.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "still here" });
+  const parked = i1.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "parked" });
   i1.park(parked.id, "deadline");
 
   // A restart must not drop mail — that is the whole reason this is durable.
@@ -222,9 +228,9 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
 // ── sessionsWithPending drives the resume-from-pause drain ───────────────
 {
   const ib = createInbox({ file: file("inbox-pending"), now });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "a" }, from: { realm: LOCAL_REALM, id: "z" }, text: "1", chainId: "c" });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "b" }, from: { realm: LOCAL_REALM, id: "z" }, text: "2", chainId: "c" });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "a" }, from: { realm: LOCAL_REALM, id: "z" }, text: "3", chainId: "c" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "a" }, from: { realm: LOCAL_REALM, id: "z" }, text: "1" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "b" }, from: { realm: LOCAL_REALM, id: "z" }, text: "2" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "a" }, from: { realm: LOCAL_REALM, id: "z" }, text: "3" });
   const s = ib.sessionsWithPending().sort();
   eq("distinct targets only", s.length, 2);
   eq("targets are right", s.join(","), "a,b");
@@ -235,11 +241,11 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   const ib = createInbox({ file: file("inbox-prune"), now });
   const to = { realm: LOCAL_REALM, id: "t" };
   for (let i = 0; i < 50; i++) {
-    const e = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: `${i}`, chainId: "c" });
+    const e = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: `${i}` });
     ib.markDelivered([e.id]);
   }
-  const live = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "live", chainId: "c" });
-  const held = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "held", chainId: "c" });
+  const live = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "live" });
+  const held = ib.enqueue({ to, from: { realm: LOCAL_REALM, id: "s" }, text: "held" });
   ib.park(held.id, "steps");
 
   ib.prune(10);
@@ -251,9 +257,9 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
 // ── forgetting a session drops its mail in both directions ───────────────
 {
   const ib = createInbox({ file: file("inbox-forget"), now });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "gone" }, from: { realm: LOCAL_REALM, id: "s" }, text: "in", chainId: "c" });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "t" }, from: { realm: LOCAL_REALM, id: "gone" }, text: "out", chainId: "c" });
-  ib.enqueue({ to: { realm: LOCAL_REALM, id: "t" }, from: { realm: LOCAL_REALM, id: "s" }, text: "keep", chainId: "c" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "gone" }, from: { realm: LOCAL_REALM, id: "s" }, text: "in" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "t" }, from: { realm: LOCAL_REALM, id: "gone" }, text: "out" });
+  ib.enqueue({ to: { realm: LOCAL_REALM, id: "t" }, from: { realm: LOCAL_REALM, id: "s" }, text: "keep" });
   ib.forgetSessions(["gone"]);
   eq("mail to and from the forgotten session is gone", ib.all().length, 1);
   eq("unrelated mail is kept", ib.all()[0].text, "keep");

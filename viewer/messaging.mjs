@@ -211,7 +211,7 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
     } catch (e) { onError(e); }
   }
 
-  function enqueue({ to, from, fromHandle = null, text, kind = "peer", chainId = null }) {
+  function enqueue({ to, from, fromHandle = null, text, kind = "peer" }) {
     const entry = {
       id: `msg_${now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       to,                 // {realm, id}
@@ -224,7 +224,6 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
       // today, but they are STORED distinctly: rendering alike is a one-line
       // choice, storing nothing is permanent.
       kind,
-      chainId,
       createdAt: now(),
       state: "queued",
       parkedReason: null,
@@ -240,16 +239,6 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
 
   function pendingFor(sessionId) {
     return store.entries.filter((e) => e.state === "queued" && e.to?.id === sessionId);
-  }
-
-  // A turn belongs to exactly one chain, so a drain must not mix them —
-  // otherwise one chain's budget silently pays for another's work. Oldest
-  // chain first; the rest drain on the next idle moment.
-  function nextDrainGroup(sessionId) {
-    const pending = pendingFor(sessionId);
-    if (!pending.length) return [];
-    const chainId = pending[0].chainId;
-    return pending.filter((e) => e.chainId === chainId);
   }
 
   function markDelivered(ids) {
@@ -322,7 +311,7 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
   }
 
   return {
-    enqueue, byId, pendingFor, nextDrainGroup, markDelivered,
+    enqueue, byId, pendingFor, markDelivered,
     park, release, discard, stuck, open, sessionsWithPending, prune, forgetSessions,
     all: () => store.entries.slice(),
     _store: () => store,

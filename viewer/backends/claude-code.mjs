@@ -60,10 +60,25 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     try { return readdirSync(dir); } catch { return []; }
   }
 
-  // ── Permission-path experiment ─────────────────────────────────────────
-  // "off" | "observe" | "decide". Defaults to off, so this is inert unless
-  // deliberately switched on for a verification run. See baseOpts.
-  const PERM_HOOK_MODE = (process.env.PODPROMPT_PERM_HOOK || "off").toLowerCase();
+  // ── Sub-agent permission attribution ───────────────────────────────────
+  // The PermissionRequest hook runs ALONGSIDE canUseTool and never decides.
+  // That is not caution, it is what this CLI actually supports — verified
+  // live, and the negative result is worth recording because the type
+  // definitions imply otherwise:
+  //
+  //   canUseTool + hook -> both fire, ~2ms apart, exactly one card. The hook
+  //                        carries agent_id/agent_type; canUseTool does not.
+  //   hook alone        -> NEITHER fires. Withholding canUseTool does not
+  //                        promote the hook to decider; it removes the client
+  //                        from the permission path entirely and the CLI
+  //                        falls back to its own internal rules. Observed
+  //                        directly: auto-approve off, no card shown, and
+  //                        commands ran anyway.
+  //
+  // So the hook is an attribution side-channel, never an authority.
+  // PODPROMPT_PERM_HOOK=off disables it; cards then fall back to the parent
+  // session unattributed, exactly as before this existed.
+  const PERM_HOOK_ON = (process.env.PODPROMPT_PERM_HOOK || "on").toLowerCase() !== "off";
   const PERM_PROBE_LOG = process.env.PODPROMPT_PERM_PROBE_LOG || "/tmp/podprompt-perm-probe.log";
 
   // The driver's own stdout goes to the container's console, which is awkward
@@ -74,8 +89,65 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     try { appendFileSync(PERM_PROBE_LOG, line); } catch { /* probe must never break a turn */ }
     console.log(`[perm-probe] ${event}`, JSON.stringify(detail));
   }
-  if (PERM_HOOK_MODE !== "off") {
-    permProbe("mode", { mode: PERM_HOOK_MODE, pid: process.pid });
+  if (PERM_HOOK_ON && process.env.PODPROMPT_PERM_PROBE_LOG) {
+    permProbe("mode", { attribution: true, pid: process.pid });
+  }
+
+  // Sub-agent id maps, at factory scope rather than per-turn: canUseTool
+  // closes over this scope, so declaring them inside runTurn would make them
+  // invisible there — a ReferenceError that no syntax check catches. The keys
+  // are globally unique ids, so sharing them across turns cannot collide.
+  const childIdForToolUse = new Map(); // tool_use_id -> podprompt child session id
+  const childIdForTask = new Map();    // task_id      -> podprompt child session id
+  const childIdForAgent = new Map();   // agent_id     -> podprompt child session id
+
+  // A sub-agent's identity, learned from the hook and consumed by the
+  // canUseTool call it accompanies. Keyed on tool name + exact serialized
+  // input, which is sound rather than a guess: the two fire ~2ms apart in a
+  // fixed order for the SAME call, so at most one ask with a given key is in
+  // flight. Entries are short-lived and swept, so a hook whose canUseTool
+  // never arrives cannot accumulate.
+  const agentHints = new Map(); // key -> { agentId, agentType, at, waiters: [] }
+  const AGENT_HINT_TTL_MS = 5000;
+
+  function hintKey(toolName, toolInput) {
+    let serialized;
+    try { serialized = JSON.stringify(toolInput); } catch { serialized = String(toolInput); }
+    return `${toolName} ${serialized}`;
+  }
+
+  function recordAgentHint(toolName, toolInput, agentId, agentType) {
+    const key = hintKey(toolName, toolInput);
+    const now = Date.now();
+    for (const [k, v] of agentHints) if (now - v.at > AGENT_HINT_TTL_MS) agentHints.delete(k);
+    const prev = agentHints.get(key);
+    const entry = { agentId, agentType, at: now, waiters: prev?.waiters || [] };
+    agentHints.set(key, entry);
+    for (const resolve of entry.waiters.splice(0)) resolve(entry);
+  }
+
+  // canUseTool fires FIRST (~2ms ahead of the hook), so it waits briefly for
+  // the hint rather than reading it. Only when a sub-agent could plausibly be
+  // asking — with no live children this returns immediately and the common
+  // case pays nothing.
+  function awaitAgentHint(toolName, toolInput, liveChildren) {
+    if (!PERM_HOOK_ON || liveChildren === 0) return Promise.resolve(null);
+    const key = hintKey(toolName, toolInput);
+    const existing = agentHints.get(key);
+    if (existing && Date.now() - existing.at <= AGENT_HINT_TTL_MS) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      const entry = agentHints.get(key)
+        || { agentId: null, agentType: null, at: Date.now(), waiters: [] };
+      entry.waiters.push(resolve);
+      agentHints.set(key, entry);
+      // Bounded: a main-thread ask never gets a hint, and must not be held
+      // up waiting for one that is not coming.
+      setTimeout(() => {
+        const i = entry.waiters.indexOf(resolve);
+        if (i >= 0) entry.waiters.splice(i, 1);
+        resolve(null);
+      }, 250);
+    });
   }
 
   // ── Multi-project discovery ─────────────────────────────────────────────
@@ -669,11 +741,16 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // the very next tool call, not just the next turn.
   function makeCanUseTool(sessionId, state) {
     return async function canUseTool(toolName, toolInput, options) {
-      // Logged alongside the hook so one run shows whether BOTH fire for the
-      // same call — the double-prompt failure mode — or only one does.
-      if (PERM_HOOK_MODE !== "off") {
-        permProbe("canUseTool-fired", { mode: PERM_HOOK_MODE, toolName });
-      }
+      // Which sub-agent (if any) this ask belongs to. canUseTool itself is
+      // told nothing about that, so the answer comes from the hook firing
+      // alongside it — see the attribution block near the top of this file.
+      const hint = await awaitAgentHint(toolName, toolInput, childIdForTask.size);
+      const askingChildId = hint?.agentId ? (childIdForAgent.get(hint.agentId) || null) : null;
+      // The card belongs in the asking sub-agent's own session: that is where
+      // its transcript lives, so the approval sits next to the work that
+      // prompted it instead of in a parent feed that never mentions it.
+      const target = askingChildId || sessionId;
+
       if (toolName === "AskUserQuestion") {
         // Deliberately NOT short-circuited by auto-approve — that flag only
         // concerns tool-permission gating, not answering substantive
@@ -687,7 +764,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // answers directly instead of re-parsing a joined string). This
         // backend only ever wants the plain-text form — Claude reads the
         // answer as a crafted deny message, not structured data.
-        const answer = await requestApproval(sessionId, "question", toolName, toolInput);
+        const answer = await requestApproval(target, "question", toolName, toolInput);
         // Verified: canUseTool fires for AskUserQuestion, but `allow` alone
         // leaves it unanswered ("The user did not answer the questions").
         // Denying with a crafted message is the mechanism that actually
@@ -695,7 +772,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         return { behavior: "deny", message: `The user answered: ${answer.text}` };
       }
 
-      if (state.autoApprove) {
+      // Inherited down the tree, so a sub-agent of an auto-approved parent is
+      // covered without the user ticking anything per child. On this backend
+      // a sub-agent's calls already arrive on the parent's state, so this is
+      // belt and braces for the cross-backend case.
+      if (state.autoApprove || autoApproveForSession?.(sessionId)) {
         return { behavior: "allow", updatedInput: toolInput };
       }
 
@@ -706,12 +787,16 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // PermissionResult"). Passed to the browser so the card can offer that
       // third choice; returned as updatedPermissions when the user takes it.
       const suggestions = Array.isArray(options?.suggestions) ? options.suggestions : null;
-      const decision = await requestApproval(sessionId, "permission", toolName, toolInput, {
+      const decision = await requestApproval(target, "permission", toolName, toolInput, {
         suggestions,
         // Only offerable when the SDK actually proposed rules for this call;
         // without them there is nothing to widen and "Always allow" would be
         // a button that quietly behaved like a plain Allow.
         canAlwaysAllow: !!(suggestions && suggestions.length),
+        // Named only when a sub-agent asked but could not be pinned to its
+        // own session — then the card at least says who is asking rather
+        // than reading as though the main thread asked.
+        agentType: (!askingChildId && hint?.agentType) ? hint.agentType : null,
       });
       if (decision && decision.allow) {
         return {
@@ -895,27 +980,23 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       permissionMode: "default",
       maxTurns: 50,
       abortController,
-      // Withheld only in "decide" mode, where the hook owns the decision.
-      // In "off" and "observe" this is the authoritative permission path
-      // exactly as it has always been.
-      ...(PERM_HOOK_MODE === "decide" ? {} : { canUseTool }),
+      // ALWAYS passed. Verified live that withholding it does not promote the
+      // hook below to decider — it removes the client from the permission
+      // path entirely and the CLI falls back to its own rules, running
+      // commands with no card shown and auto-approve off. canUseTool is, and
+      // stays, the only authority on whether a tool runs.
+      canUseTool,
       // Live typing + thinking-block visibility in the browser. Deliberately
       // not also setting `thinking:` here — adaptive thinking is already the
       // SDK's default for models that support it, and forcing it on would be
       // a real cost/latency change (extended thinking tokens), not just a
       // display change. This only asks for whatever the model already
       // produces to be streamed instead of dropped.
-      // Permission path, selected by PODPROMPT_PERM_HOOK (see PERM_HOOK_MODE):
-      //   off     - canUseTool only. The long-standing behaviour, and the
-      //             default, so nothing changes unless the flag is set.
-      //   observe - hook registered but returns NO decision, so canUseTool
-      //             still decides. Zero gating risk; answers "do hooks fire
-      //             on this build at all, and does agent_id arrive".
-      //   decide  - hook decides and canUseTool is withheld. The real
-      //             migration, to be enabled only once observe has shown the
-      //             hook fires and defers cleanly.
-      ...(PERM_HOOK_MODE !== "off"
-        ? { hooks: { PermissionRequest: [{ hooks: [makePermissionRequestHook(sessionId, state)] }] } }
+      // The hook is registered purely to learn WHICH sub-agent is asking:
+      // it fires alongside canUseTool carrying agent_id, which canUseTool's
+      // own options do not provide, and it never returns a decision.
+      ...(PERM_HOOK_ON
+        ? { hooks: { PermissionRequest: [{ hooks: [permissionAttributionHook] }] } }
         : {}),
       includePartialMessages: true,
       // Without this the SDK forwards only a sub-agent's tool_use/tool_result
@@ -944,9 +1025,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // present both in these live events and in the on-disk
     // subagents/agent-<id>.meta.json, which is what lets a live view and a
     // replayed view agree on which sub-agent they are looking at.
-    const childIdForToolUse = new Map(); // tool_use_id -> podprompt child session id
-    const childIdForTask = new Map();    // task_id      -> podprompt child session id
-    const childIdForAgent = new Map();   // agent_id     -> podprompt child session id
 
     // The sub-agent id families do not meet. task_started speaks task_id and
     // tool_use_id; the hooks speak agent_id; nothing live carries a pair of
@@ -1002,79 +1080,26 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // gating altogether, and registering it ALONGSIDE canUseTool may prompt
     // twice for one call. Both failure modes need a real CLI to rule out.
     //
-    // Runs for every permission ask, main-thread or sub-agent. The card is
-    // routed to the asking sub-agent's own child session when the agent_id is
-    // resolvable (see linkAgentToToolUse), which is where D4 says the
-    // authoritative card belongs; otherwise it stays on the parent, labelled
-    // with the sub-agent's type so it is at least honest about who is asking.
-    function makePermissionRequestHook(parentSessionId, state) {
-      return async function permissionRequestHook(input) {
-        const toolName = input?.tool_name || "tool";
-        const toolInput = input?.tool_input || {};
-        const agentId = input?.agent_id || null;
-        const agentType = input?.agent_type || null;
-
-        // The whole point of "observe": prove the hook fires on this build
-        // and show whether agent_id/agent_type arrive, WITHOUT taking the
-        // decision away from canUseTool. Returning an empty object is "no
-        // opinion", so the normal path still runs and the user still sees
-        // exactly one card.
+    // Attribution only. Fires alongside canUseTool (~2ms after it) for the
+    // same call, carrying the agent_id that canUseTool's own options do not.
+    // It deliberately returns {} — "no opinion" — because this hook is not
+    // and cannot be an authority: verified live that making it one by
+    // withholding canUseTool simply removes the client from the permission
+    // path. canUseTool picks the recorded hint up via awaitAgentHint.
+    async function permissionAttributionHook(input) {
+      const toolName = input?.tool_name || "tool";
+      const toolInput = input?.tool_input || {};
+      const agentId = input?.agent_id || null;
+      const agentType = input?.agent_type || null;
+      if (agentId) recordAgentHint(toolName, toolInput, agentId, agentType);
+      if (process.env.PODPROMPT_PERM_PROBE_LOG) {
         permProbe("hook-fired", {
-          mode: PERM_HOOK_MODE, toolName, agentId, agentType,
-          hasSuggestions: Array.isArray(input?.permission_suggestions) && input.permission_suggestions.length > 0,
+          toolName, agentId, agentType,
           resolvedChild: agentId ? (childIdForAgent.get(agentId) || null) : null,
-          // Which command this ask is actually for, so a sub-agent's ask can
-          // be told apart from the parent's by content rather than by
-          // guessing from timestamps.
-          cmd: typeof toolInput?.command === "string" ? toolInput.command.slice(0, 80) : null,
-          // Every key the CLI actually sent. The decisive question is whether
-          // agent_id is ABSENT from the payload (this build never sends it)
-          // or merely null — the type docs promise it "present only when the
-          // hook fires from within a subagent", and only the wire can say.
-          inputKeys: input && typeof input === "object" ? Object.keys(input).sort() : null,
-          // How many sub-agents this session believes are running right now.
-          // Non-zero while an ask arrives with no agent_id is the clearest
-          // possible statement that attribution is unavailable.
           liveChildren: childIdForTask.size,
         });
-        if (PERM_HOOK_MODE === "observe") return {};
-
-        if (toolName === "AskUserQuestion") {
-          const answer = await requestApproval(
-            childIdForAgent.get(agentId) || parentSessionId,
-            "question", toolName, toolInput);
-          // Same crafted deny as before: Claude reads the message as the
-          // real answer, and `allow` alone leaves the question unanswered.
-          return { hookSpecificOutput: { hookEventName: "PermissionRequest",
-            decision: { behavior: "deny", message: `The user answered: ${answer.text}` } } };
-        }
-
-        // Inherited down the tree, so a sub-agent of an auto-approved parent
-        // is covered without the user ticking anything per child.
-        if (autoApproveForSession?.(parentSessionId) || state.autoApprove) {
-          return { hookSpecificOutput: { hookEventName: "PermissionRequest",
-            decision: { behavior: "allow" } } };
-        }
-
-        const suggestions = Array.isArray(input?.permission_suggestions) ? input.permission_suggestions : null;
-        const target = (agentId && childIdForAgent.get(agentId)) || parentSessionId;
-        const decision = await requestApproval(target, "permission", toolName, toolInput, {
-          suggestions,
-          canAlwaysAllow: !!(suggestions && suggestions.length),
-          // Shown on the card when the ask could not be pinned to a child
-          // session, so "a sub-agent is asking" is still visible.
-          agentType: target === parentSessionId ? agentType : null,
-        });
-        if (decision?.allow) {
-          return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: {
-            behavior: "allow",
-            ...(decision.always && suggestions && suggestions.length
-              ? { updatedPermissions: suggestions } : {}),
-          } } };
-        }
-        return { hookSpecificOutput: { hookEventName: "PermissionRequest",
-          decision: { behavior: "deny", message: decision?.message || "Denied by user" } } };
-      };
+      }
+      return {};
     }
 
     function routeSubagentMessage(childId, msg) {

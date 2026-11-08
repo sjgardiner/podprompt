@@ -601,6 +601,19 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // captured and inspected by hand). Text is full, never truncated — the
   // viewer caps bubble display (scrollable 400px body) and lets the user
   // hide/collapse tool bubbles entirely.
+  // OpenCode's delegating tools. "task" is the built-in one; "agent" is
+  // accepted too so a rename or an alias does not silently fall back to a
+  // plain tool bubble.
+  const SUBAGENT_TOOL_NAMES = new Set(["task", "agent"]);
+
+  // The sub-agent's own description, for the Agent bubble's title. Falls
+  // back to the tool name rather than rendering an empty label.
+  function subAgentTitleFromPart(part) {
+    const input = part.state?.input || {};
+    const title = input.description || input.prompt || input.task || part.tool || "sub-agent";
+    return String(title).split("\n")[0].slice(0, 200);
+  }
+
   function summarizeToolPart(part) {
     const state = part.state || {};
     const input = state.input || {};
@@ -814,7 +827,16 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           } else if (status === "completed" || status === "error") {
             stopToolTickerFor(part.id);
             const msgModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
-            broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
+            // Delegating to a sub-agent is not the same kind of event as
+            // running a tool, and rendering it as one made the most
+            // structurally significant thing a turn can do look like a grep.
+            // Matches what the claude-code backend does with Task/Agent, so
+            // both backends produce the same bubble for the same act.
+            if (SUBAGENT_TOOL_NAMES.has(part.tool)) {
+              broadcast(sessionId, "agent", subAgentTitleFromPart(part), part.id, null, msgModel || null);
+            } else {
+              broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
+            }
             emittedIds.add(part.id);
           }
           return;

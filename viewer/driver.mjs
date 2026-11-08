@@ -72,6 +72,10 @@ import nodePath from "node:path";
 import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
+import {
+  createChains, BUDGET_PRESETS, DEFAULT_PRESET,
+  FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH,
+} from "./chains.mjs";
 
 function parseArgs(argv) {
   const args = {
@@ -591,6 +595,11 @@ function registerChildSession(childId, info) {
     description: info.description ?? prev.description ?? null,
     native: { ...(prev.native || {}), ...(info.native || {}) },
     createdAt: prev.createdAt || nowIso(),
+    // Written once, never rewritten — not even by promotion, which clears
+    // the parent edge. This is what the depth guard counts along, so if
+    // promotion could reset it, promote→delegate→promote would recurse
+    // unbounded with depth never climbing past one.
+    createdBy: prev.createdBy || info.createdBy || info.parent,
   };
   saveSessionRelations();
   // A brand-new sub-agent is exactly when the roster button should appear,
@@ -728,6 +737,61 @@ function subAgentsForParent(parentId) {
       startedAt: live.startedAt || null,
     };
   });
+}
+
+// ── Chains, budgets & pause ──────────────────────────────────────────────
+// The store itself lives in chains.mjs so it can be unit-tested without
+// starting a server or spawning `opencode serve`. This is the code where a
+// quiet logic error costs real money, so it is the code that most needs
+// tests that do not depend on a running system.
+const chains = createChains({
+  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-chains.json"),
+  onError: (e) => console.error("[driver] failed to write chains file:", e.message),
+});
+
+// ── Creation lineage ─────────────────────────────────────────────────────
+// Deliberately separate from parentOfSession/depthOfSession. The parent edge
+// describes what a session may INHERIT (privilege, cascade) and promotion
+// severs it on purpose. createdBy describes where a session CAME FROM, and
+// nothing severs that.
+//
+// Promotion changes what a session may inherit, not where it came from.
+function createdByOfSession(sessionId) {
+  const r = sessionRelations[sessionId];
+  if (!r) return null;
+  // Records written before createdBy existed: a parent-edge child was, by
+  // definition, created by its parent.
+  return r.createdBy || (r.rel === "parent" ? r.parent : null);
+}
+
+function creationDepthOfSession(sessionId) {
+  let depth = 0;
+  let cur = sessionId;
+  const seen = new Set([cur]);
+  while (true) {
+    const origin = createdByOfSession(cur);
+    if (!origin || seen.has(origin)) return depth;
+    seen.add(origin);
+    cur = origin;
+    depth += 1;
+    if (depth > 1000) return depth; // corrupt sidecar; do not hang
+  }
+}
+
+function creationDepthExceeded(parentSessionId) {
+  return creationDepthOfSession(parentSessionId) + 1 > MAX_CREATION_DEPTH;
+}
+
+// Per-TURN fan-out, tracked on the session's live state rather than the
+// chain: it bounds breadth at the moment of spawning, which is a different
+// question from how much a chain has left overall.
+function noteFanout(state) {
+  if (!state) return { ok: false, reason: "no-session" };
+  state.fanoutThisTurn = (state.fanoutThisTurn || 0) + 1;
+  if (state.fanoutThisTurn > FANOUT_CAP_PER_TURN) {
+    return { ok: false, reason: "fanout-cap", cap: FANOUT_CAP_PER_TURN };
+  }
+  return { ok: true, used: state.fanoutThisTurn, cap: FANOUT_CAP_PER_TURN };
 }
 
 // ── opencode serve process ownership + crash recovery ────────────────────
@@ -1203,6 +1267,9 @@ function forgetSessionRelations(ids) {
     subAgents.delete(id);
   }
   if (changed) saveSessionRelations();
+  // Per-session budget defaults are keyed by session id too, so they would
+  // otherwise outlive the sessions they describe.
+  chains.forgetSessions(ids);
 }
 
 function autoApproveForSession(sessionId) {
@@ -1317,16 +1384,46 @@ reportAbandonedApprovals();
 // own copy of the in-flight check, the host stamp and the broadcast order,
 // and the copies would drift. `source` rides through to the user bubble's
 // `origin` so a transcript can say who actually asked.
-function startTurn(sessionId, promptText, { source = "human", explicitCwd, backendId } = {}) {
+function startTurn(sessionId, promptText, {
+  source = "human", explicitCwd, backendId,
+  chainId = null, preset = null, custom = null,
+} = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
   if (state.turnInFlight) {
     return { ok: false, reason: "busy" };
   }
+  // Chain assignment lives here precisely BECAUSE this is the single entry
+  // point. Putting it in the /prompt handler would mean every later caller
+  // — a delegation, a peer delivery — needed its own copy, and the copies
+  // would drift apart exactly the way the in-flight check would have.
+  let chain;
+  if (source === "human") {
+    const fallback = chains.getSessionPreset(sessionId);
+    chain = chains.mint({
+      rootPrompt: promptText,
+      originSession: sessionId,
+      preset: preset || fallback.preset,
+      custom: preset ? custom : fallback.custom,
+    });
+    if (!chain) return { ok: false, reason: "invalid-budget" };
+  } else {
+    // Everything automatic must name the chain it belongs to. Minting one
+    // here instead would make "create a session and prompt it" a way to buy
+    // an unlimited fresh budget for the price of one tool call.
+    chain = chains.get(chainId);
+    if (!chain) return { ok: false, reason: "no-such-chain" };
+    const status = chains.status(chain);
+    if (status.state !== "active") {
+      return { ok: false, reason: status.reason, chainState: status.state, chainId: chain.id };
+    }
+  }
+  state.chainId = chain.id;
+  state.fanoutThisTurn = 0;
   // Deliberately not awaited: a turn runs for minutes and the caller (an
   // HTTP handler, a delegating tool) must not be held open for it.
   runTurn(sessionId, promptText, { source }).catch((e) =>
     console.error(`[driver] startTurn failed for session ${sessionId}:`, e.message));
-  return { ok: true };
+  return { ok: true, chainId: chain.id };
 }
 
 // Promotion detaches a sub-agent's RECORD, but on claude-code there is no
@@ -2086,6 +2183,101 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, autoApprove: enabled }));
+    return;
+  }
+
+  // ── Chains, budgets & pause ───────────────────────────────────────────
+  // NOTE (PD10): these routes are presently reachable unauthenticated by any
+  // agent with Bash, exactly like every other driver route. That is a
+  // pre-existing exposure, but these are the routes it matters most for,
+  // since they are the controls meant to restrain agents. Hardening (a
+  // browser-held token, `authenticate(request) -> principal`) is Phase 16.
+  if (req.method === "GET" && path === "/chains") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      chains: chains.list(),
+      globalPaused: chains.isGloballyPaused(),
+      globalPausedAt: chains.globalPausedAt(),
+      presets: Object.fromEntries(
+        Object.entries(BUDGET_PRESETS).map(([k, v]) => [k, { label: v.label, steps: v.steps, ms: v.ms }])),
+      defaultPreset: DEFAULT_PRESET,
+      fanoutCap: FANOUT_CAP_PER_TURN,
+      maxCreationDepth: MAX_CREATION_DEPTH,
+      sessionPreset: url.searchParams.get("session")
+        ? chains.getSessionPreset(url.searchParams.get("session"))
+        : null,
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/pause") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const paused = !!body.paused;
+    // Global pause is the breaker you reach for before you know which chain
+    // is at fault; per-chain is the one that stops a runaway without
+    // freezing unrelated overnight work. Both, from one route.
+    const result = body.chainId ? chains.setPaused(body.chainId, paused) : chains.setGlobalPaused(paused);
+    if (!result.ok) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: result.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      globalPaused: chains.isGloballyPaused(),
+      chain: body.chainId ? chains.summary(chains.get(body.chainId)) : null,
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/extend-chain") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const result = chains.extend(body.chainId, {
+      steps: Number(body.steps) || 0,
+      ms: Number(body.ms) || 0,
+    });
+    if (!result.ok) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: result.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, chain: chains.summary(result.chain) }));
+    return;
+  }
+
+  if (req.method === "POST" && path === "/budget-preset") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const result = chains.setSessionPreset(body.sessionId, body.preset, body.custom || null);
+    if (!result.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: result.reason }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, preset: result.preset, custom: result.custom }));
     return;
   }
 

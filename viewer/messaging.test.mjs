@@ -88,6 +88,30 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
     p.resolve("@explore-auth-flow-2").ok === true);
 }
 
+// ── provisional handles upgrade once a real title appears ───────────────
+{
+  const p = createPeers({ file: file("peers-provisional"), now });
+  // A session usually has no title until its first turn produces one.
+  const early = p.ensure("s1", { backend: "claude-code" });
+  eq("untitled session gets a fallback handle", early.handle, "session");
+  eq("and is marked provisional", early.provisional, true);
+
+  const later = p.ensure("s1", { title: "Refactor the parser" });
+  eq("provisional handle upgrades on first real title", later.handle, "refactor-the-parser");
+  eq("and stops being provisional", later.provisional, false);
+
+  p.ensure("s1", { title: "Something else" });
+  eq("but never upgrades twice", p.get("s1").handle, "refactor-the-parser");
+
+  // A handle the user chose must survive a title arriving later.
+  const q = createPeers({ file: file("peers-provisional2"), now });
+  q.ensure("s2", { backend: "opencode" });
+  q.setHandle("s2", "reviewer");
+  eq("user-chosen handle is not provisional", q.get("s2").provisional, false);
+  q.ensure("s2", { title: "Some Auto Title" });
+  eq("user-chosen handle survives a later title", q.get("s2").handle, "reviewer");
+}
+
 // ── peers survive a restart ──────────────────────────────────────────────
 {
   const f = file("peers-restart");

@@ -417,6 +417,14 @@ const backendHooks = {
   registerChild: registerChildSession,
   autoApproveForSession,
   updateSubAgent: upsertSubAgent,
+  // The messaging surface, handed to each backend so it can expose the SAME
+  // tools in whatever shape its runtime wants. The logic stays here; a
+  // backend only supplies identity it can vouch for.
+  messaging: {
+    message: (fromSessionId, args) => toolMessage(fromSessionId, args),
+    listPeers: (fromSessionId, opts) => toolListPeers(fromSessionId, opts),
+    describeReceipt,
+  },
 };
 const backends = {
   "claude-code": createClaudeCodeBackend(backendHooks),
@@ -839,6 +847,7 @@ function maybeDrainInbox(sessionId) {
     source: "peer",
     chainId: group[0].chainId,
   });
+  console.log(`[driver] drain -> ${sessionId}: ${group.length} msg(s), startTurn=${JSON.stringify(started)}`);
   if (!started.ok) {
     // Left queued on purpose. A refusal here is a transient condition (the
     // chain was paused between enqueue and drain, the session became busy),
@@ -935,6 +944,122 @@ function deliver(toAddr, text, { from, kind = "peer", chainId }) {
     remaining: spent.remaining,
     to,
   };
+}
+
+// ── Tool logic, shared by both backends ──────────────────────────────────
+// ONE implementation. Claude Code reaches these through an in-process SDK
+// MCP server built per turn; the OpenCode plugin reaches the same functions
+// over HTTP. Two thin shims, not two implementations — the alternative is
+// the drift this project keeps getting bitten by.
+function relationTo(fromSessionId, otherId) {
+  if (parentOfSession(otherId) === fromSessionId) return "child";
+  if (parentOfSession(fromSessionId) === otherId) return "parent";
+  return "none";
+}
+
+async function toolListPeers(fromSessionId, { search = null, limit = null, all = false } = {}) {
+  const { allSessions } = await gatherAllSessions(false);
+  // The caller needs a handle too, so its name is already correct in the
+  // provenance of anything it sends.
+  peers.ensure(fromSessionId, { backend: sessionIdToBackend.get(fromSessionId) || null });
+  const rows = [];
+  for (const s of allSessions) {
+    if (s.archived || s.unreachable) continue;
+    if (s.sessionId === fromSessionId) continue; // no self-addressing
+    const rec = peers.ensure(s.sessionId, {
+      title: s.customTitle || s.summary || s.firstPrompt || null,
+      backend: s.backend,
+    });
+    rows.push({
+      handle: `@${rec.handle}`,
+      realm: rec.realm,
+      backend: s.backend,
+      title: rec.title,
+      lastModified: s.lastModified || null,
+      messageable: rec.messageable !== false,
+      // Lets a model knowingly choose to queue rather than discover the
+      // target was busy only from a receipt.
+      state: s.inFlight ? "in-turn" : (s.pendingKind ? "blocked-on-approval" : "idle"),
+      relation: relationTo(fromSessionId, s.sessionId),
+      // Addressable, but marked: a sub-agent its parent is blocking on will
+      // queue your message behind that delegation, and what the parent
+      // receives is unaffected by it.
+      subAgent: isChildSession(s.sessionId),
+    });
+  }
+  // Most recently active first: a live container can easily hold dozens of
+  // sessions — the first real run of this returned 45 — and the handful
+  // worth talking to are almost always the recent ones.
+  rows.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+
+  const total = rows.length;
+  const needle = search ? String(search).toLowerCase() : null;
+  const matched = needle
+    ? rows.filter((r) => r.handle.toLowerCase().includes(needle)
+        || (r.title || "").toLowerCase().includes(needle))
+    : rows;
+
+  // PAGING, not truncation. The default keeps the common call cheap, but
+  // every peer stays reachable through `search` or `all` — and the result
+  // always says how many were held back. A model that cannot see a peer
+  // cannot decide to talk to it, and would have no idea it was missing.
+  const cap = all ? matched.length : Math.max(1, Math.min(limit || PEER_LIST_DEFAULT, PEER_LIST_MAX));
+  const shown = matched.slice(0, cap);
+  return {
+    peers: shown,
+    shown: shown.length,
+    matched: matched.length,
+    total,
+    truncated: shown.length < matched.length,
+    search: search || null,
+  };
+}
+
+const PEER_LIST_DEFAULT = 20;
+const PEER_LIST_MAX = 200;
+
+function toolMessage(fromSessionId, { to, text }) {
+  const state = sessions.get(fromSessionId);
+  // Everything automatic belongs to the chain the caller is running under.
+  // No chain means no budget to spend, which means this is not a turn that
+  // should be able to cause more work.
+  const chainId = state?.chainId;
+  if (!chainId) return { ok: false, reason: "no-chain" };
+  // Breadth, checked before the step is spent: a step budget bounds depth
+  // but not fan-out, and fan-out is where the expensive failure lives.
+  const fan = noteFanout(state);
+  if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
+  peers.ensure(fromSessionId, { backend: sessionIdToBackend.get(fromSessionId) || null });
+  return deliver(to, text, {
+    from: localPrincipal(fromSessionId),
+    kind: "peer",
+    chainId,
+  });
+}
+
+// What the model actually reads back. Every outcome is stated plainly,
+// including the refusals: a receipt a model cannot interpret gets retried.
+function describeReceipt(receipt, to) {
+  if (receipt.ok) {
+    const where = receipt.delivered ? "delivered now" : "queued (recipient is busy)";
+    const left = receipt.remaining === null ? "no step limit" : `${receipt.remaining} steps left`;
+    return `Message ${where} to ${to}. ${left}.`;
+  }
+  const why = {
+    "unknown-handle": `No peer called ${to} in this realm. Use list_peers to see who exists.`,
+    "unknown-realm": `No such realm in ${to}. Only local peers are reachable right now.`,
+    "bad-address": `"${to}" is not a valid address. Use a handle like @researcher.`,
+    "self-message": "A session cannot message itself.",
+    "not-messageable": `${to} has messaging turned off.`,
+    "no-chain": "This turn has no budget to spend, so it cannot cause other sessions to run.",
+    "fanout-cap": `Too many messages and delegations in one turn (limit ${receipt.cap}).`,
+    "no-such-chain": "The work this turn belongs to no longer exists.",
+    steps: `Out of steps. The message is parked; the user can extend the budget to release it. Do not retry.`,
+    deadline: `Past the deadline for this work. The message is parked; the user can extend it to release it. Do not retry.`,
+    global: `Automatic delivery is paused. The message is parked and will be delivered when the user resumes. Do not retry.`,
+    chain: `This piece of work is paused. The message is parked until the user resumes it. Do not retry.`,
+  }[receipt.reason];
+  return why || `Message not delivered (${receipt.reason}).`;
 }
 
 // ── Creation lineage ─────────────────────────────────────────────────────
@@ -2493,9 +2618,34 @@ const server = createServer(async (req, res) => {
   }
 
   // ── Peers & inbox ─────────────────────────────────────────────────────
+  // Two callers, deliberately one implementation. Without `from` this is the
+  // raw registry, which is what the UI wants. With `from` it is exactly what
+  // the list_peers tool returns — because the OpenCode plugin calls this
+  // route for ITS list_peers, and if the two transports disagreed about
+  // paging the two backends would quietly behave differently.
+  //
+  // The default cap lives in toolListPeers and nowhere else. A shim that
+  // re-stated it would be a second copy to drift.
   if (req.method === "GET" && path === "/peers") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ realm: LOCAL_REALM, peers: peers.list() }));
+    const from = url.searchParams.get("from");
+    if (!from) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ realm: LOCAL_REALM, peers: peers.list(), total: peers.list().length }));
+      return;
+    }
+    const limitParam = url.searchParams.get("limit");
+    try {
+      const result = await toolListPeers(from, {
+        search: url.searchParams.get("search") || null,
+        limit: limitParam ? Number(limitParam) : null,
+        all: url.searchParams.get("all") === "1",
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ realm: LOCAL_REALM, ...result }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 

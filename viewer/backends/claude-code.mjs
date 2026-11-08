@@ -24,9 +24,11 @@ import os from "node:os";
 import {
   query, listSessions, getSessionMessages, getSubagentMessages,
   tagSession, renameSession, deleteSession,
+  createSdkMcpServer, tool,
 } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
-export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent }) {
+export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
   // drains the stream tracker's announced ids per completed assistant
@@ -1027,8 +1029,82 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const abortController = new AbortController();
     state.abortController = abortController;
 
+    // Built PER TURN, closing over this turn's sessionId. That closure IS
+    // the identity guarantee: the model passes only its declared arguments,
+    // and who is calling arrives alongside, out of its reach. Nothing here
+    // accepts a caller-supplied "from" — if a model could assert who it is,
+    // every trust rule downstream would be decorative.
+    const messagingServer = messaging ? createSdkMcpServer({
+      name: "podprompt",
+      version: "1.0.0",
+      instructions:
+        "Tools for talking to other PodPrompt sessions running alongside this one. "
+        + "Use list_peers first to see who exists and whether they are busy.",
+      tools: [
+        tool(
+          "list_peers",
+          "List the other PodPrompt sessions you can send messages to, with their "
+          + "handle, backend, whether they are idle or busy, and how they relate to you. "
+          + "Shows the most recently active first; use search or all to reach the rest.",
+          {
+            search: z.string().optional()
+              .describe("Only peers whose handle or title contains this text."),
+            all: z.boolean().optional()
+              .describe("Return every addressable peer instead of just the most recent."),
+            limit: z.number().optional()
+              .describe("How many to return (default 20)."),
+          },
+          async (args) => {
+            try {
+              const res = await messaging.listPeers(sessionId, args || {});
+              // Always say what was held back. Silently showing a subset
+              // would leave a model unable to tell that a peer it needs
+              // exists at all.
+              const note = res.truncated
+                ? `\n\nShowing ${res.shown} of ${res.matched}`
+                  + (res.search ? ` matching "${res.search}"` : ` (${res.total} total`)
+                  + `${res.search ? "" : ")"}. `
+                  + `Call again with all=true, a higher limit, or a search term to see the rest.`
+                : (res.search ? `\n\n${res.matched} of ${res.total} peers match "${res.search}".` : "");
+              return {
+                content: [{
+                  type: "text",
+                  text: res.peers.length
+                    ? JSON.stringify(res.peers, null, 2) + note
+                    : (res.search
+                        ? `No peer matches "${res.search}" (${res.total} sessions are addressable).`
+                        : "No other sessions are currently addressable."),
+                }],
+              };
+            } catch (e) {
+              return { content: [{ type: "text", text: `Could not list peers: ${e.message}` }] };
+            }
+          },
+        ),
+        tool(
+          "message",
+          "Send a message to another PodPrompt session. It is delivered when that "
+          + "session is idle, and it will reply by messaging you back — this does not "
+          + "block and does not return their answer.",
+          {
+            to: z.string().describe('Peer handle, e.g. "@researcher". Get these from list_peers.'),
+            text: z.string().describe("What to say. Include enough context to act on alone."),
+          },
+          async (args) => {
+            try {
+              const receipt = messaging.message(sessionId, args);
+              return { content: [{ type: "text", text: messaging.describeReceipt(receipt, args.to) }] };
+            } catch (e) {
+              return { content: [{ type: "text", text: `Message failed: ${e.message}` }] };
+            }
+          },
+        ),
+      ],
+    }) : null;
+
     const baseOpts = {
       cwd: state.cwd,
+      ...(messagingServer ? { mcpServers: { podprompt: messagingServer } } : {}),
       permissionMode: "default",
       maxTurns: 50,
       abortController,

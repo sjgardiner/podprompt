@@ -90,6 +90,18 @@ export function createPeers({ file, onError = () => {}, now = () => Date.now() }
       let changed = false;
       if (backend && prev.backend !== backend) { prev.backend = backend; changed = true; }
       if (title && prev.title !== title) { prev.title = title; changed = true; }
+      // A session usually has no title until its first turn has produced
+      // one, and a peer record minted before that gets the fallback slug —
+      // "@session-4", which tells a recipient nothing about who wrote to
+      // them. Such a handle is PROVISIONAL and is upgraded once, the first
+      // time a real title appears. A handle derived from a real title, or
+      // one the user chose, is never touched: those are the ones a model
+      // may already be holding.
+      if (prev.provisional && title) {
+        prev.handle = uniqueHandle(slugifyHandle(title), sessionId);
+        prev.provisional = false;
+        changed = true;
+      }
       if (changed) save();
       return prev;
     }
@@ -100,6 +112,7 @@ export function createPeers({ file, onError = () => {}, now = () => Date.now() }
       title: title || null,
       backend: backend || null,
       messageable: true,
+      provisional: !title,
       createdAt: now(),
     };
     store.peers[sessionId] = rec;
@@ -142,6 +155,9 @@ export function createPeers({ file, onError = () => {}, now = () => Date.now() }
     if (!slug) return { ok: false, reason: "bad-handle" };
     if (handleTaken(slug, sessionId)) return { ok: false, reason: "handle-taken" };
     rec.handle = slug;
+    // A handle the user chose is never provisional, even if the session
+    // still has no title.
+    rec.provisional = false;
     save();
     return { ok: true, peer: rec };
   }

@@ -405,6 +405,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         } catch (e) {
           console.error("[claude-code] model warm-up interrupt failed:", e.message);
         }
+        // interrupt() ends the TURN; close() ends the PROCESS. This probe's
+        // prompt generator never completes by design, so without this its
+        // child lives until the SDK's 10-minute ceiling — which is why two
+        // of them were present before any prompt had been sent.
+        try { q.close(); } catch { /* already closed */ }
       }
     })().catch((e) => {
       // Don't permanently poison the cache on one bad attempt: reset the
@@ -487,6 +492,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         } catch (e) {
           console.error("[claude-code] plan-usage poll interrupt failed:", e.message);
         }
+        // Same as the model warm-up above: this probe's generator never
+        // completes, so interrupt() alone leaves the child running.
+        try { q.close(); } catch { /* already closed */ }
       }
       return planUsageCache;
     })().catch((e) => {
@@ -1528,6 +1536,34 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // retry builds a second query, which replaces this — always the one
       // actually streaming.
       state.liveQuery = q;
+      // EVERY query is closed by the function that created it. That
+      // one-to-one pairing is why this lives here and not in the outer
+      // turn's finally: the bootstrap retry builds a SECOND query and
+      // overwrites state.liveQuery, so closing the survivor out there would
+      // abandon the first one.
+      //
+      // Draining the generator is NOT enough, and neither is q.return() nor
+      // aborting — both were measured and both left the child alive. The
+      // SDK defers closing the child's stdin whenever hasBidirectionalNeeds()
+      // is true, which it is for us twice over (canUseTool is set, and so is
+      // an SDK MCP server). It then only closes on an internal
+      // runEndCeilingMs timer — 600000 ms, not configurable and not exposed
+      // as an option or env var. So the children are not immortal; they sit
+      // on a ten-minute fuse that any normal turn rate outruns. Measured: 81
+      // of them, ~7 GB, in 3.4 hours.
+      //
+      // close() is the documented escape (present since 0.2.15): it ends
+      // stdin, then SIGTERM after 2s, then SIGKILL 5s later.
+      try {
+        await consumeMessages(q);
+      } finally {
+        // Synchronous and idempotent. Guarded anyway so a cleanup failure
+        // can never mask the turn's own outcome.
+        try { q.close(); } catch { /* already closed */ }
+      }
+    }
+
+    async function consumeMessages(q) {
       const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
         if (msg.type === "system" && msg.subtype === "init") {

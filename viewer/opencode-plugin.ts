@@ -119,11 +119,12 @@ export default (async () => {
 
       delegate_session: tool({
         description:
-          "Create a NEW PodPrompt session on a chosen backend and give it a piece of work. "
-          + "Use this to hand work to a different BACKEND or model than your own — it is "
-          + "not the way to spawn an ordinary sub-agent within your own backend. "
-          + "By default it waits and returns the result; set await=false to be told "
-          + "later by message instead, which is what you want when fanning out.",
+          "Create a NEW PodPrompt session on a chosen backend and give it work. PREFER THIS "
+          + "over spawning an ordinary sub-agent for anything substantial: it can run on a "
+          + "different backend or model than yours, and by default it is asynchronous — your "
+          + "turn ends right away and the result arrives later as a message, so the user is "
+          + "not left waiting. Use a plain sub-agent (or await=true) only when the work is "
+          + "quick and you need its answer inside this turn.",
         args: {
           backend: tool.schema.enum(["claude-code", "opencode"])
             .describe("Which backend the new session should run on."),
@@ -132,7 +133,9 @@ export default (async () => {
           title: tool.schema.string().optional()
             .describe("Short label for the new session."),
           await: tool.schema.boolean().optional()
-            .describe("Wait for the result (default true). false returns immediately."),
+            .describe("Default false: returns immediately and the result arrives later as a"
+              + " message. Set true ONLY for quick work whose answer you need inside this turn"
+              + " — it holds your turn open until the new session finishes."),
         },
         async execute(args, context) {
           try {
@@ -153,7 +156,7 @@ export default (async () => {
                 backend: args.backend,
                 prompt: args.prompt,
                 title: args.title || null,
-                awaitResult: args.await !== false,
+                awaitResult: args.await === true,
               }),
             })
             const r = (body || {}) as any

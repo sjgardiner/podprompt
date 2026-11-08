@@ -1225,7 +1225,14 @@ function parentBackendId(sessionId) {
 // Always CREATES — addressing an existing session is `message`. Keeping that
 // boundary sharp is what stops the parent-edge semantics from going
 // ambiguous, since a parent edge grants privilege and a peer edge does not.
-async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult = true, model = null }) {
+// awaitResult defaults to FALSE — amends PD5, which chose blocking because it
+// matched native Task and the models are trained on that shape. Two things
+// changed the balance: the parent's turn ending immediately means the user is
+// not held hostage to a child's runtime, and a blocking delegate's waiter is
+// IN-MEMORY, so a driver restart loses the result entirely while the async
+// path returns it through the durable inbox. Async is the more robust default,
+// not merely the more parallel one.
+async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult = false, model = null }) {
   const state = sessions.get(fromSessionId);
   const chainId = state?.chainId;
   if (!chainId) return { ok: false, reason: "no-chain" };
@@ -3217,7 +3224,7 @@ const server = createServer(async (req, res) => {
         prompt: body.prompt || "",
         title: body.title || null,
         model: body.model || null,
-        awaitResult: body.awaitResult !== false,
+        awaitResult: body.awaitResult === true,
       });
       res.writeHead(receipt.ok ? 200 : 409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ...receipt, describe: describeReceipt(receipt, body.backend) }));

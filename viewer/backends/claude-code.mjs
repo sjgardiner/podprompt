@@ -37,22 +37,43 @@ import { z } from "zod";
 //
 // Naming alone did not fix that. This does, because it names our tools
 // explicitly, which is enough for the model to go and find them.
-const PODPROMPT_SYSTEM_PROMPT =
-  "PodPrompt environment: this session runs inside PodPrompt, alongside the other PodPrompt"
-  + " sessions listed in the user's PodPrompt window. Those sessions are separate from any"
-  + " sub-agents you spawn, and separate from any agent-messaging tools your harness"
-  + " provides for its own sessions.\n\n"
-  + "When the user refers to another session or chat, mentions an @handle, or asks you to"
-  + " message, ask, tell or delegate to one, use the PodPrompt tools:"
-  + " mcp__podprompt__list_sessions to find the @handle,"
-  + " mcp__podprompt__message_session to send to it, and"
-  + " mcp__podprompt__delegate_session to create a new session on another backend.\n\n"
-  // Answers "must it look up every time?" — no. Re-listing on every message
-  // would burn a round trip per send. Caching is safe because a stale handle
+const PODPROMPT_SYSTEM_PROMPT = [
+  "PodPrompt environment.",
+  "",
+  "This session runs inside PodPrompt, which shows the user a list of chat sessions."
+  + " Other sessions are reachable from here and are addressed by @handle.",
+  "",
+  "Three tools act on PodPrompt sessions:",
+  "  mcp__podprompt__list_sessions    — find another session's @handle",
+  "  mcp__podprompt__message_session  — send a message to one",
+  "  mcp__podprompt__delegate_session — create a NEW session on a chosen backend"
+  + " (claude-code or opencode) and give it work",
+  "",
+  // The steer. Deliberately framed by WHEN each is right rather than by what
+  // each is not: an earlier draft said "a PodPrompt session is not a
+  // sub-agent", which breaks on the very natural request "spawn a DeepSeek
+  // sub-agent using OpenCode" — there the user says sub-agent and means
+  // exactly this tool.
+  "Prefer delegate_session for work you would otherwise hand to a sub-agent. It can run on a"
+  + " different backend or model than yours, and it is asynchronous by default: your turn ends"
+  + " immediately and the result arrives later as a message, so neither you nor the user waits"
+  + " on it. Spawn an ordinary sub-agent with your usual tools instead when the work is quick"
+  + " and you need its answer within this turn; delegate_session also accepts await=true for"
+  + " that case. If the user says \"sub-agent\" while naming another backend or model, they"
+  + " mean delegate_session.",
+  "",
+  "When the user refers to another session or chat, mentions an @handle, or asks you to"
+  + " message, ask or tell one, use list_sessions to find it and message_session to reach it."
+  + " If your harness provides its own tools for listing or messaging ITS agents, those are"
+  + " unrelated to PodPrompt sessions and are not a substitute for these.",
+  "",
+  // Answers "must it look up every time?" — no. Re-listing per send would
+  // cost a round trip each time, and caching is safe because a stale handle
   // fails loudly and actionably: delivery returns unknown-handle, which says
   // to list again.
-  + "You only need to look a handle up once per conversation. Reuse handles you have already"
-  + " looked up; if one stops resolving, list again to get the current set.";
+  "You only need to look a handle up once per conversation. Reuse handles you have already"
+  + " looked up; if one stops resolving, list again to get the current set.",
+].join("\n");
 
 export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
@@ -1154,11 +1175,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         ),
         tool(
           "delegate_session",
-          "Create a NEW PodPrompt session on a chosen backend and give it a piece of work. "
-          + "Use this to hand work to a different BACKEND or model than your own — it is "
-          + "not the way to spawn an ordinary sub-agent within your own backend. "
-          + "By default it waits and returns the result; set await=false to be told "
-          + "later by message instead, which is what you want when fanning out.",
+          "Create a NEW PodPrompt session on a chosen backend and give it work. PREFER THIS "
+          + "over spawning an ordinary sub-agent for anything substantial: it can run on a "
+          + "different backend or model than yours, and by default it is asynchronous — your "
+          + "turn ends right away and the result arrives later as a message, so the user is "
+          + "not left waiting. Use a plain sub-agent (or await=true) only when the work is "
+          + "quick and you need its answer inside this turn.",
           {
             backend: z.enum(["claude-code", "opencode"])
               .describe("Which backend the new session should run on."),
@@ -1167,7 +1189,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             title: z.string().optional()
               .describe("Short label for the new session."),
             await: z.boolean().optional()
-              .describe("Wait for the result (default true). false returns immediately."),
+              .describe("Default false: returns immediately and the result arrives later as a "
+                + "message. Set true ONLY for quick work whose answer you need inside this "
+                + "turn — it holds your turn open until the new session finishes."),
           },
           async (args) => {
             try {
@@ -1175,7 +1199,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                 backend: args.backend,
                 prompt: args.prompt,
                 title: args.title || null,
-                awaitResult: args.await !== false,
+                awaitResult: args.await === true,
               });
               if (!receipt.ok) {
                 return { content: [{ type: "text", text: messaging.describeReceipt(receipt, args.backend) }] };

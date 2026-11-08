@@ -582,6 +582,10 @@ function registerChildSession(childId, info) {
     createdAt: prev.createdAt || nowIso(),
   };
   saveSessionRelations();
+  // A brand-new sub-agent is exactly when the roster button should appear,
+  // and registration can happen before any status update would have nudged
+  // the browser.
+  if (!prev.parent) broadcastStatus(info.parent, { type: "sub_agents_changed" });
 }
 
 // A promoted sub-agent reports NO parent: it has been detached deliberately,
@@ -662,6 +666,14 @@ function upsertSubAgent(childId, patch) {
   const prev = subAgents.get(childId) || {};
   const next = { ...prev, ...patch, agentId: childId, updatedAt: Date.now() };
   subAgents.set(childId, next);
+  // Tell the parent's browser that its roster changed. Without this the
+  // viewer only re-read /sub-agents when something ELSE happened to fire —
+  // a tool_progress, a turn ending — so a sub-agent could run for a while
+  // with no roster button at all, and a reload was the reliable way to see
+  // it. Level-triggered on purpose: the payload says "go look", not what
+  // changed, so a missed event cannot leave the roster stale.
+  const parentId = parentOfSession(childId);
+  if (parentId) broadcastStatus(parentId, { type: "sub_agents_changed" });
   return next;
 }
 
@@ -1513,6 +1525,37 @@ const server = createServer(async (req, res) => {
     subAgents.delete(childId);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, sessionId: childId, backend: rel.backend || null }));
+    return;
+  }
+
+  // Forget a session's recorded sub-agents. The relation index outlives the
+  // process by design (a sub-agent's transcript is still on disk), but that
+  // also means a session accumulates every sub-agent it has ever spawned,
+  // and there was no way to clear that short of editing the sidecar by hand
+  // and restarting — the in-memory copy would otherwise just rewrite it.
+  // Only removes rows for sub-agents that are NOT running, so this cannot be
+  // used to lose track of live work.
+  if (req.method === "POST" && path === "/forget-sub-agents") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const parentId = body.sessionId;
+    if (!parentId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"sessionId required"}');
+      return;
+    }
+    const all = descendantsOfSession(parentId);
+    const running = all.filter((id) => isSubAgentRunning(id));
+    const removable = all.filter((id) => !isSubAgentRunning(id));
+    forgetSessionRelations(removable);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, forgotten: removable.length, keptRunning: running.length }));
     return;
   }
 

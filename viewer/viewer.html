@@ -2535,7 +2535,7 @@ function connect() {
     }
     // A sub-agent's own progress is reported on the parent's stream, so the
     // roster can stay current without polling.
-    if (s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
+    if (s.type === 'sub_agents_changed' || s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
       refreshSubAgents();

@@ -51,6 +51,22 @@ async function driverFetch(path: string, init?: RequestInit) {
   return { status: res.status, body }
 }
 
+// Fetched once from the driver rather than duplicated here. Only the tool
+// names differ between backends and the driver parameterises those, so
+// there is one paragraph to maintain instead of two that drift.
+let cachedSystemPrompt: string | null = null
+async function podpromptSystemPrompt(): Promise<string | null> {
+  if (cachedSystemPrompt !== null) return cachedSystemPrompt
+  try {
+    const { body } = await driverFetch("/system-prompt")
+    cachedSystemPrompt = typeof body?.systemPrompt === "string" ? body.systemPrompt : ""
+  } catch {
+    cachedSystemPrompt = "" // driver not up yet; try again next turn
+    return null
+  }
+  return cachedSystemPrompt || null
+}
+
 export default (async () => {
   // Inert unless driver.mjs spawned this `opencode serve`. The plugin lives
   // in OpenCode's global plugin directory because that is the only location
@@ -66,6 +82,21 @@ export default (async () => {
   if (!process.env.PODPROMPT_DRIVER_URL) return {}
 
   return {
+    // OpenCode's tools are always visible, so unlike Claude Code it does not
+    // NEED this to find them. It gets the same text anyway: the
+    // delegate_session steer (prefer it over a plain sub-agent, async by
+    // default) is advice both backends should share, and symmetry here means
+    // one less place for the two to diverge.
+    //
+    // Appends rather than replaces — `system` is an array OpenCode builds up,
+    // so pushing leaves its own prompt untouched.
+    async "experimental.chat.system.transform"(_input, output) {
+      const text = await podpromptSystemPrompt()
+      if (text && !output.system.some((s) => s.includes("PodPrompt environment."))) {
+        output.system.push(text)
+      }
+    },
+
     tool: {
       list_sessions: tool({
         description:

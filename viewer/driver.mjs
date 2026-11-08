@@ -432,6 +432,7 @@ const backendHooks = {
     delegate: (fromSessionId, args) => toolDelegate(fromSessionId, args),
     describeReceipt,
     backendIds: () => Object.keys(backends),
+    systemPrompt: () => messagingSystemPrompt({ prefix: "mcp__podprompt__" }),
   },
 };
 const backends = {
@@ -1215,6 +1216,58 @@ function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false })
     kind,
     chainId,
   });
+}
+
+// The steer, owned here so both backends say the same thing. Only the tool
+// NAMES differ between them — Claude Code sees mcp__podprompt__ prefixes,
+// OpenCode sees bare names — so the prefix is a parameter rather than an
+// excuse to keep two copies of the paragraph.
+//
+// Why it exists at all: Claude Code ships always-present SendMessage and
+// ListAgents addressing the HARNESS's agents, and MCP tools sit behind tool
+// search, so without this the model never saw ours to choose them. OpenCode
+// has no such competitor and its tools are always visible, but it gets the
+// same text for symmetry and for the delegate_session steer.
+function messagingSystemPrompt({ prefix = "" } = {}) {
+  const t = (name) => `${prefix}${name}`;
+  return [
+    "PodPrompt environment.",
+    "",
+    "This session runs inside PodPrompt, which shows the user a list of chat sessions."
+    + " Other sessions are reachable from here and are addressed by @handle.",
+    "",
+    "Three tools act on PodPrompt sessions:",
+    `  ${t("list_sessions")}    — find another session's @handle`,
+    `  ${t("message_session")}  — send a message to one`,
+    `  ${t("delegate_session")} — create a NEW session on a chosen backend`
+    + " (claude-code or opencode) and give it work",
+    "",
+    // Framed by WHEN each route is right, never by what each is not. An
+    // earlier draft said "a PodPrompt session is not a sub-agent", which
+    // breaks on the entirely natural "spawn a DeepSeek sub-agent using
+    // OpenCode" — there the user says sub-agent and means this tool.
+    `Prefer ${t("delegate_session")} for work you would otherwise hand to a sub-agent. It can`
+    + " run on a different backend or model than yours, and it is asynchronous by default:"
+    + " your turn ends immediately and the result arrives later as a message, so neither you"
+    + " nor the user waits on it. Spawn an ordinary sub-agent with your usual tools instead"
+    + " when the work is quick and you need its answer within this turn;"
+    + ` ${t("delegate_session")} also accepts await=true for that case. If the user says`
+    + ' "sub-agent" while naming another backend or model, they mean'
+    + ` ${t("delegate_session")}.`,
+    "",
+    "When the user refers to another session or chat, mentions an @handle, or asks you to"
+    + ` message, ask or tell one, use ${t("list_sessions")} to find it and`
+    + ` ${t("message_session")} to reach it. If your harness provides its own tools for`
+    + " listing or messaging ITS agents, those are unrelated to PodPrompt sessions and are"
+    + " not a substitute for these.",
+    "",
+    // Answers "must it look up every time?" — no. Re-listing per send would
+    // cost a round trip each time, and caching is safe because a stale
+    // handle fails loudly: delivery returns unknown-handle, which says to
+    // list again.
+    "You only need to look a handle up once per conversation. Reuse handles you have already"
+    + " looked up; if one stops resolving, list again to get the current set.",
+  ].join("\n");
 }
 
 function parentBackendId(sessionId) {
@@ -3293,6 +3346,13 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, chainId: started.chainId }));
+    return;
+  }
+
+  // The OpenCode plugin fetches this rather than carrying its own copy.
+  if (req.method === "GET" && path === "/system-prompt") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ systemPrompt: messagingSystemPrompt({ prefix: "" }) }));
     return;
   }
 

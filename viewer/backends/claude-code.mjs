@@ -37,44 +37,6 @@ import { z } from "zod";
 //
 // Naming alone did not fix that. This does, because it names our tools
 // explicitly, which is enough for the model to go and find them.
-const PODPROMPT_SYSTEM_PROMPT = [
-  "PodPrompt environment.",
-  "",
-  "This session runs inside PodPrompt, which shows the user a list of chat sessions."
-  + " Other sessions are reachable from here and are addressed by @handle.",
-  "",
-  "Three tools act on PodPrompt sessions:",
-  "  mcp__podprompt__list_sessions    — find another session's @handle",
-  "  mcp__podprompt__message_session  — send a message to one",
-  "  mcp__podprompt__delegate_session — create a NEW session on a chosen backend"
-  + " (claude-code or opencode) and give it work",
-  "",
-  // The steer. Deliberately framed by WHEN each is right rather than by what
-  // each is not: an earlier draft said "a PodPrompt session is not a
-  // sub-agent", which breaks on the very natural request "spawn a DeepSeek
-  // sub-agent using OpenCode" — there the user says sub-agent and means
-  // exactly this tool.
-  "Prefer delegate_session for work you would otherwise hand to a sub-agent. It can run on a"
-  + " different backend or model than yours, and it is asynchronous by default: your turn ends"
-  + " immediately and the result arrives later as a message, so neither you nor the user waits"
-  + " on it. Spawn an ordinary sub-agent with your usual tools instead when the work is quick"
-  + " and you need its answer within this turn; delegate_session also accepts await=true for"
-  + " that case. If the user says \"sub-agent\" while naming another backend or model, they"
-  + " mean delegate_session.",
-  "",
-  "When the user refers to another session or chat, mentions an @handle, or asks you to"
-  + " message, ask or tell one, use list_sessions to find it and message_session to reach it."
-  + " If your harness provides its own tools for listing or messaging ITS agents, those are"
-  + " unrelated to PodPrompt sessions and are not a substitute for these.",
-  "",
-  // Answers "must it look up every time?" — no. Re-listing per send would
-  // cost a round trip each time, and caching is safe because a stale handle
-  // fails loudly and actionably: delivery returns unknown-handle, which says
-  // to list again.
-  "You only need to look a handle up once per conversation. Reuse handles you have already"
-  + " looked up; if one stops resolving, list again to get the current set.",
-].join("\n");
-
 export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
@@ -1245,7 +1207,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // bare directive: a probe model, shown an imperative version, stopped
       // to flag it as a suspicious injected instruction. Sounding like
       // product configuration is not cosmetic here.
-      ...(messagingServer ? { systemPrompt: PODPROMPT_SYSTEM_PROMPT } : {}),
+      ...(messagingServer && messaging.systemPrompt
+        ? { systemPrompt: messaging.systemPrompt() } : {}),
       ...(messagingServer ? { mcpServers: { podprompt: messagingServer } } : {}),
       permissionMode: "default",
       maxTurns: 50,

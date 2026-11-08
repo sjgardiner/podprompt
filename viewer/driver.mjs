@@ -267,6 +267,14 @@ function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
       askedAt: nowIso(),
     });
     persistPendingApprovals();
+    // Recorded on the sub-agent's roster entry so its row and its Agent
+    // bubble can say "waiting" rather than "running" — those are different
+    // states, and only one of them resolves without you. The approval's own
+    // id rides along so a link can jump straight to that card rather than
+    // just to the session containing it.
+    if (isChildSession(sessionId)) {
+      upsertSubAgent(sessionId, { awaiting: kind, awaitingId: id });
+    }
     // A turn parked on a human is NOT a turn that is working, and the
     // browser has had no way to tell the two apart — both looked like
     // turnInFlight, so the UI spun a "thinking" indicator at a session that
@@ -381,6 +389,9 @@ function expirePendingApprovals(sessionId) {
   }
   if (expired) {
     persistPendingApprovals();
+    if (isChildSession(sessionId)) {
+      upsertSubAgent(sessionId, { awaiting: null, awaitingId: null });
+    }
     // Nothing is waiting on the user here any more, whatever the UI last
     // heard. Sent unconditionally rather than only when a card was visible,
     // so a stale "waiting on you" indicator can't outlive the turn.
@@ -709,6 +720,10 @@ function subAgentsForParent(parentId) {
       depth: depthOfSession(childId),
       status: live.status || "completed", // nothing live on this process ⇒ it is not running
       lastTool: live.lastTool || null,
+      // Set while this sub-agent is blocked on a human. awaitingId is the
+      // approval card's own message id, so a link can scroll to it.
+      awaiting: live.awaiting || null,
+      awaitingId: live.awaitingId || null,
       usage: live.usage || null,
       startedAt: live.startedAt || null,
     };
@@ -1596,6 +1611,16 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"not a promotable sub-agent"}');
       return;
     }
+    // Not while it is still working. Promotion severs the parent link, so a
+    // running sub-agent promoted mid-flight drops out of the parent's abort
+    // cascade and its roster — the parent could no longer stop it, and the
+    // work would carry on somewhere nobody is watching. The same reasoning
+    // as refusing to Forget a running sub-agent.
+    if (isSubAgentRunning(childId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "stop this sub-agent before promoting it", reason: "still-running" }));
+      return;
+    }
     sessionRelations[childId] = { ...rel, promoted: true, promotedAt: nowIso() };
     saveSessionRelations();
     subAgents.delete(childId);
@@ -2236,6 +2261,9 @@ const server = createServer(async (req, res) => {
     }
     pendingApprovals.delete(body.id);
     persistPendingApprovals();
+    if (isChildSession(pending.sessionId)) {
+      upsertSubAgent(pending.sessionId, { awaiting: null, awaitingId: null });
+    }
     // Clear the parked-on-a-human state as soon as this session has nothing
     // else outstanding. Checked rather than assumed because a turn can have
     // more than one ask open at a time.

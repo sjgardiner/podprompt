@@ -308,7 +308,7 @@
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin: 0 auto 10px; max-width: var(--content-width, 860px);
     padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg-raised, #1e2330); font-size: 13px;
+    background: var(--surface); font-size: 13px;
   }
   #subagent-banner .sa-label { color: var(--muted); }
   #subagent-banner .sa-spacer { flex: 1; }
@@ -320,24 +320,27 @@
     display: none; position: absolute; right: 10px; top: 44px; z-index: 40;
     width: 340px; max-height: 60vh; overflow-y: auto;
     border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg-raised, #1e2330); padding: 8px;
+    background: var(--surface); padding: 8px;
   }
   #roster-panel.open { display: block; }
   .roster-row {
     display: flex; align-items: center; gap: 8px;
     padding: 6px 8px; border-radius: 5px; cursor: pointer;
   }
-  .roster-row:hover { background: var(--bg-code, #161b27); }
+  .roster-row:hover { background: var(--code-bg); }
   /* A dot means "this needs your attention or is live" — the same thing it
      means on a session row. A finished sub-agent gets NO dot: giving it a
      green one made the quietest state the most visually prominent, and
      collided with green-means-running elsewhere in the UI. The element is
      still laid out so rows stay aligned. */
   .roster-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: transparent; }
-  .roster-dot.running, .roster-dot.pending { background: var(--accent, #f0a500); animation: badge-pulse 1.4s ease-in-out infinite; }
-  .roster-dot.failed, .roster-dot.killed { background: var(--danger, #f87171); animation: none; }
+  .roster-dot.running, .roster-dot.pending { background: var(--accent); animation: badge-pulse 1.4s ease-in-out infinite; }
+  /* Blocked on a human: the one state that will not clear on its own, so it
+     is held steady rather than pulsing like work in progress. */
+  .roster-dot.waiting { background: var(--purple); }
+  .roster-dot.failed, .roster-dot.killed { background: #f87171; animation: none; }
   .roster-main { flex: 1; min-width: 0; }
-  .roster-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  .roster-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: var(--text); }
   .roster-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .roster-stop { font-size: 11px; padding: 1px 6px; }
   .roster-empty { color: var(--muted); font-size: 12.5px; padding: 8px; }
@@ -346,18 +349,25 @@
      sent to find is obvious on arrival. */
   .flash-target { animation: flash-target 1.6s ease-out; }
   @keyframes flash-target {
-    0%, 20% { background: var(--accent-dim, #7a5200); }
+    0%, 20% { background: var(--accent); }
     100% { background: transparent; }
   }
 
   /* The task's own title, sitting in the Agent bubble's label beside the
      role name — "Agent  Quick roster probe  10:42 PM". */
-  .msg-label .agent-title { font-weight: 500; opacity: .95; margin-right: 6px; }
+  .msg-label .agent-title {
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 500;
+    color: var(--text);
+    margin-right: 6px;
+  }
   /* The sub-agent's live status, in the bubble body. Deliberately at normal
      body size rather than the small muted treatment a tool one-liner gets:
      this is the substance of the bubble, not a footnote to it. */
   .agent-live { color: var(--muted); }
-  .agent-live .task-open { cursor: pointer; text-decoration: underline; color: var(--link); }
+  .agent-live .task-open { cursor: pointer; text-decoration: underline; color: var(--accent); }
+  .agent-live .task-open.task-waiting { color: var(--purple); font-weight: 500; }
 
   /* Global "something is waiting on you" indicator. Hidden unless there is
      actually something, so the header is unchanged in the normal case. It
@@ -366,9 +376,9 @@
      child session the user may never have opened. */
   #pending-approvals-btn {
     display: none;
-    background: var(--warn-bg, #3a2a08);
-    border-color: var(--warn-border, #7a5200);
-    color: var(--warn-fg, #ffd980);
+    background: var(--surface);
+    border-color: var(--accent);
+    color: var(--accent);
     font-size: 12px;
     padding: 2px 8px;
     white-space: nowrap;
@@ -2986,6 +2996,11 @@ const saPromoteBtn = document.getElementById('sa-promote-btn');
 let subAgents = [];            // roster for the session being viewed
 let currentSessionIsChild = false;
 let currentSessionParent = null;
+// True while the sub-agent being VIEWED is itself still running. A child
+// session has no turn state of its own in the browser — turnInFlight tracks
+// whatever session this tab is connected to — so this is read from the
+// parent's roster, which is the only place a child's liveness is known.
+let currentSessionBlocked = false;
 
 async function refreshSubAgents() {
   if (!driverBase) return;
@@ -2998,6 +3013,24 @@ async function refreshSubAgents() {
   }
   renderRoster();
   refreshTaskBubbles();
+  refreshChildLiveness();
+}
+
+// When viewing a sub-agent, ask its PARENT's roster whether it is still
+// running — that is what gates Promote. Skipped entirely for an ordinary
+// session, which has turnInFlight for this.
+async function refreshChildLiveness() {
+  if (!currentSessionIsChild || !currentSessionParent || !driverBase) {
+    if (currentSessionBlocked) { currentSessionBlocked = false; applySubAgentBanner(); }
+    return;
+  }
+  try {
+    const res = await fetch(`${driverBase}/sub-agents?sessionId=${encodeURIComponent(currentSessionParent)}`);
+    if (!res.ok) return;
+    const mine = ((await res.json()).subAgents || []).find((s) => s.agentId === currentSessionId);
+    const blocked = !!mine && (mine.status === 'running' || mine.status === 'pending' || !!mine.awaiting);
+    if (blocked !== currentSessionBlocked) { currentSessionBlocked = blocked; applySubAgentBanner(); }
+  } catch { /* leave the last known answer standing */ }
 }
 
 function rosterRunningCount() {
@@ -3027,7 +3060,9 @@ function renderRoster() {
     row.className = 'roster-row';
 
     const dot = document.createElement('div');
-    dot.className = `roster-dot ${sa.status || ''}`;
+    // Waiting outranks running for the dot too — it is the state that needs
+    // you, so it must not look like the one that does not.
+    dot.className = `roster-dot ${sa.awaiting ? 'waiting' : (sa.status || '')}`;
     row.appendChild(dot);
 
     const main = document.createElement('div');
@@ -3095,7 +3130,7 @@ function renderRoster() {
 
     row.addEventListener('click', () => {
       rosterPanel.classList.remove('open');
-      viewSession(sa.agentId, { knownChild: true, knownParent: sa.parentSessionId || currentSessionId });
+      openSubAgentAtBlocker(sa);
     });
     rosterPanel.appendChild(row);
   }
@@ -3104,7 +3139,10 @@ function renderRoster() {
 function subAgentMetaLine(sa) {
   const bits = [];
   if (sa.subagentType) bits.push(sa.subagentType);
-  if (sa.status) bits.push(sa.status);
+  // "waiting" rather than "running": a sub-agent blocked on a permission is
+  // not working, and unlike running it will not resolve on its own.
+  if (sa.awaiting) bits.push(sa.awaiting === 'question' ? 'waiting for your answer' : 'waiting for your approval');
+  else if (sa.status) bits.push(sa.status);
   // The model-written one-line status, when agentProgressSummaries supplied
   // one — more informative than the raw tool name when present.
   if (sa.summary) bits.push(sa.summary);
@@ -3126,6 +3164,18 @@ document.addEventListener('click', (e) => {
 
 // A Task tool bubble names a sub-agent but says nothing about it. This
 // attaches the live status, and makes the bubble the natural way in.
+// Open a sub-agent and land on the exact card it is blocked by. Used by the
+// Agent bubble's "waiting" link and the roster row alike, so both behave the
+// same way — getting to the session was never the hard part, finding the one
+// card in it was.
+function openSubAgentAtBlocker(sa) {
+  const parent = sa.parentSessionId || currentSessionId;
+  if (sa.agentId !== currentSessionId) {
+    viewSession(sa.agentId, { knownChild: true, knownParent: parent });
+  }
+  if (sa.awaitingId) scrollToBubbleWhenReady(sa.awaitingId);
+}
+
 function refreshTaskBubbles() {
   for (const sa of subAgents) {
     const live = taskBubbleFor(sa);
@@ -3134,11 +3184,11 @@ function refreshTaskBubbles() {
     const text = document.createElement('span');
     text.textContent = subAgentMetaLine(sa) + ' · ';
     const open = document.createElement('span');
-    open.className = 'task-open';
-    open.textContent = 'open transcript';
+    open.className = 'task-open' + (sa.awaiting ? ' task-waiting' : '');
+    open.textContent = sa.awaiting ? 'review the request' : 'open transcript';
     open.addEventListener('click', (e) => {
       e.stopPropagation();
-      viewSession(sa.agentId, { knownChild: true, knownParent: sa.parentSessionId || currentSessionId });
+      openSubAgentAtBlocker(sa);
     });
     live.appendChild(text);
     live.appendChild(open);
@@ -3160,6 +3210,18 @@ function taskBubbleFor(sa) {
 // hidden rather than left there to fail.
 function applySubAgentBanner() {
   subagentBanner.classList.toggle('show', currentSessionIsChild);
+  // Promotion severs the parent link, so offering it while the sub-agent is
+  // still working would let the user detach something mid-flight — out of
+  // the parent's abort cascade and out of its roster, still running where
+  // nobody is watching. The driver refuses it too; this stops the button
+  // looking available in the first place. `currentSessionBlocked` covers the
+  // case that prompted this: a sub-agent parked on a permission is still
+  // running, however idle it looks.
+  const busy = turnInFlight || !!awaitingInput || currentSessionBlocked;
+  saPromoteBtn.disabled = busy;
+  saPromoteBtn.title = busy
+    ? 'This sub-agent is still running — stop it, or answer what it is waiting on, before promoting.'
+    : 'Detach this sub-agent into a session of its own, so you can carry on from its findings';
   const inputBar = document.getElementById('input-bar') || promptInput.closest('div');
   if (inputBar) inputBar.style.display = currentSessionIsChild ? 'none' : '';
   // The model picker, mode picker and Auto-approve all change how a session

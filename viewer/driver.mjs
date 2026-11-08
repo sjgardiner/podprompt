@@ -1425,7 +1425,10 @@ const server = createServer(async (req, res) => {
     const backend = backendFor(sessionId, url.searchParams.get("backend"));
     let history;
     try {
-      history = await backend.getSessionHistory(sessionId, state?.cwd);
+      // The relation row rides along so a backend can tell a sub-agent's
+      // transcript apart from an ordinary session's — they live in different
+      // places on disk and a child's synthesized id appears in neither.
+      history = await backend.getSessionHistory(sessionId, state?.cwd, sessionRelations[sessionId] || null);
     } catch (e) {
       // /modes and /models already fail with 502 rather than killing the
       // driver; history must behave the same so server.py's _fetch_session_history

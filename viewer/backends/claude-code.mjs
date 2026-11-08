@@ -22,10 +22,11 @@ import {
 import nodePath from "node:path";
 import os from "node:os";
 import {
-  query, listSessions, getSessionMessages, tagSession, renameSession, deleteSession,
+  query, listSessions, getSessionMessages, getSubagentMessages,
+  tagSession, renameSession, deleteSession,
 } from "@anthropic-ai/claude-agent-sdk";
 
-export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval }) {
+export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
   // drains the stream tracker's announced ids per completed assistant
@@ -52,6 +53,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // below lives here rather than anywhere under /workspace itself.
   const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || nodePath.join(os.homedir(), ".claude");
   const PROJECTS_DIR = nodePath.join(CLAUDE_CONFIG_DIR, "projects");
+
+  // readdirSync that yields [] instead of throwing for a path that does not
+  // exist — the sub-agent lookups below probe several speculative paths.
+  function safeReaddir(dir) {
+    try { return readdirSync(dir); } catch { return []; }
+  }
 
   // ── Multi-project discovery ─────────────────────────────────────────────
   // A launch of --viewer is pinned to one root cwd (cwdRoot, normally just
@@ -573,7 +580,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     return false;
   }
 
-  function convertSessionMessages(rawMessages) {
+  // `includeSubagent` is set only when converting a sub-agent's OWN
+  // transcript, where every entry is by definition sub-agent-internal. In a
+  // parent's transcript those entries are still skipped: they belong to the
+  // child session's feed, not the parent's.
+  function convertSessionMessages(rawMessages, { includeSubagent = false } = {}) {
     const out = [];
     for (const entry of rawMessages) {
       // Same fragility-margin as the opencode backend's converter: one
@@ -582,7 +593,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // must not blank that session's whole rendered history. Convert
       // per-entry; skip what's unusable, keep the rest.
       try {
-        if (entry.parent_agent_id) continue; // subagent-internal, skip (mirrors the old isSidechain filter)
+        // Sub-agent-internal entries belong to that sub-agent's own child
+        // session, not here — skipped in a parent's transcript, kept when we
+        // are converting the sub-agent's own file. isSidechain is the older
+        // CLI builds' spelling of the same thing.
+        if (!includeSubagent && (entry.parent_agent_id || entry.isSidechain)) continue;
         const content = entry.message?.content;
 
         if (entry.type === "assistant") {
@@ -865,12 +880,112 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // display change. This only asks for whatever the model already
       // produces to be streamed instead of dropped.
       includePartialMessages: true,
+      // Without this the SDK forwards only a sub-agent's tool_use/tool_result
+      // blocks — "enough for a heartbeat counter" in its own words — so a
+      // sub-agent's reasoning and its final report never arrive at all, and
+      // its child session would contain tool bubbles and nothing else. Costs
+      // no extra model tokens: the text is already generated, this only asks
+      // for it to be forwarded rather than dropped.
+      forwardSubagentText: true,
+      // Makes task_progress carry a model-written one-line status, which is
+      // what the roster shows as a sub-agent's current activity. The only
+      // option here with a real (small) cost, since the model writes them.
+      agentProgressSummaries: true,
       // state.model is only ever set by the browser's model-switcher
       // (POST /set-model, see driver.mjs) — omit the option entirely rather
       // than pass undefined/null so an unset session keeps using the CLI's
       // own default model, exactly like before this feature existed.
       ...(state.model ? { model: state.model } : {}),
     };
+
+    // ── Sub-agents ─────────────────────────────────────────────────────────
+    // Claude Code runs a sub-agent as a Task INSIDE this session rather than
+    // as a session of its own, so unlike opencode there is nothing to adopt —
+    // the child session is synthesized here. It is keyed on the spawning
+    // tool_use_id rather than the task_id because that is the one identifier
+    // present both in these live events and in the on-disk
+    // subagents/agent-<id>.meta.json, which is what lets a live view and a
+    // replayed view agree on which sub-agent they are looking at.
+    const childIdForToolUse = new Map(); // tool_use_id -> podprompt child session id
+    const childIdForTask = new Map();    // task_id      -> podprompt child session id
+
+    function ensureChildSession(info) {
+      const toolUseId = info.tool_use_id;
+      if (!toolUseId) return null; // nothing stable to key on; skip rather than invent one
+      let childId = childIdForToolUse.get(toolUseId);
+      if (!childId) {
+        childId = randomUUID();
+        childIdForToolUse.set(toolUseId, childId);
+        registerChild?.(childId, {
+          parent: sessionId,
+          backend: "claude-code",
+          childKind: "native-task",
+          subagentType: info.subagent_type || null,
+          description: info.description || null,
+          native: { toolUseId, taskId: info.task_id || null },
+        });
+      }
+      if (info.task_id) childIdForTask.set(info.task_id, childId);
+      return childId;
+    }
+
+    function routeSubagentMessage(childId, msg) {
+      if (msg.type === "assistant" && msg.message?.content) {
+        for (const block of msg.message.content) {
+          if (block.type === "text" && block.text) {
+            broadcast(childId, "assistant", block.text, block.id || randomUUID(), null, null);
+          } else if (block.type === "thinking" && block.thinking) {
+            broadcast(childId, "thinking", block.thinking, randomUUID(), null, null);
+          } else if (block.type === "tool_use") {
+            updateSubAgent?.(childId, { lastTool: block.name || null });
+            broadcast(childId, "tool", formatToolSummary(block.name, block.input), block.id, null, null);
+          }
+        }
+      }
+    }
+
+    // The SDK's task_* messages are the sub-agent lifecycle. All of them used
+    // to fall through the loop's unhandled default and vanish.
+    function handleTaskMessage(msg) {
+      if (msg.subtype === "task_started") {
+        // Ambient/housekeeping tasks are explicitly not activity ("Consumers
+        // should hide this from the inline transcript") — they are not
+        // sub-agents and must not appear as one.
+        if (msg.skip_transcript || msg.ambient) return;
+        const childId = ensureChildSession(msg);
+        if (!childId) return;
+        updateSubAgent?.(childId, {
+          status: "running",
+          startedAt: Date.now(),
+          isBackgrounded: !!msg.is_backgrounded,
+          description: msg.description || null,
+          subagentType: msg.subagent_type || null,
+        });
+        return;
+      }
+      if (msg.subtype === "task_progress") {
+        const childId = msg.task_id ? childIdForTask.get(msg.task_id)
+          : (msg.tool_use_id ? childIdForToolUse.get(msg.tool_use_id) : null);
+        if (!childId) return;
+        updateSubAgent?.(childId, {
+          status: "running",
+          lastTool: msg.last_tool_name || null,
+          summary: msg.summary || null,
+          usage: msg.usage || null,
+        });
+        return;
+      }
+      if (msg.subtype === "task_updated") {
+        const childId = msg.task_id ? childIdForTask.get(msg.task_id) : null;
+        if (!childId || !msg.patch) return;
+        updateSubAgent?.(childId, {
+          ...(msg.patch.status ? { status: msg.patch.status } : {}),
+          ...(msg.patch.error ? { error: msg.patch.error } : {}),
+          ...(typeof msg.patch.is_backgrounded === "boolean"
+            ? { isBackgrounded: msg.patch.is_backgrounded } : {}),
+        });
+      }
+    }
 
     async function consume(opts) {
       const q = query({ prompt: onePrompt(), options: opts });
@@ -931,6 +1046,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           continue;
         }
 
+        if (msg.type === "system"
+            && (msg.subtype === "task_started" || msg.subtype === "task_progress" || msg.subtype === "task_updated")) {
+          handleTaskMessage(msg);
+          continue;
+        }
+
         if (msg.type === "system" && msg.subtype === "thinking_tokens") {
           broadcastStatus(sessionId, { type: "thinking_tokens", estimated_tokens: msg.estimated_tokens });
           continue;
@@ -980,6 +1101,17 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // is winding down, not because the CLI lacks the command.
           // usage_EXPERIMENTAL_...() has since moved again, off this
           // per-turn `q` entirely — see refreshPlanUsage() above.
+          continue;
+        }
+
+        // A sub-agent's frames arrive on this same stream, distinguished only
+        // by parent_tool_use_id. Routed to the child session that tool call
+        // created, so they stop masquerading as the parent's own work — and
+        // so context_usage from a sub-agent stops overwriting the parent's
+        // context bar, and a sub-agent running a cheaper model stops stamping
+        // that model onto bubbles in the parent's feed.
+        if (msg.parent_tool_use_id && childIdForToolUse.has(msg.parent_tool_use_id)) {
+          routeSubagentMessage(childIdForToolUse.get(msg.parent_tool_use_id), msg);
           continue;
         }
 
@@ -1197,7 +1329,47 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       };
     },
 
-    async getSessionHistory(sessionId, fallbackCwd) {
+    // The live task_* events give a tool_use_id but never the agent id the
+    // transcript file is named after. The sidecar beside each sub-agent
+    // transcript carries both, so this is the join: scan the parent's
+    // subagents/ directory for the meta whose toolUseId matches.
+    resolveSubagentAgentId(parentSessionId, toolUseId) {
+      if (!parentSessionId || !toolUseId) return null;
+      for (const folder of safeReaddir(PROJECTS_DIR)) {
+        const dir = nodePath.join(PROJECTS_DIR, folder, parentSessionId, "subagents");
+        for (const f of safeReaddir(dir)) {
+          if (!f.endsWith(".meta.json")) continue;
+          try {
+            const meta = JSON.parse(readFileSync(nodePath.join(dir, f), "utf8"));
+            if (meta?.toolUseId === toolUseId) {
+              return f.slice("agent-".length, -".meta.json".length);
+            }
+          } catch { /* a torn or unexpected sidecar is not worth failing over */ }
+        }
+      }
+      return null;
+    },
+
+    async getSessionHistory(sessionId, fallbackCwd, relation) {
+      // A sub-agent's transcript is a file of its own
+      // (subagents/agent-<agentId>.jsonl), not entries inside the parent's —
+      // so replaying one means asking the SDK for that agent's messages
+      // against the PARENT's session id, not this child's synthesized id,
+      // which no transcript on disk has ever heard of.
+      if (relation?.childKind === "native-task") {
+        const parentId = relation.parent;
+        const agentId = relation.native?.agentId
+          || this.resolveSubagentAgentId(parentId, relation.native?.toolUseId);
+        if (!agentId || !parentId) return [];
+        try {
+          const raw = await getSubagentMessages(parentId, agentId, {
+            dir: cwdForSession(parentId, fallbackCwd),
+          });
+          return convertSessionMessages(raw, { includeSubagent: true });
+        } catch {
+          return [];
+        }
+      }
       try {
         const raw = await getSessionMessages(sessionId, { dir: cwdForSession(sessionId, fallbackCwd) });
         return convertSessionMessages(raw);

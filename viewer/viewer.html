@@ -3191,6 +3191,17 @@ saPromoteBtn.addEventListener('click', async () => {
       currentSessionParent = null;
       applySubAgentBanner();
       refreshSessionsList({ full: true });
+      // Said plainly, because the transcript above is misleading on its own:
+      // it is the sub-agent's real record, but the model that answers your
+      // next prompt here has not read it. A Claude Code sub-agent runs inside
+      // its parent's process rather than as a session of its own, so there is
+      // no conversation to resume — promoting gives you a session that starts
+      // empty, with that transcript kept above it for reference.
+      showLocalNotice(
+        '*(Promoted to its own session. The transcript above is kept for reference, '
+        + 'but the model starts here with an empty context — it has not read it. '
+        + 'Quote anything you want it to work from.)*'
+      );
     }
   } catch { /* leave the banner as-is; the next resync re-reads the truth */ }
   saPromoteBtn.disabled = false;

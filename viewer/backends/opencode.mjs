@@ -825,6 +825,42 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           if (part.state?.status === "completed" || part.state?.status === "error") finalizeEntry(entry, part.id);
           return;
         }
+        if (part.type === "tool" && SUBAGENT_TOOL_NAMES.has(part.tool)) {
+          const status = part.state?.status;
+          // Emitted on EVERY update, not just completion. A sub-agent can run
+          // for minutes, and waiting for the finished part meant the parent
+          // showed nothing but a "Running task" status line for all of it,
+          // with no Agent bubble, no roster row and no way into the child's
+          // transcript until it was over. Re-broadcasting under the same part
+          // id upserts the bubble, so it appears immediately and fills in.
+          const childReal = part.state?.metadata?.sessionId;
+          // Adopt the child from the task part itself if session.created was
+          // never seen for it — a missed or late event, or a driver that
+          // started after the child existed. The part carries both ids, so
+          // this path does not depend on having watched the child be born.
+          if (childReal && !childRealToPod.has(childReal)) {
+            noteChildSession({
+              id: childReal,
+              parentID: part.state?.metadata?.parentSessionId || knownRealId(sessionId),
+              title: subAgentTitleFromPart(part),
+            });
+          }
+          const childPod = childReal ? childRealToPod.get(childReal) : null;
+          if (childPod) {
+            registerChild?.(childPod, {
+              parent: sessionId,
+              backend: "opencode",
+              childKind: "native-task",
+              description: subAgentTitleFromPart(part),
+              native: { toolUseId: part.id, realSessionId: childReal },
+            });
+          }
+          if (status === "running" && !toolStartedAt.has(part.id)) toolStartedAt.set(part.id, Date.now());
+          if (status === "completed" || status === "error") stopToolTickerFor(part.id);
+          const subModel = part.messageID ? messageModelByRealId.get(part.messageID) : null;
+          broadcast(sessionId, "agent", subAgentTitleFromPart(part), part.id, null, subModel || null);
+          return;
+        }
         if (part.type === "tool") {
           const status = part.state?.status;
           // Only broadcast a one-liner on completion/error — pending/running
@@ -844,28 +880,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             // structurally significant thing a turn can do look like a grep.
             // Matches what the claude-code backend does with Task/Agent, so
             // both backends produce the same bubble for the same act.
-            if (SUBAGENT_TOOL_NAMES.has(part.tool)) {
-              // The task part names its own child session in state.metadata
-              // (verified against a live server), so the Agent bubble can be
-              // tied to that child directly rather than guessed at by timing.
-              // Recording the part id as the child's toolUseId is what lets
-              // refreshTaskBubbles find this bubble and hang the sub-agent's
-              // live status and "open transcript" link on it — without it the
-              // bubble rendered empty.
-              const childReal = part.state?.metadata?.sessionId;
-              const childPod = childReal ? childRealToPod.get(childReal) : null;
-              if (childPod) {
-                registerChild?.(childPod, {
-                  parent: sessionId,
-                  backend: "opencode",
-                  childKind: "native-task",
-                  native: { toolUseId: part.id, realSessionId: childReal },
-                });
-              }
-              broadcast(sessionId, "agent", subAgentTitleFromPart(part), part.id, null, msgModel || null);
-            } else {
-              broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
-            }
+            broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
             emittedIds.add(part.id);
           }
           return;
@@ -1298,7 +1313,16 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     // Already a real id (e.g. the browser is resuming a session it learned
     // about from /sessions, not a freshly client-minted one) — nothing to
     // create.
-    if (sessionId.startsWith("ses_")) return sessionId;
+    if (sessionId.startsWith("ses_")) {
+      // Record the identity mapping rather than just returning. A resumed
+      // session's PodPrompt id IS its real id, and leaving realToClient empty
+      // meant noteChildSession could not resolve the parent of an incoming
+      // child — so sub-agents of any session this process did not itself
+      // create were silently never registered, and the roster stayed empty.
+      clientToReal.set(sessionId, sessionId);
+      realToClient.set(sessionId, sessionId);
+      return sessionId;
+    }
     const dir = cwd || cwdRoot;
     const created = await api(`/session?directory=${encodeURIComponent(dir)}`, {
       method: "POST",

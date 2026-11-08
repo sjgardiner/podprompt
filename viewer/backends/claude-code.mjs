@@ -978,10 +978,20 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           childKind: "native-task",
           subagentType: info.subagent_type || null,
           description: info.description || null,
-          native: { toolUseId, taskId: info.task_id || null },
+          // Verified against a live CLI run: task_started's task_id IS the
+          // agent id the transcript file is named after — a sub-agent with
+          // task_id a29580a68b7c7c8ec writes
+          // subagents/agent-a29580a68b7c7c8ec.jsonl. So the two id families
+          // that looked disjoint (task_id/tool_use_id vs agent_id) are in
+          // fact joined, and the agent id is known live rather than having
+          // to be recovered from disk.
+          native: { toolUseId, taskId: info.task_id || null, agentId: info.task_id || null },
         });
       }
-      if (info.task_id) childIdForTask.set(info.task_id, childId);
+      if (info.task_id) {
+        childIdForTask.set(info.task_id, childId);
+        childIdForAgent.set(info.task_id, childId);
+      }
       return childId;
     }
 

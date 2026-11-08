@@ -299,6 +299,57 @@
     max-width: 100%;
     box-sizing: border-box;
   }
+  /* ── Sub-agents ──────────────────────────────────────────────────────── */
+  /* A banner on a sub-agent's own session: it is a record of delegated work,
+     not a conversation, so the input bar is hidden and this explains why and
+     offers the two things that ARE possible here. */
+  #subagent-banner { display: none; }
+  #subagent-banner.show {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 0 auto 10px; max-width: var(--content-width, 860px);
+    padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-raised, #1e2330); font-size: 13px;
+  }
+  #subagent-banner .sa-label { color: var(--muted); }
+  #subagent-banner .sa-spacer { flex: 1; }
+  #subagent-banner button { font-size: 12px; padding: 2px 8px; }
+
+  /* Roster: this session's sub-agents, with live status. Opened from the
+     Task bubble or the header count — the same place both CLIs put it. */
+  #roster-panel {
+    display: none; position: absolute; right: 10px; top: 44px; z-index: 40;
+    width: 340px; max-height: 60vh; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-raised, #1e2330); padding: 8px;
+  }
+  #roster-panel.open { display: block; }
+  .roster-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 5px; cursor: pointer;
+  }
+  .roster-row:hover { background: var(--bg-code, #161b27); }
+  .roster-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+  .roster-dot.running { background: var(--accent, #f0a500); animation: badge-pulse 1.4s ease-in-out infinite; }
+  .roster-dot.failed, .roster-dot.killed { background: var(--danger, #f87171); }
+  .roster-dot.completed { background: var(--success, #6ee7b7); }
+  .roster-main { flex: 1; min-width: 0; }
+  .roster-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  .roster-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .roster-stop { font-size: 11px; padding: 1px 6px; }
+  .roster-empty { color: var(--muted); font-size: 12.5px; padding: 8px; }
+
+  /* Brief highlight after jumping to a specific card, so the thing you were
+     sent to find is obvious on arrival. */
+  .flash-target { animation: flash-target 1.6s ease-out; }
+  @keyframes flash-target {
+    0%, 20% { background: var(--accent-dim, #7a5200); }
+    100% { background: transparent; }
+  }
+
+  /* Live status line inside a Task tool bubble. */
+  .task-live { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .task-live .task-open { cursor: pointer; text-decoration: underline; }
+
   /* Global "something is waiting on you" indicator. Hidden unless there is
      actually something, so the header is unchanged in the normal case. It
      exists because a parked approval is otherwise only discoverable by
@@ -314,6 +365,10 @@
     white-space: nowrap;
   }
   #pending-approvals-btn.show { display: block; }
+  /* Hidden until this session has actually spawned a sub-agent, so the header
+     is unchanged for the ordinary case. */
+  #roster-btn { display: none; font-size: 12px; padding: 2px 8px; white-space: nowrap; }
+  #roster-btn.show { display: block; }
   .settings-row.disabled label { opacity: .45; }
   /* Explains why notifications are unavailable or blocked. Hidden unless it
      has something to say, so the group stays as compact as the others when
@@ -1191,6 +1246,7 @@
       <div id="status-dot"></div>
       <span id="status-label">connecting…</span>
     </div>
+    <button id="roster-btn" title="Sub-agents in this session"></button>
     <button id="pending-approvals-btn" title="Approvals waiting on you"></button>
     <button id="export-btn" title="Export conversation as Markdown">⬇</button>
     <button id="settings-btn" title="Settings">⚙</button>
@@ -1353,6 +1409,15 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <div id="roster-panel"></div>
+
+  <div id="subagent-banner">
+    <span class="sa-label">Sub-agent transcript<span id="sa-type"></span> &mdash; read-only</span>
+    <span class="sa-spacer"></span>
+    <button id="sa-parent-btn" title="Go back to the session that spawned this sub-agent">↑ Parent session</button>
+    <button id="sa-promote-btn" title="Detach this sub-agent into a session of its own, so you can carry on from its findings">Promote to session</button>
   </div>
 
   <div id="feed">
@@ -2466,9 +2531,14 @@ function connect() {
       // not start itself (another tab, or a reconnect that lands mid-turn).
       armSession(currentSessionId);
       clearTitleMark();
+      refreshSubAgents();
     }
+    // A sub-agent's own progress is reported on the parent's stream, so the
+    // roster can stay current without polling.
+    if (s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
     if (s.type === 'turn_end') {
       setTurnInFlight(false); setTurnIndicator(null); pokeSessionsListIfOpen();
+      refreshSubAgents();
       notifyTurnEnd(currentSessionId, s.reason);
       // In case a final 'message' for a live-streamed bubble was ever
       // missed (reconnect gap, backend hiccup), never leave a bubble stuck
@@ -2648,6 +2718,14 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false } = {})
   setTurnIndicator(null);
   // The flag described the session being left behind.
   clearTitleMark();
+  // Cleared rather than left stale: resyncTurnStatus repopulates all three
+  // for the new session a moment later, and showing the previous session's
+  // sub-agents in between would be wrong.
+  subAgents = [];
+  currentSessionIsChild = false;
+  currentSessionParent = null;
+  applySubAgentBanner();
+  renderRoster();
   resetBackendControlsDisplay();
   updateBackendIndicator();
   // isNewSession (set only by startNewChatInProject()) is a hard guarantee,
@@ -2891,6 +2969,195 @@ notifySound.addEventListener('change', () => {
   if (notifySound.checked) primeAudio();
 });
 
+// ── Sub-agents: roster, Task-bubble status, child-session banner ──────────
+// A sub-agent IS a session here, so opening one is just viewSession(). What
+// this adds is the two ways to reach one — a live status line on the Task
+// bubble that spawned it, and a roster of all of them — plus the banner that
+// makes a child session honest about being read-only.
+const rosterBtn = document.getElementById('roster-btn');
+const rosterPanel = document.getElementById('roster-panel');
+const subagentBanner = document.getElementById('subagent-banner');
+const saTypeEl = document.getElementById('sa-type');
+const saParentBtn = document.getElementById('sa-parent-btn');
+const saPromoteBtn = document.getElementById('sa-promote-btn');
+
+let subAgents = [];            // roster for the session being viewed
+let currentSessionIsChild = false;
+let currentSessionParent = null;
+
+async function refreshSubAgents() {
+  if (!driverBase) return;
+  try {
+    const res = await fetch(`${driverBase}/sub-agents?sessionId=${encodeURIComponent(currentSessionId)}`);
+    if (!res.ok) return;
+    subAgents = (await res.json()).subAgents || [];
+  } catch {
+    return; // transient; the next turn event retries
+  }
+  renderRoster();
+  refreshTaskBubbles();
+}
+
+function rosterRunningCount() {
+  return subAgents.filter((s) => s.status === 'running' || s.status === 'pending').length;
+}
+
+function renderRoster() {
+  const running = rosterRunningCount();
+  rosterBtn.classList.toggle('show', subAgents.length > 0);
+  rosterBtn.textContent = running ? `⚙ ${running}` : `⚙ ${subAgents.length}`;
+  rosterBtn.title = running
+    ? `${running} sub-agent${running === 1 ? '' : 's'} running (${subAgents.length} total this session)`
+    : `${subAgents.length} sub-agent${subAgents.length === 1 ? '' : 's'} in this session`;
+
+  rosterPanel.innerHTML = '';
+  if (!subAgents.length) {
+    const empty = document.createElement('div');
+    empty.className = 'roster-empty';
+    empty.textContent = 'No sub-agents in this session yet.';
+    rosterPanel.appendChild(empty);
+    return;
+  }
+  for (const sa of subAgents) {
+    const row = document.createElement('div');
+    row.className = 'roster-row';
+
+    const dot = document.createElement('div');
+    dot.className = `roster-dot ${sa.status || ''}`;
+    row.appendChild(dot);
+
+    const main = document.createElement('div');
+    main.className = 'roster-main';
+    const title = document.createElement('div');
+    title.className = 'roster-title';
+    title.textContent = sa.description || sa.subagentType || 'sub-agent';
+    const meta = document.createElement('div');
+    meta.className = 'roster-meta';
+    meta.textContent = subAgentMetaLine(sa);
+    main.appendChild(title);
+    main.appendChild(meta);
+    row.appendChild(main);
+
+    // Only a running sub-agent can be stopped, and stopping one leaves its
+    // siblings and the parent turn alone — that is the whole point of a
+    // per-row control rather than the turn-level Stop.
+    if (sa.status === 'running' || sa.status === 'pending') {
+      const stop = document.createElement('button');
+      stop.className = 'roster-stop';
+      stop.textContent = 'Stop';
+      stop.title = 'Stop just this sub-agent';
+      stop.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        stop.disabled = true;
+        try {
+          await fetch(`${driverBase}/abort-subagent`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sa.agentId }),
+          });
+        } catch { /* the next refresh will show the real state */ }
+        refreshSubAgents();
+      });
+      row.appendChild(stop);
+    }
+
+    row.addEventListener('click', () => {
+      rosterPanel.classList.remove('open');
+      viewSession(sa.agentId);
+    });
+    rosterPanel.appendChild(row);
+  }
+}
+
+function subAgentMetaLine(sa) {
+  const bits = [];
+  if (sa.subagentType) bits.push(sa.subagentType);
+  if (sa.status) bits.push(sa.status);
+  // The model-written one-line status, when agentProgressSummaries supplied
+  // one — more informative than the raw tool name when present.
+  if (sa.summary) bits.push(sa.summary);
+  if (sa.lastTool) bits.push(`→ ${sa.lastTool}`);
+  if (sa.usage?.total_tokens) bits.push(`${sa.usage.total_tokens.toLocaleString()} tok`);
+  if (sa.usage?.duration_ms) bits.push(`${Math.round(sa.usage.duration_ms / 1000)}s`);
+  if (sa.backend) bits.push(sa.backend);
+  return bits.join(' · ');
+}
+
+rosterBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  rosterPanel.classList.toggle('open');
+  if (rosterPanel.classList.contains('open')) refreshSubAgents();
+});
+document.addEventListener('click', (e) => {
+  if (!rosterPanel.contains(e.target) && e.target !== rosterBtn) rosterPanel.classList.remove('open');
+});
+
+// A Task tool bubble names a sub-agent but says nothing about it. This
+// attaches the live status, and makes the bubble the natural way in.
+function refreshTaskBubbles() {
+  for (const sa of subAgents) {
+    const el = taskBubbleFor(sa);
+    if (!el) continue;
+    let live = el.querySelector('.task-live');
+    if (!live) {
+      live = document.createElement('div');
+      live.className = 'task-live';
+      el.appendChild(live);
+    }
+    live.innerHTML = '';
+    const text = document.createElement('span');
+    text.textContent = subAgentMetaLine(sa) + ' · ';
+    const open = document.createElement('span');
+    open.className = 'task-open';
+    open.textContent = 'open transcript';
+    open.addEventListener('click', (e) => { e.stopPropagation(); viewSession(sa.agentId); });
+    live.appendChild(text);
+    live.appendChild(open);
+  }
+}
+
+// Matched by the spawning tool_use id, which IS the Task bubble's own id —
+// broadcast() uses the tool_use id for tool bubbles, so no extra bookkeeping
+// is needed to tie the two together.
+function taskBubbleFor(sa) {
+  const toolUseId = sa.toolUseId || sa.native?.toolUseId;
+  if (!toolUseId) return null;
+  const entry = msgs[toolUseId];
+  return entry && entry.el ? entry.el : null;
+}
+
+// Shown on a sub-agent's own session. Prompting one is refused by the driver
+// (it is a record of delegated work, not a conversation), so the input bar is
+// hidden rather than left there to fail.
+function applySubAgentBanner() {
+  subagentBanner.classList.toggle('show', currentSessionIsChild);
+  const inputBar = document.getElementById('input-bar') || promptInput.closest('div');
+  if (inputBar) inputBar.style.display = currentSessionIsChild ? 'none' : '';
+}
+
+saParentBtn.addEventListener('click', () => {
+  if (currentSessionParent) viewSession(currentSessionParent);
+});
+
+saPromoteBtn.addEventListener('click', async () => {
+  if (!currentSessionParent) return;
+  saPromoteBtn.disabled = true;
+  try {
+    const res = await fetch(`${driverBase}/promote-session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId }),
+    });
+    if (res.ok) {
+      // It is an ordinary session now: promptable, listed on its own, and no
+      // longer swept up by its old parent's archive/delete.
+      currentSessionIsChild = false;
+      currentSessionParent = null;
+      applySubAgentBanner();
+      refreshSessionsList({ full: true });
+    }
+  } catch { /* leave the banner as-is; the next resync re-reads the truth */ }
+  saPromoteBtn.disabled = false;
+});
+
 // ── Global pending-approval indicator ─────────────────────────────────────
 // Driven by the driver's /pending-approvals, refreshed on the same meta
 // pings the sessions panel uses. Clicking jumps to the oldest waiting ask —
@@ -2929,9 +3196,24 @@ pendingApprovalsBtn.addEventListener('click', () => {
     .sort((a, b) => String(a.askedAt || '').localeCompare(String(b.askedAt || '')))[0];
   if (!oldest) return;
   if (oldest.sessionId !== currentSessionId) viewSession(oldest.sessionId);
-  // Scrolling to the specific card is Phase 6's deep-link work; landing on
-  // the right session is already the hard part.
+  // The card may not be rendered yet when the session was just switched —
+  // history arrives over SSE a moment later — so the scroll is deferred
+  // until the bubble actually exists, with a bounded number of attempts
+  // rather than an open-ended retry.
+  scrollToBubbleWhenReady(oldest.id);
 });
+
+function scrollToBubbleWhenReady(bubbleId, attemptsLeft = 20) {
+  const entry = msgs[bubbleId];
+  if (entry && entry.wrap) {
+    entry.wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    entry.wrap.classList.add('flash-target');
+    setTimeout(() => entry.wrap.classList.remove('flash-target'), 1600);
+    return;
+  }
+  if (attemptsLeft <= 0) return;
+  setTimeout(() => scrollToBubbleWhenReady(bubbleId, attemptsLeft - 1), 150);
+}
 
 // ── Attention: desktop notifications, tab-title flag, sound ───────────────
 // Three channels, deliberately layered. The tab-title flag is the only one
@@ -3212,7 +3494,16 @@ function notifyTurnEnd(sessionId, reason) {
   if (!disarmSession(sessionId)) return;
   const notice = TURN_END_NOTICES[reason || 'completed'];
   if (!notice) return; // 'aborted' is deliberately silent
-  fireAttention({ sessionId, cls: 'turn', mark: notice.mark, title: notice.title, body: notice.body });
+  // The parent's turn ending and its sub-agents finishing are different
+  // facts (D6): background children outlive the call that spawned them, so
+  // "ready for your next prompt" is true while work is still running. Saying
+  // both keeps the notification honest instead of implying silence.
+  let body = notice.body;
+  if (sessionId === currentSessionId) {
+    const running = rosterRunningCount();
+    if (running) body += ` ${running} sub-agent${running === 1 ? '' : 's'} still running.`;
+  }
+  fireAttention({ sessionId, cls: 'turn', mark: notice.mark, title: notice.title, body });
 }
 
 function notifyNeedsInput(sessionId, kind, ref) {
@@ -3549,6 +3840,13 @@ async function resyncTurnStatus() {
     // while a turn is already parked would never hear about it otherwise —
     // the same reason autoApprove is resynced from here.
     setAwaitingInput(data.awaitingInput || null);
+    // Whether this session is a sub-agent's is the driver's to say — the
+    // browser cannot know, and a child must not offer an input bar that the
+    // driver will refuse.
+    currentSessionIsChild = !!data.isChild;
+    currentSessionParent = data.parentSessionId || null;
+    applySubAgentBanner();
+    refreshSubAgents();
     autoApproveToggle.checked = !!data.autoApprove;
     autoApproveRow.classList.toggle('active', !!data.autoApprove);
   } catch (e) {

@@ -999,6 +999,18 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         ? { hooks: { PermissionRequest: [{ hooks: [permissionAttributionHook] }] } }
         : {}),
       includePartialMessages: true,
+      // Declares that the viewer renders a per-sub-agent stop control, which
+      // it now does (the roster's stop button -> POST /abort-subagent).
+      //
+      // This INVERTS what Stop means for background tasks: declared, an
+      // interrupt spares them and they are stopped one at a time through our
+      // own affordance; undeclared, the CLI fails closed and an interrupt
+      // kills them. So it is only safe alongside the parent->child abort
+      // cascade in driver.mjs, which is what now stops a sub-agent when the
+      // parent is stopped. Declaring this WITHOUT that cascade would leave
+      // orphaned sub-agents running, which is exactly what the fail-closed
+      // default exists to prevent.
+      perTaskStopAffordance: true,
       // Without this the SDK forwards only a sub-agent's tool_use/tool_result
       // blocks — "enough for a heartbeat counter" in its own words — so a
       // sub-agent's reasoning and its final report never arrive at all, and

@@ -584,9 +584,13 @@ function registerChildSession(childId, info) {
   saveSessionRelations();
 }
 
+// A promoted sub-agent reports NO parent: it has been detached deliberately,
+// so it is promptable, listed on its own, and out of its old parent's cascade
+// — while the row itself survives, because it still holds the backend ids
+// that locate this session's transcript on disk.
 function parentOfSession(sessionId) {
   const r = sessionRelations[sessionId];
-  return r && r.rel === "parent" ? r.parent : null;
+  return r && r.rel === "parent" && !r.promoted ? r.parent : null;
 }
 
 function isChildSession(sessionId) {
@@ -595,7 +599,7 @@ function isChildSession(sessionId) {
 
 function childrenOfSession(parentId) {
   return Object.entries(sessionRelations)
-    .filter(([, r]) => r.rel === "parent" && r.parent === parentId)
+    .filter(([, r]) => r.rel === "parent" && !r.promoted && r.parent === parentId)
     .map(([childId]) => childId);
 }
 
@@ -672,6 +676,11 @@ function subAgentsForParent(parentId) {
       childKind: rel.childKind || null,
       subagentType: rel.subagentType || null,
       description: rel.description || null,
+      // The spawning tool_use id is also the Task bubble's own id in the
+      // parent's feed (broadcast() keys tool bubbles by it), so the browser
+      // can attach live status to that bubble without any extra bookkeeping.
+      toolUseId: rel.native?.toolUseId || null,
+      summary: live.summary || null,
       depth: depthOfSession(childId),
       status: live.status || "completed", // nothing live on this process ⇒ it is not running
       lastTool: live.lastTool || null,
@@ -1398,6 +1407,81 @@ const server = createServer(async (req, res) => {
   // approval by already looking at that session — which is exactly the case
   // that goes unnoticed, since a sub-agent's card lives in a child session
   // the user may never have opened.
+  // The roster for one session: every sub-agent it has spawned, with live
+  // status where this process has it. Promoted children are excluded — once
+  // promoted a session stands on its own and is no longer anyone's sub-agent.
+  if (req.method === "GET" && path === "/sub-agents") {
+    const sessionId = url.searchParams.get("sessionId");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ subAgents: sessionId ? subAgentsForParent(sessionId) : [] }));
+    return;
+  }
+
+  // Stop ONE sub-agent, leaving its siblings and the parent turn running.
+  // Dispatched through the child's own backend, which in a mixed tree is not
+  // the parent's.
+  if (req.method === "POST" && path === "/abort-subagent") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const childId = body.sessionId;
+    const rel = childId ? sessionRelations[childId] : null;
+    if (!rel || rel.rel !== "parent") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"error":"not a known sub-agent"}');
+      return;
+    }
+    try {
+      const childState = sessions.get(childId);
+      const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
+      if (childState?.turnInFlight) childState.abortRequested = true;
+      backend.abort(childId, childState);
+      upsertSubAgent(childId, { status: "killed" });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"ok":true}');
+    } catch (e) {
+      console.error("[driver] abort-subagent failed:", e.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end('{"error":"failed to stop sub-agent"}');
+    }
+    return;
+  }
+
+  // Promote a sub-agent to a session of its own. The relation row is KEPT
+  // (with promoted:true) rather than deleted, because it still carries the
+  // backend's own identities — which is how this session's transcript is
+  // found on disk. What changes is that it stops being treated as a child:
+  // it can be prompted, it no longer appears in its old parent's roster, and
+  // archiving or deleting that parent no longer touches it.
+  if (req.method === "POST" && path === "/promote-session") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const childId = body.sessionId;
+    const rel = childId ? sessionRelations[childId] : null;
+    if (!rel || rel.rel !== "parent" || rel.promoted) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"error":"not a promotable sub-agent"}');
+      return;
+    }
+    sessionRelations[childId] = { ...rel, promoted: true, promotedAt: nowIso() };
+    saveSessionRelations();
+    subAgents.delete(childId);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, sessionId: childId, backend: rel.backend || null }));
+    return;
+  }
+
   if (req.method === "GET" && path === "/pending-approvals") {
     const out = [];
     for (const [id, p] of pendingApprovals) {

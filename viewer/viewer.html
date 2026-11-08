@@ -328,10 +328,14 @@
     padding: 6px 8px; border-radius: 5px; cursor: pointer;
   }
   .roster-row:hover { background: var(--bg-code, #161b27); }
-  .roster-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
-  .roster-dot.running { background: var(--accent, #f0a500); animation: badge-pulse 1.4s ease-in-out infinite; }
-  .roster-dot.failed, .roster-dot.killed { background: var(--danger, #f87171); }
-  .roster-dot.completed { background: var(--success, #6ee7b7); }
+  /* A dot means "this needs your attention or is live" — the same thing it
+     means on a session row. A finished sub-agent gets NO dot: giving it a
+     green one made the quietest state the most visually prominent, and
+     collided with green-means-running elsewhere in the UI. The element is
+     still laid out so rows stay aligned. */
+  .roster-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: transparent; }
+  .roster-dot.running, .roster-dot.pending { background: var(--accent, #f0a500); animation: badge-pulse 1.4s ease-in-out infinite; }
+  .roster-dot.failed, .roster-dot.killed { background: var(--danger, #f87171); animation: none; }
   .roster-main { flex: 1; min-width: 0; }
   .roster-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
   .roster-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2576,10 +2580,15 @@ function connect() {
       // rather than ever being dropped.
       if (typeof s.seq === 'number') entry.lastSeq = s.seq;
       entry.liveStreamed = true;
-      // Update modelEl immediately if model is known
-      if (s.model && entry.modelEl) {
-        const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
-        if (show && s.model) entry.modelEl.textContent = s.model;
+      // Recorded on the entry, not just painted: refreshModelNames() and any
+      // re-render read entry.model, so setting only the DOM would make the
+      // label vanish again the next time either ran.
+      if (s.model) {
+        entry.model = s.model;
+        if (entry.modelEl) {
+          const show = settings.showModelOn === 'all-bubbles' ? entry.role !== 'user' : entry.role === 'assistant';
+          if (show) entry.modelEl.textContent = s.model;
+        }
       }
       if (s.role !== 'thinking') entry.el.classList.add('streaming');
       // 'raw' (plain pre-wrap text) is still how a thinking bubble's

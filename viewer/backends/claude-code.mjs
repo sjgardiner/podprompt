@@ -857,9 +857,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // posteriori with convertSessionMessages' own non-empty-block ordering.
     const announcedByType = { text: [], thinking: [] };
     let sawStreamEvents = false;
+    // The model for the message currently streaming. Captured here because
+    // this is the ONLY place it is known in time: modelByUuid is filled from
+    // the complete assistant message, which arrives AFTER its blocks have
+    // streamed, and a streamed text block never gets a final broadcast (that
+    // is suppressed to avoid duplicating the bubble). So without this the
+    // model label was simply absent on every live turn and only appeared
+    // when history was re-read from disk — which is exactly how it looked.
+    let streamingModel = null;
 
     function handleStreamEvent(event) {
       if (!event) return;
+
+      // message_start carries the model for everything that follows it.
+      if (event.type === "message_start") {
+        const m = event.message?.model;
+        if (m) streamingModel = aliasForResolvedModel(m);
+        return;
+      }
 
       if (event.type === "content_block_start") {
         const block = event.content_block;
@@ -887,7 +902,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // Record the bubble's id now that it actually exists (a block that
           // never produces visible text never announces and never gets here).
           announcedByType[entry.type].push(entry.id);
-          broadcastStatus(sessionId, { type: "stream_start", id: entry.id, role });
+          // Carrying the model here matches what the opencode backend
+          // already does, and is what the viewer's stream_start handler
+          // reads to label the bubble.
+          broadcastStatus(sessionId, { type: "stream_start", id: entry.id, role, model: streamingModel });
         }
         broadcastStatus(sessionId, { type: "stream_delta", id: entry.id, role, text: entry.text });
         return;

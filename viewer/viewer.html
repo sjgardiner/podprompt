@@ -3005,7 +3005,9 @@ function rosterRunningCount() {
 function renderRoster() {
   const running = rosterRunningCount();
   rosterBtn.classList.toggle('show', subAgents.length > 0);
-  rosterBtn.textContent = running ? `⚙ ${running}` : `⚙ ${subAgents.length}`;
+  // ↳ ("child of") rather than a gear — the gear is the settings button two
+  // slots along, and two gears in one header read as two ways into settings.
+  rosterBtn.textContent = running ? `↳ ${running}` : `↳ ${subAgents.length}`;
   rosterBtn.title = running
     ? `${running} sub-agent${running === 1 ? '' : 's'} running (${subAgents.length} total this session)`
     : `${subAgents.length} sub-agent${subAgents.length === 1 ? '' : 's'} in this session`;

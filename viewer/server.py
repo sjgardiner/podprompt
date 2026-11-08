@@ -239,8 +239,18 @@ def _seed_worker(session_id: str, backend: str | None):
         role = h.get("role", "assistant")
         text = h.get("text", h.get("content", ""))
         msg_id = h.get("id") or f"{role}-{uuid.uuid4()}"
-        entries.append({"type": "message", "role": role, "text": text,
-                         "id": msg_id, "ts": h.get("ts"), "model": h.get("model")})
+        entry = {"type": "message", "role": role, "text": text,
+                 "id": msg_id, "ts": h.get("ts"), "model": h.get("model")}
+        # Same rule as the live /message path, and for the same stated
+        # reason: dropping `origin` here makes the live and replayed views
+        # disagree. THIS is the path that was dropping it — a PEER bubble
+        # became YOU on every reload, because the entry was built from an
+        # explicit field list that simply had no `origin` in it. The driver
+        # supplies it (see inferOriginFromText), /events hands the whole
+        # entry back verbatim, and only this construction lost it.
+        if h.get("origin"):
+            entry["origin"] = h["origin"]
+        entries.append(entry)
 
     with sessions_lock:
         # Prepend: historical entries always logically precede anything that

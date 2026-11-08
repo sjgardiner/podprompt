@@ -665,6 +665,19 @@ function upsertSubAgent(childId, patch) {
   return next;
 }
 
+// Terminal states are final: a sub-agent that finished, failed or was killed
+// is not a candidate for stopping, and must not be re-labelled by a later
+// cascade. No live entry at all means the same thing — the work it described
+// is not running in this process.
+const TERMINAL_SUBAGENT_STATES = new Set(["completed", "failed", "killed"]);
+
+function isSubAgentRunning(childId) {
+  if (sessions.get(childId)?.turnInFlight) return true;
+  const live = subAgents.get(childId);
+  if (!live || !live.status) return false;
+  return !TERMINAL_SUBAGENT_STATES.has(live.status);
+}
+
 function subAgentsForParent(parentId) {
   return childrenOfSession(parentId).map((childId) => {
     const rel = sessionRelations[childId] || {};
@@ -1449,6 +1462,14 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"not a known sub-agent"}');
       return;
     }
+    // Same guard as the cascade: stopping something already finished must
+    // not rewrite its outcome to "killed". Reported rather than silently
+    // ignored, so a stale Stop button says why nothing happened.
+    if (!isSubAgentRunning(childId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "that sub-agent is no longer running", reason: "not-running" }));
+      return;
+    }
     try {
       const childState = sessions.get(childId);
       const backend = getBackend(rel.backend || sessionIdToBackend.get(childId) || defaultBackendId());
@@ -2150,6 +2171,13 @@ const server = createServer(async (req, res) => {
     // precondition for ever declaring perTaskStopAffordance, which flips
     // claude-code's interrupt from killing background tasks to sparing them.
     for (const childId of descendantsOfSession(body.sessionId)) {
+      // Only ones actually running. Cascading unconditionally re-labelled
+      // finished sub-agents as "killed" — so stopping a turn turned every
+      // completed row in the roster red, rewriting history for work that had
+      // already succeeded — and fired pointless aborts at sessions that had
+      // long since ended. A child with no live status (one from a previous
+      // process, say) is by definition not running here.
+      if (!isSubAgentRunning(childId)) continue;
       try {
         const childState = sessions.get(childId);
         const rel = sessionRelations[childId] || {};

@@ -1023,6 +1023,19 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           mode: PERM_HOOK_MODE, toolName, agentId, agentType,
           hasSuggestions: Array.isArray(input?.permission_suggestions) && input.permission_suggestions.length > 0,
           resolvedChild: agentId ? (childIdForAgent.get(agentId) || null) : null,
+          // Which command this ask is actually for, so a sub-agent's ask can
+          // be told apart from the parent's by content rather than by
+          // guessing from timestamps.
+          cmd: typeof toolInput?.command === "string" ? toolInput.command.slice(0, 80) : null,
+          // Every key the CLI actually sent. The decisive question is whether
+          // agent_id is ABSENT from the payload (this build never sends it)
+          // or merely null — the type docs promise it "present only when the
+          // hook fires from within a subagent", and only the wire can say.
+          inputKeys: input && typeof input === "object" ? Object.keys(input).sort() : null,
+          // How many sub-agents this session believes are running right now.
+          // Non-zero while an ask arrives with no agent_id is the clearest
+          // possible statement that attribution is unavailable.
+          liveChildren: childIdForTask.size,
         });
         if (PERM_HOOK_MODE === "observe") return {};
 

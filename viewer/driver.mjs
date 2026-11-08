@@ -1076,6 +1076,19 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     // pick, not a pre-existing session whose backend this call merely
     // resolved for the first time this run via sessionIdToBackend above.
     if (explicitCwd && explicitBackendId) persistLastBackend(explicitBackendId);
+    // A child session inherits its parent's working directory — it is doing
+    // that parent's work, and its transcript is resolved relative to the same
+    // project — but NEVER the parent's model. Model ids are backend-scoped,
+    // so handing a claude-code model id to a child running on opencode would
+    // simply fail to start. Auto-approve does inherit, but through the
+    // relation index at decision time (autoApproveForSession) rather than by
+    // being copied here, so that un-ticking it on the parent takes effect
+    // immediately rather than only for sub-agents spawned afterwards.
+    const parentId = parentOfSession(sessionId);
+    if (parentId && !explicitCwd) {
+      const parentState = sessions.get(parentId);
+      if (parentState?.cwd) s.cwd = parentState.cwd;
+    }
     const pre = preSeeds.get(sessionId);
     if (pre) {
       if (pre.model) s.model = pre.model;

@@ -111,7 +111,7 @@ export function selectVisibleSessions(raw, cwdRoot) {
     (s) => s && !s.parentID && s.directory && isUnderRoot(s.directory, cwdRoot));
 }
 
-export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId }) {
+export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId, resolveApprovalExternally }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -439,6 +439,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         const decoder = new TextDecoder();
         let buf = "";
         sseReconnectDelay = 1000; // a fresh live connection resets the backoff
+        // ITEM 4. A dropped stream can swallow the "that request is done"
+        // announcements, which would strand cards exactly as before. The
+        // stream is live again, so ask OpenCode which requests it still
+        // considers outstanding and retract anything it no longer lists.
+        reconcilePermissions().catch(() => {});
         (async function pump() {
           try {
             while (true) {
@@ -517,6 +522,30 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       return;
     }
 
+    // ITEM 1. OpenCode announces every request that stops being live, and
+    // the driver listened for NONE of these — so a card whose request had
+    // been answered, withdrawn or expired stayed on screen indistinguishable
+    // from a live one. Clicking it POSTed to an id OpenCode had discarded,
+    // which is the PermissionNotFoundError the user kept seeing. Worse than
+    // cosmetic: the dead card sat beside a genuinely blocking one, so
+    // answering the wrong one left an agent waiting (measured: two reads
+    // blocked 384s and only ended on a manual Stop).
+    //
+    // Harmless for our OWN replies: OpenCode emits this for those too, and
+    // by then the card is already gone, so the lookup simply finds nothing.
+    if (evt.type === "permission.replied" || evt.type === "question.replied"
+        || evt.type === "question.rejected") {
+      // Shape is not guaranteed across event kinds, so take the first id
+      // that looks like one rather than assuming a single field name.
+      const pid = props?.id || props?.requestID || props?.permissionID || props?.questionID;
+      if (pid) {
+        permissionSessionOf.delete(pid);
+        resolveApprovalExternally?.(pid,
+          "This request was already answered or withdrawn in OpenCode.");
+      }
+      return;
+    }
+
     if (evt.type === "question.asked") {
       // properties is {id, sessionID, questions: [QuestionInfo], tool} —
       // questions (plural) already matches the {question,header,options:
@@ -551,9 +580,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     }
     updateSubAgent?.(podId, { status: "running", awaiting: "permission" });
     requestApproval(podId, "permission", perm.permission || "unknown", perm.metadata || {},
-      { canAlwaysAllow: true })
+      { canAlwaysAllow: true, externalId: perm.id })
       .then((decision) => {
         updateSubAgent?.(podId, { awaiting: null });
+        if (decision?.cancelled) return undefined;
         return replyPermission(perm.id, decision);
       })
       .catch((e) => console.error("[opencode] child permission failed:", e.message));
@@ -563,9 +593,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const podId = childRealToPod.get(realId);
     if (!podId) return;
     updateSubAgent?.(podId, { status: "running", awaiting: "question" });
-    requestApproval(podId, "question", "AskUserQuestion", { questions: q.questions || [] })
+    requestApproval(podId, "question", "AskUserQuestion", { questions: q.questions || [] },
+      { externalId: q.id })
       .then((answer) => {
         updateSubAgent?.(podId, { awaiting: null });
+        if (answer?.cancelled) return undefined;
         return replyQuestion(q.id, q.questions || [], answer);
       })
       .catch((e) => console.error("[opencode] child question failed:", e.message));
@@ -1122,8 +1154,10 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // "always" | "reject"), so widening is available for every ask without
       // the backend having to propose specific rules first.
       const p = requestApproval(sessionId, "permission", perm.permission || "unknown", perm.metadata || {},
-        { canAlwaysAllow: true })
-        .then((decision) => replyPermission(perm.id, decision));
+        { canAlwaysAllow: true, externalId: perm.id })
+        // `cancelled` means the card was retracted because OpenCode said the
+        // request is dead. Replying anyway is what produced the 404.
+        .then((decision) => (decision?.cancelled ? undefined : replyPermission(perm.id, decision)));
       pendingApprovalPromises.push(p);
     }
 
@@ -1132,8 +1166,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // q.questions already matches Claude's QuestionInfo[] shape
       // ({question,header,options:[{label,description}]}) closely enough to
       // render unmodified.
-      const p = requestApproval(sessionId, "question", "AskUserQuestion", { questions: q.questions })
-        .then((answer) => replyQuestion(q.id, q.questions, answer));
+      const p = requestApproval(sessionId, "question", "AskUserQuestion", { questions: q.questions },
+        { externalId: q.id })
+        .then((answer) => (answer?.cancelled ? undefined : replyQuestion(q.id, q.questions, answer)));
       pendingApprovalPromises.push(p);
     }
 
@@ -1386,6 +1421,36 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Which permission ids OpenCode still considers live, compared against the
+  // ones we are showing cards for. Anything we show that it no longer lists
+  // is dead, and its card is retracted.
+  //
+  // Note the /api prefix: the bare /session/{id}/permission path is served by
+  // OpenCode's web UI and returns HTML, so the obvious spelling silently
+  // yields garbage rather than an error.
+  async function reconcilePermissions() {
+    const bySession = new Map();
+    for (const [pid, realId] of permissionSessionOf) {
+      if (!bySession.has(realId)) bySession.set(realId, []);
+      bySession.get(realId).push(pid);
+    }
+    for (const [realId, ours] of bySession) {
+      let live;
+      try {
+        const res = await api(`/api/session/${realId}/permission`, { timeoutMs: 8000 });
+        live = new Set((res?.data || res || []).map((x) => x?.id).filter(Boolean));
+      } catch {
+        continue; // unreachable: assume ours are still live rather than retract wrongly
+      }
+      for (const pid of ours) {
+        if (live.has(pid)) continue;
+        permissionSessionOf.delete(pid);
+        resolveApprovalExternally?.(pid,
+          "This request is no longer open in OpenCode (it ended while the connection was down).");
+      }
+    }
+  }
+
   async function replyPermission(requestID, decision) {
     try {
       // OpenCode expresses "always allow" as a reply SCOPE rather than a
@@ -1399,7 +1464,22 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         body: JSON.stringify({ reply }),
         timeoutMs: 5000,
       });
+      // Answered: it is no longer outstanding, so drop it from the set the
+      // reconnect reconciler walks. Left behind, this map only ever grows.
+      permissionSessionOf.delete(requestID);
     } catch (e) {
+      // ITEM 2. "Not found" is not a failure to report, it is the answer:
+      // the request died before the user's click reached it. Retract the
+      // card and say so, instead of logging a 404 nobody can interpret.
+      // A safety net for anything the permission.replied handler misses —
+      // a dropped event, or a resolution OpenCode never announced.
+      if (/NotFoundError|-> 404/.test(e.message || "")) {
+        permissionSessionOf.delete(requestID);
+        resolveApprovalExternally?.(requestID,
+          "This request expired before your answer reached OpenCode.");
+        console.log(`[opencode] permission ${requestID} was already gone; card retracted`);
+        return;
+      }
       console.error("[opencode] failed to reply to permission:", e.message);
     }
   }

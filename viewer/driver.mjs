@@ -267,13 +267,19 @@ const pendingApprovals = new Map(); // id -> { resolve, sessionId, kind, toolNam
 // every ask (its reply takes a scope). Inferring from `suggestions` alone
 // would silently hide the button on every opencode permission.
 function requestApproval(sessionId, kind, toolName, toolInput, opts = {}) {
-  const { suggestions = null, canAlwaysAllow = false, agentType = null } = opts;
+  const { suggestions = null, canAlwaysAllow = false, agentType = null, externalId = null } = opts;
   const id = randomUUID();
   return new Promise((resolve) => {
     pendingApprovals.set(id, {
       resolve, sessionId, kind, toolName, toolInput,
       suggestions: suggestions || null,
       canAlwaysAllow: !!canAlwaysAllow,
+      // The BACKEND's own id for this request, when it has one. Cards are
+      // keyed by our uuid, so without this there is no way to act on a
+      // backend saying "request per_123 is no longer live" — which is
+      // exactly the message that was being thrown away, leaving dead cards
+      // on screen that 404 when clicked.
+      externalId: externalId || null,
       askedAt: nowIso(),
     });
     persistPendingApprovals();
@@ -386,6 +392,40 @@ function pendingKindForSession(sessionId) {
 // it expired, instead of sitting there looking actionable forever. Backend-
 // agnostic: called from the shared runTurn wrapper below regardless of
 // which backend ran the turn.
+// Dismiss a card because the BACKEND says its request is no longer live —
+// answered elsewhere, withdrawn, or expired.
+//
+// Without this, the only way a card ever disappeared was the user clicking
+// it or its whole turn ending. OpenCode announces resolution on every
+// permission (`permission.replied`, `question.replied`, `question.rejected`)
+// and the driver listened for none of them, so a dead request stayed on
+// screen looking exactly like a live one. Clicking it POSTed an answer for
+// an id OpenCode had already discarded — the PermissionNotFoundError 404.
+//
+// Resolving with `cancelled` rather than an allow/deny is deliberate: it
+// unblocks whatever the backend is awaiting while telling it NOT to answer,
+// since answering again is precisely what produced the 404.
+function resolveApprovalExternally(externalId, text) {
+  if (!externalId) return false;
+  for (const [id, pending] of pendingApprovals) {
+    if (pending.externalId !== externalId) continue;
+    pendingApprovals.delete(id);
+    persistPendingApprovals();
+    try { pending.resolve({ cancelled: true }); } catch { /* already settled */ }
+    broadcast(pending.sessionId, "permission", JSON.stringify({
+      kind: pending.kind, toolName: pending.toolName, toolInput: pending.toolInput,
+      resolved: true,
+      resolvedText: text || "This request is no longer waiting for an answer.",
+    }), id);
+    if (isRosterChild(pending.sessionId)) {
+      upsertSubAgent(pending.sessionId, { awaiting: null, awaitingId: null });
+    }
+    broadcastStatus(pending.sessionId, { type: "awaiting_input", kind: null });
+    return true;
+  }
+  return false;
+}
+
 function expirePendingApprovals(sessionId) {
   let expired = 0;
   for (const [id, pending] of pendingApprovals) {
@@ -421,6 +461,9 @@ const backendHooks = {
   cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval,
   registerChild: registerChildSession,
   autoApproveForSession,
+  // Lets a backend retract a card when its own runtime says the request
+  // behind it is dead. See resolveApprovalExternally.
+  resolveApprovalExternally,
   updateSubAgent: upsertSubAgent,
   // The messaging surface, handed to each backend so it can expose the SAME
   // tools in whatever shape its runtime wants. The logic stays here; a

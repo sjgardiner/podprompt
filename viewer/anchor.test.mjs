@@ -48,8 +48,10 @@ function freshDriver() {
     const saveSessionRelations = () => { saves++; };
     ${bodyOf("expectDelegateAnchor")}
     ${bodyOf("noteDelegateAnchor")}
+    ${bodyOf("pendingDelegateAnchorCount")}
     return {
       expectDelegateAnchor, noteDelegateAnchor,
+      pendingCount: pendingDelegateAnchorCount,
       rels: () => sessionRelations,
       setRels: (r) => { sessionRelations = r; },
       pendingFor: (p) => pendingDelegateAnchors.get(p),
@@ -151,6 +153,60 @@ function freshDriver() {
   try { d.noteDelegateAnchor("P", { id: "prt_1", state: { input: { prompt: "p" } } }); }
   catch { threw = true; }
   check("a deleted child is handled without throwing", !threw);
+}
+
+// ── The turn-end rescan (§13g) ────────────────────────────────────────────
+//
+// noteDelegateAnchor has exactly ONE live call site: the message.part.updated
+// frame for a tool part reaching "completed". No TTL, no history rescan, and
+// the POST-response fallback only BROADCASTS parts — it never arms identity.
+// So an anchor depended on catching a single SSE frame while the parent's
+// waiter was registered. Miss it or reorder it past session.idle and the
+// anchor is gone permanently, with the turn, the tool bubble and the child
+// relation all looking fine.
+//
+// Survivable when AWAITED (the tool call stays open for the child's whole
+// run, ~20s measured, so the frame is nowhere near teardown); lethal when
+// ASYNC (~10ms at the turn tail, part-completed and session.idle back to
+// back). The rescan re-runs the SAME matcher against the finished message.
+{
+  const d = freshDriver();
+  d.setRels({ kid: { childKind: "delegated", native: {} } });
+
+  check("nothing pending reports zero", d.pendingCount("P") === 0);
+  d.expectDelegateAnchor("P", "kid", "some work");
+  check("an armed expectation is counted", d.pendingCount("P") === 1);
+  check("...only for its own parent", d.pendingCount("other") === 0);
+
+  // Matching clears it — which is what makes the rescan free on a healthy
+  // turn: the gate reads zero and no request is made.
+  d.noteDelegateAnchor("P", { id: "prt_x", state: { input: { prompt: "some work" } } });
+  check("a matched anchor stops being counted", d.pendingCount("P") === 0);
+  check("...and was recorded", d.rels().kid.native.toolUseId === "prt_x");
+}
+
+// ── The rescan's wiring, asserted against source ──────────────────────────
+{
+  const { readFileSync } = await import("node:fs");
+  const oc = readFileSync(new URL("./backends/opencode.mjs", import.meta.url), "utf8");
+  const drv = readFileSync(new URL("./driver.mjs", import.meta.url), "utf8");
+
+  check("the driver exposes the pending count", /pendingDelegateAnchorCount,/.test(drv));
+  check("the backend rescans the finished message",
+    /pendingDelegateAnchorCount\?\.\(sessionId\) > 0/.test(oc));
+  // Gated, so a healthy turn issues no HTTP request at all.
+  const fin = oc.slice(oc.indexOf("Last chance to recover a delegation anchor"));
+  const block = fin.slice(0, fin.indexOf("turnWaiters.delete"));
+  check("the message fetch happens only when something is unmatched",
+    block.indexOf("pendingDelegateAnchorCount") < block.indexOf("/message"), block.slice(0, 120));
+  check("it reuses the same matcher rather than a second one",
+    /noteDelegateAnchor\?\.\(sessionId, part\)/.test(block));
+  check("it runs before the waiter is torn down",
+    oc.indexOf("Last chance to recover") < oc.indexOf("turnWaiters.delete(realId)"));
+  // A failed rescan leaves the anchor exactly where it already was. Failing
+  // a turn over a best-effort diagnostic would be a worse bug than the one
+  // being fixed.
+  check("a failed rescan cannot fail the turn", /rescan failed for/.test(block));
 }
 
 console.log(`delegation anchors: ${pass} passed, ${fail} failed`);

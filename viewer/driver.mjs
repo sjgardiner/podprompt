@@ -464,6 +464,7 @@ const backendHooks = {
   // Lets a backend retract a card when its own runtime says the request
   // behind it is dead. See resolveApprovalExternally.
   resolveApprovalExternally,
+  pendingDelegateAnchorCount,
   updateSubAgent: upsertSubAgent,
   // The messaging surface, handed to each backend so it can expose the SAME
   // tools in whatever shape its runtime wants. The logic stays here; a
@@ -1704,6 +1705,14 @@ function expectDelegateAnchor(parentSessionId, childId, prompt) {
   // grow this list forever.
   while (list.length > 16) list.shift();
   pendingDelegateAnchors.set(parentSessionId, list);
+}
+
+// How many delegations from this parent are still waiting to be matched to
+// a tool call. Exposed to backends purely so they can decide whether a
+// turn-end rescan is worth an HTTP request: on a normal turn the live event
+// already matched everything and this is 0, so the rescan costs nothing.
+function pendingDelegateAnchorCount(parentSessionId) {
+  return pendingDelegateAnchors.get(parentSessionId)?.length || 0;
 }
 
 // Called by the opencode backend for every tool part it renders. Cheap: one

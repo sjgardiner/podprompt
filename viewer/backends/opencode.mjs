@@ -118,7 +118,8 @@ export function selectVisibleSessions(raw, cwdRoot) {
     (s) => s && !s.parentID && s.directory && isUnderRoot(s.directory, cwdRoot));
 }
 
-export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId, resolveApprovalExternally }) {
+export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId, resolveApprovalExternally,
+  pendingDelegateAnchorCount }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -1411,6 +1412,51 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // report reason:"aborted" identically.
       state.turnOutcome = { reason: "error", error: e.message };
     } finally {
+      // Last chance to recover a delegation anchor.
+      //
+      // noteDelegateAnchor has exactly ONE call site: the live
+      // message.part.updated frame for a tool part reaching completed. There
+      // is no TTL, no history rescan, and the POST-response fallback below
+      // only BROADCASTS parts — it never arms identity. So the anchor hangs
+      // on catching a single SSE frame while this waiter is registered, and
+      // if that frame is missed or reordered past session.idle it is lost
+      // permanently, with the turn, the tool bubble and the child relation
+      // all looking perfectly fine.
+      //
+      // That is survivable for an AWAITED delegation, whose tool call stays
+      // open for the child's entire run (~20s measured) so the frame lands
+      // nowhere near teardown. An ASYNC one completes in ~10ms at the turn
+      // tail, with part-completed and session.idle emitted back to back —
+      // one frame of reordering loses it.
+      //
+      // So rescan the finished message here, re-running the SAME matcher
+      // against durable data instead of a live frame. Gated on the driver
+      // reporting something still unmatched, which on a healthy turn is zero
+      // — no request is made in the normal case.
+      try {
+        if (pendingDelegateAnchorCount?.(sessionId) > 0) {
+          const msgs = await api(`/session/${realId}/message`, { timeoutMs: 8000 });
+          const recent = Array.isArray(msgs) ? msgs.slice(-5) : [];
+          let recovered = 0;
+          for (const m of recent) {
+            for (const part of (m?.parts || [])) {
+              if (part?.type !== "tool") continue;
+              const before = pendingDelegateAnchorCount(sessionId);
+              noteDelegateAnchor?.(sessionId, part);
+              if (pendingDelegateAnchorCount(sessionId) < before) recovered += 1;
+            }
+          }
+          if (recovered) {
+            console.log(
+              `[opencode] recovered ${recovered} delegation anchor(s) for ${sessionId}`
+              + ` from the finished message (the live part frame was missed)`);
+          }
+        }
+      } catch (e) {
+        // Best effort. A failed rescan leaves the anchor missing, which is
+        // exactly where it already was — never a reason to fail a turn.
+        console.error(`[opencode] delegation-anchor rescan failed for ${sessionId}: ${e.message}`);
+      }
       turnWaiters.delete(realId);
       // A completed turn may have run on a different model (state.model) than
       // the session's last one — drop the cached derivation so the next

@@ -8,14 +8,62 @@
 # newer bash a user may have on PATH via Homebrew. Avoid mapfile/readarray,
 # declare -A, and ${var,,}/${var^^} — none of those exist before bash 4.
 
+# ── Where this checkout lives ─────────────────────────────────────────────────
+# This command is meant to be run from the directory you want mounted as
+# /workspace, which means it can be invoked from anywhere and must never
+# infer its own location from the cwd. Everything it needs from the checkout
+# (viewer/ to deploy, Dockerfile to build) is resolved from here instead.
+#
+# Symlinks are followed deliberately: `ln -s .../bin/podprompt ~/.local/bin/`
+# is the most idiomatic way to put a command on PATH, and without this loop
+# the link's own directory would be mistaken for the checkout. `readlink -f`
+# would be one line, but BSD readlink (macOS) has no -f, so this walks the
+# chain by hand — which is also bash-3.2-safe.
+resolve_self_dir() {
+    local src="${BASH_SOURCE[0]}" link_dir
+    while [ -L "$src" ]; do
+        link_dir="$(cd -P "$(dirname "$src")" && pwd)"
+        src="$(readlink "$src")"
+        # A relative symlink target resolves against the link's directory,
+        # not against the cwd.
+        case "$src" in
+            /*) ;;
+            *) src="$link_dir/$src" ;;
+        esac
+    done
+    cd -P "$(dirname "$src")" && pwd
+}
+
+SELF_DIR="$(resolve_self_dir)"
+REPO_DIR="$(cd "$SELF_DIR/.." && pwd)"
+
 usage() {
     cat <<'USAGE'
-Usage: podprompt.sh [OPTIONS] [PASSTHROUGH_ARGS...]
+Usage: podprompt [OPTIONS] [PASSTHROUGH_ARGS...]
 
 Launches a coding agent (Claude Code or OpenCode) inside a Docker sandbox,
 mounting your current directory as the workspace, your real ~/.claude for
 persistent Claude Code auth/settings, and PodPrompt's own state/data
 directories for the viewer app and its bookkeeping.
+
+RUN IT FROM THE PROJECT YOU WANT TO WORK ON. The current directory is an
+implicit argument: it becomes /workspace inside the container, writable by
+the agents. Put this command on your PATH once and invoke it anywhere:
+
+    export PATH="/path/to/podprompt/bin:$PATH"     # in ~/.bashrc or ~/.zshrc
+    source /path/to/podprompt/activate.sh          # or just for this shell
+
+The checkout stays where it is and is resolved from this command's own
+location, so viewer deployment and image builds work from any directory.
+Symlinking bin/podprompt onto your PATH works too. Moving or deleting the
+checkout breaks the command — it is permanent infrastructure, not scratch.
+
+FIRST RUN:
+
+    podprompt --build            # build the Docker image
+    podprompt --deploy-viewer    # install the viewer app
+    podprompt --claude           # one-time sign-in, if using a subscription
+    cd ~/some/project && podprompt
 
 PROVIDER OPTIONS (mutually exclusive; --direct is the default):
 
@@ -49,7 +97,7 @@ PROVIDER OPTIONS (mutually exclusive; --direct is the default):
 INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
 
   (default)       Start PodPrompt's browser-based viewer/driver UI (see
-  --viewer        --viewer below) — a bare ./podprompt.sh with no interface
+  --viewer        --viewer below) — a bare `podprompt` with no interface
                   flag now gives you this, not a terminal session.
 
   --claude, --claude-code
@@ -157,6 +205,13 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
 
 UTILITY OPTIONS:
 
+  --build         Build the 'podprompt' Docker image from this checkout and
+                  exit. Equivalent to `docker build -t podprompt .` run from
+                  the checkout, but works from any directory. Re-run it when
+                  the Dockerfile changes, and when viewer/package.json or
+                  viewer/package-lock.json changes — those are build inputs,
+                  and --deploy-viewer alone will not pick them up.
+
   --list-models   Print all models currently available on the LiteLLM instance
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
@@ -174,7 +229,7 @@ UTILITY OPTIONS:
                   always installed for the image's own actual platform
                   rather than whichever platform runs this script. If
                   viewer/package.json's dependency changes, rebuild the
-                  image (docker build -t podprompt .); --deploy-viewer alone
+                  image (podprompt --build); --deploy-viewer alone
                   won't pick that up.
 
   --help, -h      Show this message and exit.
@@ -203,8 +258,8 @@ PASS-THROUGH ARGUMENTS:
   Pass-through args are forwarded after all recognised flags have been consumed,
   so you can freely mix them:
 
-    ./podprompt.sh --claude --litellm --dangerously-skip-permissions
-    ./podprompt.sh --opencode --continue
+    podprompt --claude --litellm --dangerously-skip-permissions
+    podprompt --opencode --continue
 
 ENVIRONMENT VARIABLES:
 
@@ -253,39 +308,40 @@ PERSISTENT STATE:
 
 EXAMPLES:
 
-  # First-time setup: build the image
-  docker build -t podprompt .
+  # First-time setup: build the image, then install the viewer app
+  podprompt --build
+  podprompt --deploy-viewer
 
   # Normal session — browser viewer, both backends available (default)
-  ./podprompt.sh
+  podprompt
 
   # Claude Code's own terminal UI instead of the viewer
-  ./podprompt.sh --claude
+  podprompt --claude
 
   # OpenCode's own terminal UI instead of the viewer
-  ./podprompt.sh --opencode
+  podprompt --opencode
 
   # API-key billing instead of subscription (viewer, or --claude)
-  ./podprompt.sh --direct-api
+  podprompt --direct-api
 
   # LiteLLM — interactive model picker runs automatically (Claude Code TUI
   # only; skipped for --opencode, meaningless for --viewer — see --litellm
   # above)
-  ./podprompt.sh --claude --litellm
+  podprompt --claude --litellm
 
   # List available LiteLLM models without launching
-  ./podprompt.sh --list-models
+  podprompt --list-models
 
   # Viewer on a different port
-  ./podprompt.sh --viewer-port 7900
+  podprompt --viewer-port 7900
 
   # OpenCode's own terminal UI against your LiteLLM instance
   # (LITELLM_URL/LITELLM_API_KEY passed through for opencode.jsonc's own
   # custom-provider config)
-  ./podprompt.sh --opencode --litellm
+  podprompt --opencode --litellm
 
   # Pass a flag through to claude (only meaningful with --claude)
-  ./podprompt.sh --claude --dangerously-skip-permissions
+  podprompt --claude --dangerously-skip-permissions
 USAGE
 }
 
@@ -422,6 +478,35 @@ list_models() {
     fetch_litellm_models | jq -r '.data[].id' | sort
 }
 
+build_image() {
+    # Builds from the checkout rather than the cwd, so `podprompt --build`
+    # works from anywhere. Without this the one step that still required
+    # standing in the checkout would be the odd one out, and users would have
+    # to remember both where the checkout is and what tag to use.
+    if [ ! -f "${REPO_DIR}/Dockerfile" ]; then
+        echo "Error: no Dockerfile in this checkout (${REPO_DIR})." >&2
+        exit 1
+    fi
+    echo "Building the podprompt image from ${REPO_DIR}..."
+    docker build -t podprompt "$REPO_DIR" || exit 1
+    echo "Image built. Deploy the viewer app with 'podprompt --deploy-viewer' if you have not already."
+}
+
+image_exists() {
+    docker image inspect podprompt >/dev/null 2>&1
+}
+
+require_image() {
+    # Checked before anything slow or stateful happens. The raw Docker error
+    # for a missing image says nothing about how to fix it, and now that this
+    # command runs from anywhere the user may be nowhere near the checkout.
+    if ! image_exists; then
+        echo "Error: the 'podprompt' Docker image does not exist yet." >&2
+        echo "Build it with:  podprompt --build" >&2
+        exit 1
+    fi
+}
+
 deploy_viewer() {
     # The supported way to get the viewer's app code deployed: copy this
     # repo's viewer/ app files into PodPrompt's own data directory, so the
@@ -440,15 +525,16 @@ deploy_viewer() {
     # are therefore not copied here either — they only matter to the
     # Dockerfile's own build-time npm install now. If you've changed
     # viewer/package.json's dependency, rebuild the image
-    # (docker build -t podprompt .) — --deploy-viewer alone won't pick that
+    # (podprompt --build) — --deploy-viewer alone will not pick that
     # up.
     local src_dir target_dir
-    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/viewer"
+    src_dir="${REPO_DIR}/viewer"
     target_dir="${PODPROMPT_DATA_DIR}/viewer"
 
     if [ ! -d "$src_dir" ]; then
-        echo "Error: no viewer/ directory next to this script ($src_dir)." >&2
-        echo "Run this from your podprompt checkout (the directory containing podprompt.sh and viewer/)." >&2
+        echo "Error: no viewer/ directory in this checkout ($src_dir)." >&2
+        echo "The podprompt command resolves its checkout from its own location." >&2
+        echo "If the checkout has moved or been deleted, update PATH to point at the new one." >&2
         exit 1
     fi
 
@@ -477,7 +563,7 @@ deploy_viewer() {
 
     if grep -q '<title>PodPrompt</title>' "$target_dir/viewer.html"; then
         echo "Viewer app files deployed to $target_dir."
-        echo "Dependencies live in the Docker image, not here — rebuild it (docker build -t podprompt .) if viewer/package.json changed."
+        echo "Dependencies live in the Docker image, not here — rebuild it (podprompt --build) if viewer/package.json changed."
         echo "Start it with --viewer (container restart happens automatically); hard-refresh the browser tab if you were already connected."
     else
         echo "Viewer app files deployed to $target_dir." >&2
@@ -624,6 +710,10 @@ while [ $# -gt 0 ]; do
             deploy_viewer
             exit 0
             ;;
+        --build)
+            build_image
+            exit 0
+            ;;
         --direct)
             PROVIDER="direct"
             PROVIDER_EXPLICIT=1
@@ -702,7 +792,7 @@ fi
 # execs directly — --viewer (the default) never execs either binary at all,
 # so silently accepting them would look like they did something. Surfaced as
 # a warning rather than a hard error, since this used to be the unconditional
-# default behavior (bare `./podprompt.sh --dangerously-skip-permissions` used
+# default behavior (bare `podprompt --dangerously-skip-permissions` used
 # to work) and a warning is enough to catch the now-missing --claude/--opencode
 # without breaking anything further.
 if [ "$VIEWER_ENABLED" = 1 ] && [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
@@ -729,11 +819,58 @@ fi
 if [ "$TUI_BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
    && [ "$PROVIDER" = "direct-api" ]; then
     echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --opencode." >&2
-    echo "OpenCode manages its own provider auth — run './podprompt.sh --opencode' and use its" >&2
+    echo "OpenCode manages its own provider auth — run 'podprompt --opencode' and use its" >&2
     echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
     echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude/." >&2
     exit 1
 fi
+
+# ── Workspace preflight ───────────────────────────────────────────────────────
+# The cwd becomes /workspace, writable by agents inside the container. That is
+# the whole point of invoking this from your project directory, but it means a
+# stray run from somewhere enormous mounts somewhere enormous. Warn, confirm,
+# and get out of the way — the answer to "are you sure" is allowed to be yes.
+#
+# One rule, chosen because it is predictable rather than clever: complain when
+# the cwd is $HOME or an ancestor of it. That covers $HOME, /, /home and
+# /Users, and nothing a real project directory would ever match.
+WORKSPACE_PATH="$(pwd)"
+require_image
+
+workspace_is_too_broad() {
+    [ "$WORKSPACE_PATH" = "/" ] && return 0
+    case "$HOME/" in
+        "$WORKSPACE_PATH"/*) return 0 ;;
+    esac
+    return 1
+}
+
+if workspace_is_too_broad && [ "${PODPROMPT_YES:-0}" != 1 ]; then
+    echo "Warning: this would mount $WORKSPACE_PATH at /workspace." >&2
+    if [ "$WORKSPACE_PATH" = "$HOME" ]; then
+        echo "That is your entire home directory, writable by agents in the container." >&2
+    else
+        echo "That contains your home directory, writable by agents in the container." >&2
+    fi
+    echo "Usually you want to cd into a specific project first." >&2
+    if [ -t 0 ]; then
+        printf 'Continue anyway? [y/N] ' >&2
+        read -r reply
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Aborted." >&2; exit 1 ;;
+        esac
+    else
+        # Nothing to read an answer from, and refusing outright would break
+        # anyone scripting this deliberately. Say so loudly and continue;
+        # PODPROMPT_YES=1 silences this.
+        echo "Not a terminal, so continuing without confirmation. Set PODPROMPT_YES=1 to silence this." >&2
+    fi
+fi
+
+# Always say what is being mounted. The cwd is an implicit argument to this
+# command, so it should never be a guess.
+echo "Workspace: $WORKSPACE_PATH → /workspace"
 
 # Resolve provider-specific settings
 if [ "$PROVIDER" = "litellm" ]; then
@@ -816,7 +953,7 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     for f in server.py viewer.html start-viewer.sh driver.mjs backends; do
         if [ ! -e "$PODPROMPT_DATA_DIR/viewer/$f" ]; then
             echo "Error: $PODPROMPT_DATA_DIR/viewer/$f not found."
-            echo "Run './podprompt.sh --deploy-viewer' from this repo to install/update the viewer there."
+            echo "Run 'podprompt --deploy-viewer' to install/update the viewer there."
             exit 1
         fi
     done
@@ -996,13 +1133,13 @@ docker run -it --rm \
   -e VIEWER_DRIVER_PORT="$VIEWER_DRIVER_PORT" \
   -e OPENCODE_PORT="$OPENCODE_PORT" \
   -e PODPROMPT_BIND_ADDR="$BIND_ADDR" \
-  -e HOST_WORKSPACE_PATH="$(pwd)" \
+  -e HOST_WORKSPACE_PATH="$WORKSPACE_PATH" \
   ${EFFECTIVE_TOKEN:+-e ANTHROPIC_AUTH_TOKEN="$EFFECTIVE_TOKEN"} \
   ${EFFECTIVE_MODEL:+-e ANTHROPIC_MODEL="$EFFECTIVE_MODEL"} \
   "${LITELLM_ENV_FLAGS[@]}" \
   "${OPENCODE_LITELLM_ENV_FLAGS[@]}" \
   "${VIEWER_PORT_FLAGS[@]}" \
-  -v "$(pwd):/workspace:z" \
+  -v "$WORKSPACE_PATH:/workspace:z" \
   --workdir /workspace \
   -v "${CONNECT_CONFIG}" \
   "${OPENCODE_MOUNT_FLAGS[@]}" \

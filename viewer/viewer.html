@@ -1296,6 +1296,37 @@
   .msg.thinking .msg-label .ts { margin-left: auto; }
   .msg.thinking .msg-think-toggle .model { color: var(--muted); opacity: .8; margin-left: 0; margin-right: 0; }
 
+  /* §13d — the delegate_session bubble.
+     A one-line header (title · status · open session) with the delegation
+     prompt collapsed behind it, matching how thinking and tool blocks
+     already behave. The prompt used to be DESTROYED on every sessions poll
+     (innerHTML = ''), so the thing you most wanted to re-read was the one
+     thing that vanished a second after it appeared. */
+  .delegate-head {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .delegate-head::before { content: '▸'; opacity: .7; }
+  .delegate.expanded .delegate-head::before { content: '▾'; }
+  .delegate-head:hover .delegate-title { text-decoration: underline; }
+  .delegate-title { font-weight: 600; }
+  .delegate-status { color: var(--muted); }
+  /* The states that are NOT "all is well" have to be distinguishable at a
+     glance, or this is the same silent-failure bug in a new coat. */
+  .delegate-status.bad { color: var(--danger, #f87171); font-weight: 600; }
+  .delegate-status.warn { color: var(--warn, #fbbf24); }
+  .delegate-detail {
+    display: none;
+    margin-top: 8px;
+    padding-left: 14px;
+    border-left: 2px solid var(--border, #333);
+  }
+  .delegate.expanded .delegate-detail { display: block; }
+
   /* per-delta streaming: raw text appended into the bubble (no full
      markdown re-render per token — that re-flows the whole bubble every
      chunk and makes long streams janky). Finalize swaps to a clean render. */
@@ -4346,31 +4377,102 @@ function refreshTaskBubbles() {
 // Claude Code only: OpenCode's ToolContext exposes no per-call id, so
 // delegateToolUseId is null there and these bubbles simply keep their default
 // rendering. The nested row in the session list is the cross-backend surface.
+// What a delegated child's state actually is, in words — §13d.
+//
+// The old vocabulary was running / idle / waiting-for-you, which had no way
+// to say "this died" or "this is waiting out a usage limit". A child whose
+// turn was killed rendered as `idle`, identical to one that had finished its
+// work: §15's bug, one level up. Severity drives colour, because a failure
+// nobody notices is the thing this whole area keeps getting wrong.
+function delegateStatus(s) {
+  if (s.pendingKind === 'question') return { text: 'waiting for your answer', sev: 'warn' };
+  if (s.pendingKind === 'permission') return { text: 'waiting for your approval', sev: 'warn' };
+  if (s.inFlight) return { text: 'running', sev: '' };
+
+  const h = s.turnHealth;
+  if (!h) return { text: 'idle', sev: '' };
+
+  // A human stop is the one "down" state the user created on purpose, so it
+  // is reported plainly rather than as a fault.
+  if (h.stopped) return { text: 'stopped by you', sev: '' };
+
+  if (h.resumeBlocked === 'quota_exhausted') {
+    return { text: 'stopped — out of credit', sev: 'bad' };
+  }
+  if (h.resumeBlocked === 'strikes-exhausted') {
+    return { text: 'failed — retries exhausted, needs you', sev: 'bad' };
+  }
+  if (h.resumeAt) {
+    const at = new Date(h.resumeAt);
+    const mins = Math.round((at.getTime() - Date.now()) / 60000);
+    const when = mins <= 0 ? 'any moment'
+      : mins < 90 ? `in ~${mins}m`
+      : `at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    // Scheduled means a backend told us when service resumes; that is a
+    // wait, not a fault, and must not be coloured like one.
+    return h.resumeScheduled
+      ? { text: `waiting out a usage limit — resuming ${when}`, sev: 'warn' }
+      : { text: `failed — retrying ${when}`, sev: 'warn' };
+  }
+  return { text: `failed — ${h.reason}`, sev: 'bad' };
+}
+
+// Built ONCE per bubble, then only its status text is updated.
+//
+// THE BUG THIS FIXES: this function used to do `entry.el.innerHTML = ''` on
+// every sessions poll, which destroyed the delegation prompt a second after
+// it appeared and would have reset any expand state every few seconds. A
+// periodic refresh that throws away user-facing state is a bug independently
+// of the collapse control — which is exactly why §13d deferred the collapse
+// until this was fixed rather than building on top of it.
+const delegateUI = new WeakMap();
+
 function refreshDelegateBubbles() {
   for (const s of delegatedChildren) {
     if (!s.toolUseId) continue;
     const entry = msgs[s.toolUseId];
     if (!entry || !entry.el) continue;
-    const bits = [];
-    if (s.pendingKind === 'question') bits.push('waiting for your answer');
-    else if (s.pendingKind === 'permission') bits.push('waiting for your approval');
-    else if (s.inFlight) bits.push('running');
-    else bits.push('idle');
-    if (s.backend) bits.push(s.backend);
-    entry.el.innerHTML = '';
-    const text = document.createElement('span');
-    text.textContent = bits.join(' · ') + ' · ';
-    const open = document.createElement('span');
-    open.className = 'task-open' + (s.pendingKind ? ' task-waiting' : '');
-    open.textContent = s.pendingKind ? 'review the request' : 'open session';
-    open.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Deliberately NOT knownChild: a delegated session is promptable, so
-      // it must open with its input bar and controls intact.
-      viewSession(s.sessionId);
-    });
-    entry.el.appendChild(text);
-    entry.el.appendChild(open);
+
+    let ui = delegateUI.get(entry.el);
+    if (!ui) {
+      // The body currently holds the rendered delegation prompt. Move it —
+      // do not discard it — into the collapsible half, so the prompt
+      // survives and becomes the thing the header expands.
+      const detail = document.createElement('div');
+      detail.className = 'delegate-detail';
+      while (entry.el.firstChild) detail.appendChild(entry.el.firstChild);
+
+      const head = document.createElement('div');
+      head.className = 'delegate-head';
+      const title = document.createElement('span');
+      title.className = 'delegate-title';
+      const status = document.createElement('span');
+      status.className = 'delegate-status';
+      const open = document.createElement('span');
+      open.className = 'task-open';
+      open.addEventListener('click', (e) => {
+        e.stopPropagation();   // or opening the session also toggles the fold
+        // Deliberately NOT knownChild: a delegated session is promptable, so
+        // it must open with its input bar and controls intact.
+        viewSession(s.sessionId);
+      });
+      head.append(title, status, open);
+      head.addEventListener('click', () => entry.el.classList.toggle('expanded'));
+
+      entry.el.classList.add('delegate');
+      entry.el.append(head, detail);
+      ui = { title, status, open };
+      delegateUI.set(entry.el, ui);
+    }
+
+    // The per-poll update: text only, so expand state and the prompt below
+    // are untouched.
+    const st = delegateStatus(s);
+    ui.title.textContent = s.title || 'delegated session';
+    ui.status.textContent = '· ' + st.text + (s.backend ? ' · ' + s.backend : '') + ' ·';
+    ui.status.className = 'delegate-status' + (st.sev ? ' ' + st.sev : '');
+    ui.open.textContent = s.pendingKind ? 'review the request' : 'open session';
+    ui.open.classList.toggle('task-waiting', !!s.pendingKind);
   }
 }
 

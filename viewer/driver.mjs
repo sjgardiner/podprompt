@@ -985,6 +985,12 @@ function delegatedChildrenForParent(parentId) {
       toolUseId: rel.native?.toolUseId || null,
       inFlight: !!state?.turnInFlight,
       pendingKind: pendingKindForSession(childId),
+      // §13d. Without this the bubble's whole vocabulary was
+      // running / idle / waiting-for-you, so a child whose turn DIED showed
+      // as "idle" — indistinguishable from one that finished its work. That
+      // is §15's bug one level up: we stopped recording a killed turn as
+      // finished, then went on displaying it as finished.
+      turnHealth: describeTurnHealth(childId),
     };
   });
 }
@@ -1331,6 +1337,33 @@ function describeWake(sessionId) {
     resumeScheduled: plan.scheduled,
     resumeAttempt: strikes + 1,
     resumeMaxAttempts: AUTO_RESUME_MAX_STRIKES,
+  };
+}
+
+// Everything a reader needs to tell a session that FINISHED from one that
+// DIED — in one shape, used by both the peer listing and the session list.
+//
+// §13d. Without this the delegate bubble's entire vocabulary was
+// `running | idle | waiting for your answer | waiting for your approval`,
+// so a child whose turn died rendered as "idle": identical to one that had
+// completed its work. That is §15's original bug one level up — we stopped
+// RECORDING a killed turn as finished, and then went on DISPLAYING it as
+// finished.
+//
+// Null when there is nothing wrong, so callers can spread it without
+// inventing fields for the healthy case.
+function describeTurnHealth(sessionId) {
+  const r = resumableFor(sessionId);
+  if (!r) return null;
+  return {
+    reason: r.reason,
+    category: r.category || null,
+    at: r.at,
+    lastTool: r.lastTool || null,
+    // A human stop is not a failure and must not read as one; it is the one
+    // "down" state the user created on purpose.
+    stopped: r.reason === "aborted",
+    ...describeWake(sessionId),
   };
 }
 
@@ -2075,18 +2108,12 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
       // A peer whose last turn died. Surfaced because the most useful thing
       // a parent can do with a stalled child is restart it, and it cannot
       // decide to do that without knowing.
-      stalled: (() => {
-        const r = resumableFor(s.sessionId);
-        if (!r) return null;
-        // category/resumeAt included so a parent can tell "waiting out a
-        // usage limit, will resume by itself" from "dead, restart me" —
-        // restarting the first is pure waste and will fail the same way.
-        return {
-          reason: r.reason, at: r.at, lastTool: r.lastTool || null,
-          category: r.category || null,
-          ...describeWake(s.sessionId),
-        };
-      })(),
+      // category/resumeAt included so a parent can tell "waiting out a usage
+      // limit, will resume by itself" from "dead, restart me" — restarting
+      // the first is pure waste and will fail the same way. Same shape the
+      // session list carries (turnHealth), from one function, so a peer and
+      // a human are never told different things about the same session.
+      stalled: describeTurnHealth(s.sessionId),
       // Addressable, but marked: a sub-agent its parent is blocking on will
       // queue your message behind that delegation, and what the parent
       // receives is unaffected by it.
@@ -4202,6 +4229,10 @@ const server = createServer(async (req, res) => {
         s_.delegateToolUseId = parentId
           ? (sessionRelations[s_.sessionId]?.native?.toolUseId || null)
           : null;
+        // §13d: the delegate bubble and the list row both need to tell a
+        // child that finished from one that died. Annotated for every row,
+        // not just children, so the session list can carry the same truth.
+        s_.turnHealth = describeTurnHealth(s_.sessionId);
       }
 
       const sessionHosts = loadSessionHosts();

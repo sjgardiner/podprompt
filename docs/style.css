@@ -35,19 +35,24 @@
      all end at the same right edge, so nothing wraps early while something
      beside it runs wide. The column grows with the window up to this cap and
      is then centred. */
-  --content-width: 1180px;
-  --sidebar-width: 220px;
+  --content-width: 1280px;
+  --sidebar-width: 250px;
 
   --app-radius: 10px;      /* the app's corner radius, for diagrams */
 }
 
-html { scroll-behavior: smooth; }
+/* The whole type scale hangs off this. A percentage rather than a px value
+   so it still respects a reader's own default font size. */
+html {
+  font-size: 118.75%;   /* ~19px, up from the 16px default */
+  scroll-behavior: smooth;
+}
 
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1.7;
 }
 
@@ -94,7 +99,7 @@ main {
 }
 
 .sidebar-brand .product {
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: .04em;
   color: var(--accent);
@@ -105,7 +110,7 @@ main {
 .sidebar-brand .product a:hover { text-decoration: none; }
 
 .sidebar-brand .tagline {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: .2rem;
 }
@@ -113,7 +118,7 @@ main {
 .nav-group { padding: 0 1rem .75rem; }
 
 .nav-group-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: .08em;
   color: var(--text-muted);
@@ -123,7 +128,7 @@ main {
 
 .nav-link {
   display: block;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-muted);
   text-decoration: none;
   padding: .3rem .5rem;
@@ -145,7 +150,7 @@ main {
 
 /* A heading within the page you are on. */
 .nav-link.sub {
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   padding-left: 1.35rem;
 }
 
@@ -161,7 +166,7 @@ main {
 }
 
 .page-header .eyebrow {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -208,7 +213,7 @@ section h2 .step-num {
   border-radius: 50%;
   background: var(--accent-dim);
   color: var(--accent);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   font-family: var(--font-mono);
   flex-shrink: 0;
@@ -267,13 +272,13 @@ strong { font-weight: 600; color: #fff; }
 }
 
 .code-block-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-family: var(--font-mono);
   color: var(--text-muted);
 }
 
 .copy-btn {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-family: var(--font-sans);
   color: var(--text-muted);
   background: none;
@@ -291,7 +296,7 @@ pre {
   padding: 1rem 1.1rem;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   color: var(--text);
 }
@@ -334,7 +339,7 @@ kbd {
 .callout.good   { border-left-color: var(--success); }
 
 .callout-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -359,7 +364,7 @@ kbd {
 .badge {
   display: inline-block;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   font-weight: 500;
   letter-spacing: .03em;
   text-transform: none;
@@ -395,7 +400,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 .option-table th,
 .data-table th {
   text-align: left;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -416,7 +421,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 .option-table td:first-child {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--accent);
   white-space: nowrap;
 }
@@ -463,12 +468,12 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 .env-name {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--accent);
 }
 
 .env-required {
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .05em;
@@ -498,7 +503,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 .concept .concept-name {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--accent);
   margin-bottom: .35rem;
 }
@@ -525,7 +530,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 .page-nav a { display: block; }
 .page-nav .dir {
   display: block;
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: .06em;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -557,7 +562,7 @@ figure.diagram svg {
   /* A floor, so a phone scrolls the figure instead of shrinking its labels
      into illegibility. Safe now that the grid track is minmax(0, 1fr) and
      cannot be pushed wider by its contents. */
-  min-width: 520px;
+  min-width: 600px;
   /* Centred in the column: these are standalone illustrations, not something
      that reads inline with the paragraph beside it. */
   margin-inline: auto;

@@ -3826,14 +3826,6 @@ const server = createServer(async (req, res) => {
       // checkbox — and because the value is DERIVED for delegated sessions,
       // the browser cannot work it out locally.
       autoDeliver: autoDeliverFor(sessionId),
-      // Stop is not a kill switch while auto-delivery is on: incoming mail
-      // will start a fresh turn. That is the DESIRED behaviour for "park
-      // this until something relevant arrives" — but it is invisible, and
-      // the user who meant "stay down" has no way to discover that the
-      // control they need is the auto-deliver box right next to it. Paired
-      // with autoDeliver so the browser can say which of the two situations
-      // this session is actually in.
-      stopped: sessionWasStopped(sessionId),
     }));
     return;
   }

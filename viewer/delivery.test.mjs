@@ -222,8 +222,28 @@ for (const [l,v] of [["null",null],["undefined",undefined],["number",42],["plain
   // load-bearing for splitDeliveredMessages.
   check("...and not inside composeDelivery",
     !/STOP_NOTICE/.test(bodyOf("composeDelivery")));
-  check("the browser is told the session is stopped",
-    /stopped: sessionWasStopped\(sessionId\)/.test(src));
+  // The settings-panel "stopped — mail held" hint is GONE, deliberately.
+  // It only ever refreshed on SSE reconnect, so it failed both ways: absent
+  // after a Stop until the next reconnect, then frozen on screen through
+  // every subsequent turn. It shipped broken and was never missed.
+  //
+  // Not replaced. The harm it was built for — an agent resuming work it did
+  // not know had been halted — is handled by STOP_NOTICE, which is verified
+  // live. The hint only addressed the USER's surprise, and a frozen string
+  // beside a checkbox is the wrong medium for an event.
+  check("the stopped hint is not reintroduced in settings",
+    !/stopped: sessionWasStopped\(sessionId\)/.test(src));
+  const html = readFileSync(new URL("./viewer.html", import.meta.url), "utf8");
+  check("...and its UI is gone too",
+    !/applyStoppedHint|auto-deliver-stopped/.test(html));
+  // The agent-facing half MUST survive: it is the part that works.
+  check("the stop notice itself is untouched",
+    /function sessionWasStopped/.test(src) && /withStopNotice\(sessionId, composeDelivery\(group\)\)/.test(src));
+  // Different field, different feature: the delegate bubble's own
+  // turnHealth.stopped is what makes a stopped child read "stopped by you"
+  // rather than as a failure.
+  check("the delegate bubble's stopped state is a separate thing, kept",
+    /stopped: r\.reason === "aborted"/.test(src) && /stopped by you/.test(html));
 }
 
 console.log(`delivery split (MD11): ${pass} passed, ${fail} failed`);

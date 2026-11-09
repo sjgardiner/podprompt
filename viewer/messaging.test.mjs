@@ -60,11 +60,46 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   const c = p.ensure("s3", { title: "Explore auth flow" });
   eq("second collision increments", c.handle, "explore-auth-flow-3");
 
-  // A handle that drifted as a title changed would break every reference a
-  // model is holding mid-task.
-  p.ensure("s1", { title: "Something else entirely" });
-  eq("handle is stable across title change", p.get("s1").handle, "explore-auth-flow");
+  // A DERIVED handle follows the title. This used to be frozen, on the
+  // grounds that a drifting handle breaks references a model is holding
+  // mid-task — true, and now served by aliases instead: the old handle keeps
+  // resolving and can never be reused, so nothing breaks and nothing is
+  // misdelivered.
+  //
+  // What freezing cost: a long-lived session answered to whatever it was
+  // doing when first addressed, forever. Seen live — a session a day into
+  // the sub-agent redesign was still @ai-turn-complete-notification-fe.
+  // An auto-summary must NOT move the handle. Measured: claude-code's
+  // summary drifts to later user messages, so following it would rename a
+  // session every few turns into things like @ok-please-author-a-new-commit.
+  p.ensure("s1", { title: "A drifting auto summary" });
+  eq("an auto-summary does not move the handle", p.get("s1").handle, "explore-auth-flow");
+  eq("...though it still updates the title", p.get("s1").title, "A drifting auto summary");
+  check("...and mints no alias", p.get("s1").aliases.length === 0, p.get("s1").aliases);
+
+  p.ensure("s1", { title: "Something else entirely", titleIsCustom: true });
+  eq("a derived handle follows a RENAME", p.get("s1").handle, "something-else-entirely");
   eq("title itself does update", p.get("s1").title, "Something else entirely");
+  // THE PROPERTY THAT MAKES THIS SAFE.
+  eq("the old handle still resolves", p.resolve("@explore-auth-flow").ref.id, "s1");
+  check("...and is recorded as an alias",
+    p.get("s1").aliases.includes("explore-auth-flow"), p.get("s1").aliases);
+
+  // A collision must REFUSE, not suffix: auto-suffixing on every rename
+  // would mint @x-2 and leave it there forever even after @x freed up.
+  p.ensure("s3", { title: "Something else entirely", titleIsCustom: true });
+  eq("a colliding re-derive keeps the current handle",
+     p.get("s3").handle, "explore-auth-flow-3");
+  eq("...and the title still updates", p.get("s3").title, "Something else entirely");
+
+  // An alias is taken ground. Reusing a freed handle would make a stale
+  // reference resolve SUCCESSFULLY to the wrong session — silent
+  // misdelivery, which is strictly worse than a loud failure.
+  const squatter = p.ensure("s9", { title: "Explore auth flow" });
+  check("a new session cannot take a retired handle",
+    squatter.handle !== "explore-auth-flow", squatter.handle);
+  eq("...and the retired name still points at its owner",
+     p.resolve("@explore-auth-flow").ref.id, "s1");
 
   eq("resolve by handle", p.resolve("@explore-auth-flow").ref.id, "s1");
   eq("resolve by bare handle", p.resolve("explore-auth-flow-2").ref.id, "s2");
@@ -77,8 +112,19 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
 
   eq("rename works", p.setHandle("s1", "Researcher").ok, true);
   eq("rename slugifies", p.get("s1").handle, "researcher");
-  eq("old handle stops resolving", p.resolve("@explore-auth-flow").reason, "unknown-handle");
   eq("new handle resolves", p.resolve("@researcher").ref.id, "s1");
+  // Both previous names keep working — the original and the one the title
+  // carried it into.
+  eq("the original handle still resolves", p.resolve("@explore-auth-flow").ref.id, "s1");
+  eq("the intermediate handle still resolves",
+     p.resolve("@something-else-entirely").ref.id, "s1");
+
+  // A CHOSEN handle never moves again, whatever the title does. That is the
+  // whole distinction handleSource encodes.
+  eq("setHandle marks the handle as chosen", p.get("s1").handleSource, "user");
+  p.ensure("s1", { title: "Yet another topic", titleIsCustom: true });
+  eq("a chosen handle ignores even a rename", p.get("s1").handle, "researcher");
+  eq("...though the title still updates", p.get("s1").title, "Yet another topic");
   eq("rename to a taken handle is refused", p.setHandle("s1", "explore-auth-flow-2").reason, "handle-taken");
   eq("rename of unknown session is refused", p.setHandle("nope", "x").reason, "unknown-session");
 
@@ -100,8 +146,15 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
   eq("provisional handle upgrades on first real title", later.handle, "refactor-the-parser");
   eq("and stops being provisional", later.provisional, false);
 
-  p.ensure("s1", { title: "Something else" });
-  eq("but never upgrades twice", p.get("s1").handle, "refactor-the-parser");
+  p.ensure("s1", { title: "Something else", titleIsCustom: true });
+  // No longer "upgraded once and frozen": a derived handle keeps tracking
+  // the title, with each outgoing name retired into aliases rather than
+  // dropped.
+  eq("and keeps tracking the title", p.get("s1").handle, "something-else");
+  eq("the upgraded handle is retired, not lost",
+     p.resolve("@refactor-the-parser").ref.id, "s1");
+  eq("the provisional handle is retired too",
+     p.resolve("@session").ref.id, "s1");
 
   // A handle the user chose must survive a title arriving later.
   const q = createPeers({ file: file("peers-provisional2"), now });

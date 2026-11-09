@@ -4226,6 +4226,11 @@ const server = createServer(async (req, res) => {
         if (s_.archived || s_.unreachable) continue;
         peers.ensure(s_.sessionId, {
           title: s_.customTitle || s_.summary || s_.firstPrompt || null,
+          // Only a title the USER set may move a handle. A backend's
+          // auto-summary drifts — sampled live it held a later user message
+          // rather than the first — so following it would rename a session
+          // every few turns for no benefit.
+          titleIsCustom: !!s_.customTitle,
           backend: s_.backend,
         });
       }
@@ -5060,7 +5065,9 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"sessionId required"}');
       return;
     }
-    peers.ensure(body.sessionId, { title: body.title, backend: body.backend });
+    // A title arriving on this route came from the user editing it, so it
+    // counts as custom and may move a derived handle.
+    peers.ensure(body.sessionId, { title: body.title, titleIsCustom: !!body.title, backend: body.backend });
     let result = { ok: true };
     if (typeof body.handle === "string") result = peers.setHandle(body.sessionId, body.handle);
     if (result.ok && typeof body.messageable === "boolean") {
@@ -5266,8 +5273,14 @@ const server = createServer(async (req, res) => {
       const state = sessions.get(body.sessionId);
       const backend = backendFor(body.sessionId, body.backend);
       await backend.renameSession(body.sessionId, body.title, state?.cwd);
+      // A rename is THE intentional act that may move a derived handle, so
+      // apply it here rather than waiting for the next /sessions poll to
+      // notice. Reported back so the browser can show the new handle
+      // immediately — a rename whose visible effect lands seconds later
+      // reads as not having worked.
+      const peer = peers.ensure(body.sessionId, { title: body.title, titleIsCustom: !!body.title });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
+      res.end(JSON.stringify({ ok: true, handle: peer?.handle || null }));
     } catch (e) {
       console.error("[driver] rename-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });

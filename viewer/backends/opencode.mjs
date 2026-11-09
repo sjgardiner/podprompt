@@ -119,7 +119,7 @@ export function selectVisibleSessions(raw, cwdRoot) {
 }
 
 export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId, resolveApprovalExternally,
-  pendingDelegateAnchorCount }) {
+  pendingDelegateAnchorCount, broadcastUserPrompt }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -818,7 +818,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const emittedIds = new Set();
 
     const userMsgUuid = randomUUID();
-    broadcast(sessionId, "user", promptText, userMsgUuid, null, null, state.turnOrigin);
+    broadcastUserPrompt(sessionId, promptText, userMsgUuid, state.turnOrigin);
     emittedIds.add(userMsgUuid);
 
     // partID -> accumulated text, so message.part.delta's incremental

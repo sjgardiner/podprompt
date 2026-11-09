@@ -466,6 +466,8 @@ const backendHooks = {
   resolveApprovalExternally,
   pendingDelegateAnchorCount,
   updateSubAgent: upsertSubAgent,
+  // One place both backends render the turn's user bubble; see MD11.
+  broadcastUserPrompt,
   // The messaging surface, handed to each backend so it can expose the SAME
   // tools in whatever shape its runtime wants. The logic stays here; a
   // backend only supplies identity it can vouch for.
@@ -1388,13 +1390,82 @@ function describeSender(entry) {
 // Coalesced: N queued messages become ONE turn listing each with its
 // origin. Otherwise three senders cost the target three full turns, and the
 // third one answers a question the first already answered.
+// The text one coalesced delivery hands the agent — and, deliberately, a
+// format the renderer can take back apart (MD11).
+//
+// Three properties, each load-bearing for splitDeliveredMessages():
+//
+//   1. NO "---" separators. Agent prose is full of markdown horizontal
+//      rules, so that delimiter is the one guaranteed to collide with
+//      content: a single report containing a rule would be shredded into
+//      fragments.
+//   2. The single and multi forms use the SAME header shape. Two shapes
+//      meant two parsers, which is how they drift apart.
+//   3. The count stays in the preamble, so the splitter can VERIFY it found
+//      exactly as many blocks as were sent. That turns a heuristic parse
+//      into a checked one: a body that happens to contain a line looking
+//      like a header produces a count mismatch and falls back to a single
+//      bubble, rather than silently splitting wrongly.
 function composeDelivery(entries) {
-  if (entries.length === 1) {
-    const e = entries[0];
-    return `[message from ${describeSender(e)}]\n\n${e.text}`;
+  const parts = entries.map((e) => `[message from ${describeSender(e)}]\n\n${e.text}`);
+  if (entries.length === 1) return parts[0];
+  return `You have ${entries.length} messages waiting.\n\n${parts.join("\n\n")}`;
+}
+
+// Take a coalesced delivery back apart for display. Returns null whenever
+// the text is not a verified multi-message delivery — which is the safe
+// answer, because the caller then renders exactly what it renders today.
+//
+// The agent still receives the single composed prompt; only the transcript
+// is split, so each sender gets its own bubble with its own PEER label and
+// its own working link, instead of one bubble whose title could only ever
+// name one of three senders.
+// The user bubble for a turn, broadcast in ONE place for both backends.
+//
+// A coalesced peer delivery is one message to the agent but N messages to a
+// reader, and it used to render as one bubble whose title could name only
+// one of several senders — which is what made it look wrong. Each block now
+// becomes its own bubble carrying its own peer origin, so the existing PEER
+// label, title link and collapse all work per sender with no new UI.
+//
+// Falls back to a single bubble whenever the split cannot be verified, so
+// the worst case is exactly today's behaviour.
+function broadcastUserPrompt(sessionId, text, messageId, origin) {
+  const parts = origin === "peer" ? splitDeliveredMessages(text) : null;
+  if (!parts) {
+    broadcast(sessionId, "user", text, messageId, null, null, origin);
+    return;
   }
-  const parts = entries.map((e) => `[message from ${describeSender(e)}]\n${e.text}`);
-  return `You have ${entries.length} messages waiting.\n\n${parts.join("\n\n---\n\n")}`;
+  parts.forEach((part, i) => {
+    // Ids stay derived from the turn's own message id so a re-render or a
+    // reconnect addresses the same bubbles rather than duplicating them.
+    broadcast(sessionId, "user", part.text, `${messageId}:${i}`, null, null,
+      part.sender.startsWith("@") ? `peer:${part.sender}` : "peer");
+  });
+}
+
+function splitDeliveredMessages(text) {
+  if (typeof text !== "string") return null;
+  const m = text.match(/^You have (\d+) messages waiting\.\n\n/);
+  if (!m) return null;
+  const declared = Number(m[1]);
+  if (!(declared > 1)) return null;
+
+  const body = text.slice(m[0].length);
+  // Line-anchored, and the handle shape is constrained, so an ordinary
+  // sentence mentioning a bracketed phrase cannot open a block.
+  const header = /^\[message from (@[A-Za-z0-9._-]+|a peer)\]\n\n/gm;
+  const found = [];
+  let prev = null;
+  for (const hit of body.matchAll(header)) {
+    if (prev) found.push({ sender: prev.sender, text: body.slice(prev.end, hit.index).trimEnd() });
+    prev = { sender: hit[1], end: hit.index + hit[0].length };
+  }
+  if (prev) found.push({ sender: prev.sender, text: body.slice(prev.end).trimEnd() });
+
+  // The verification that makes this safe rather than clever.
+  if (found.length !== declared) return null;
+  return found;
 }
 
 function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
@@ -3753,6 +3824,23 @@ const server = createServer(async (req, res) => {
       : null;
     let seenUser = false;
     if (Array.isArray(history)) {
+      // MD11: a coalesced delivery is ONE durable message but N bubbles. The
+      // live view already splits it; rebuilding from the transcript has to
+      // split identically or a refresh would silently re-merge what you were
+      // just looking at — the same live-vs-reloaded divergence that once
+      // turned PEER bubbles back into YOU.
+      for (let i = history.length - 1; i >= 0; i--) {
+        const h = history[i];
+        if (!h || h.role !== "user") continue;
+        const parts = splitDeliveredMessages(h.text);
+        if (!parts) continue;
+        history.splice(i, 1, ...parts.map((part, n) => ({
+          ...h,
+          id: `${h.id}:${n}`,
+          text: part.text,
+          origin: part.sender.startsWith("@") ? `peer:${part.sender}` : "peer",
+        })));
+      }
       for (const h of history) {
         if (!h) continue;
         const isUser = h.role === "user";

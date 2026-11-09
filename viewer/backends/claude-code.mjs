@@ -37,7 +37,7 @@ import { z } from "zod";
 //
 // Naming alone did not fix that. This does, because it names our tools
 // explicitly, which is enough for the model to go and find them.
-export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging }) {
+export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging, broadcastUserPrompt }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
   // drains the stream tracker's announced ids per completed assistant
@@ -1096,7 +1096,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const seed = state.pendingSeed || null;
     state.pendingSeed = null;
     const modelPrompt = seed ? `${seed}\n\n${promptText}` : promptText;
-    broadcast(sessionId, "user", promptText, userMsgUuid, null, null, state.turnOrigin);
+    broadcastUserPrompt(sessionId, promptText, userMsgUuid, state.turnOrigin);
 
     function onePrompt() {
       // A fresh async generator per attempt: once iterated (even partially,

@@ -21,7 +21,8 @@
 //      that the fallback degrades rather than emptying the list.
 
 import { createServer } from "node:http";
-import { createOpenCodeBackend, selectVisibleSessions, isUnderRoot } from "./backends/opencode.mjs";
+import { readFileSync } from "node:fs";
+import { createOpenCodeBackend, selectVisibleSessions, isUnderRoot, watchdogSaysFinished } from "./backends/opencode.mjs";
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -280,6 +281,69 @@ const BOTH_PROJECTS = [
   // dangerous-looking if it runs after the first listing.
   check("the seed runs after the backends are built",
     drv.indexOf("const backends = {") < drv.indexOf("\nseedOpenCodeRealIds();"));
+}
+
+// ── The turn watchdog's decision (§13e) ───────────────────────────────────
+//
+// Layer 3 of turn completion: it catches a healthy event stream that simply
+// never delivered this session's session.idle. It races alongside the real
+// signals and is beaten by them on every normal turn, so it can only ever
+// shorten a hang — never gate a healthy turn.
+//
+// It requires silence AND a completed last message, and each condition is
+// there to veto a specific wrong answer the other would give. Getting this
+// wrong in the permissive direction truncates a running agent mid-task,
+// which is the worst failure available here, so both halves are pinned.
+{
+  const T = 600000; // the silence threshold used below, passed explicitly
+  const completed = { info: { role: "assistant", time: { created: 1, completed: 2 } } };
+  const running   = { info: { role: "assistant", time: { created: 1 } } };
+  const userLast  = { info: { role: "user", time: { created: 1 } } };
+
+  check("silent AND complete means finished",
+    watchdogSaysFinished(T, completed, T) === true);
+
+  // The case that killed the first design: a turn emits one COMPLETED
+  // assistant message per tool round, so this is briefly true between every
+  // round. Without the silence window it truncates after the first tool.
+  check("complete but NOT silent is not finished",
+    watchdogSaysFinished(5000, completed, T) === false);
+  check("...not even one tick short of the threshold",
+    watchdogSaysFinished(T - 1, completed, T) === false);
+
+  // The case that matters most: an agent inside a long bash call is exactly
+  // as silent as a finished one. The tool lives INSIDE the message, so that
+  // message cannot be complete — which is what saves us.
+  check("silent but mid-tool is not finished",
+    watchdogSaysFinished(T * 5, running, T) === false);
+
+  check("a trailing user message is not finished",
+    watchdogSaysFinished(T * 5, userLast, T) === false);
+
+  // Malformed or absent input must never read as "finished" — failing open
+  // here would end live turns on a bad API response.
+  for (const [label, msg] of [
+    ["null", null], ["undefined", undefined], ["empty object", {}],
+    ["no time", { info: { role: "assistant" } }],
+    ["completed=0", { info: { role: "assistant", time: { completed: 0 } } }],
+  ]) {
+    check(`a ${label} last message is not finished`,
+      watchdogSaysFinished(T * 5, msg, T) === false);
+  }
+
+  // Accepts the un-nested shape too, since the API has returned both.
+  check("an un-nested message shape still works",
+    watchdogSaysFinished(T, { role: "assistant", time: { completed: 2 } }, T) === true);
+
+  // The real threshold must stay far above any gap a healthy turn produces
+  // and far below the one-hour ceiling it exists to shorten.
+  const src = readFileSync(new URL("./backends/opencode.mjs", import.meta.url), "utf8");
+  const silence = Number((src.match(/TURN_SILENCE_BEFORE_PROBE_MS = ([\d *]+);/) || [])[1]
+    ?.split("*").reduce((a, b) => a * Number(b.trim()), 1));
+  const ceiling = Number((src.match(/TURN_IDLE_CEILING_MS = ([\d *]+);/) || [])[1]
+    ?.split("*").reduce((a, b) => a * Number(b.trim()), 1));
+  check("the silence window is minutes, not seconds", silence >= 60000, silence);
+  check("...and well below the ceiling it shortens", silence < ceiling, { silence, ceiling });
 }
 
 console.log(`opencode session enumeration: ${pass} passed, ${fail} failed`);

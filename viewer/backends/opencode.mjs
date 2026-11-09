@@ -44,6 +44,49 @@ import nodePath from "node:path";
 // scope (rather than inside the factory, where it used to) only so the
 // session-selection logic below can be unit-tested without standing up a
 // whole backend — see opencode-sessions.test.mjs.
+// How long runTurn will wait for a conclusive completion signal before it
+// stops waiting and finalizes what it has. Deliberately generous: it is NOT
+// a cap on how long an agent may work (opencode is unaffected by it, and
+// everything streamed has already been broadcast), only a backstop against a
+// lost session.idle event leaving this function awaiting forever. The old
+// effective ceiling was 300s, imposed accidentally by Node's HTTP client.
+const TURN_IDLE_CEILING_MS = 60 * 60 * 1000;
+
+// The watchdog's two knobs. The silence window is deliberately far larger
+// than any gap a healthy turn produces — opencode emits events continuously
+// while working, and the pause between tool rounds is milliseconds — but far
+// smaller than the ceiling above, so a lost session.idle costs minutes
+// instead of an hour. The poll is what checks whether the window has
+// elapsed; it issues no request until it has.
+const TURN_SILENCE_BEFORE_PROBE_MS = 10 * 60 * 1000;
+const TURN_WATCHDOG_POLL_MS = 60 * 1000;
+
+// The watchdog's entire decision, isolated so it can be tested without
+// standing up a turn. Returns true only for "this turn finished and we
+// missed the announcement".
+//
+// BOTH conditions are required, and each exists to veto a specific wrong
+// answer the other would give:
+//
+//   silence alone    — an agent inside a twenty-minute bash call is exactly
+//                      as silent as a finished one. Acting on silence would
+//                      cut live work off mid-task.
+//   completed alone  — a single turn emits one COMPLETED assistant message
+//                      per tool round (seven in a measured case), so this is
+//                      briefly true between EVERY round and would truncate
+//                      the turn after its first tool call.
+//
+// They separate cleanly because a tool call lives INSIDE a message: while
+// bash runs, that message cannot be marked completed. So `completed` rules
+// out mid-tool, and the silence window rules out between-rounds — a gap of
+// milliseconds against a threshold of minutes.
+export function watchdogSaysFinished(silentMs, lastMessage,
+  silenceThresholdMs = TURN_SILENCE_BEFORE_PROBE_MS) {
+  if (!(silentMs >= silenceThresholdMs)) return false;
+  const info = lastMessage?.info || lastMessage;
+  return info?.role === "assistant" && !!info?.time?.completed;
+}
+
 export function isUnderRoot(candidate, root) {
   if (!candidate || !root) return false;
   return candidate === root || candidate.startsWith(root + nodePath.sep);
@@ -1095,9 +1138,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       pendingApprovalPromises.push(p);
     }
 
+    // When this session last showed ANY sign of life. Half of the watchdog
+    // below; stamped here because this handler sees every event for the turn.
+    let lastEventAt = Date.now();
     const done = new Promise((resolve, reject) => {
       turnWaiters.set(realId, {
         onEvent(evt) {
+          lastEventAt = Date.now();
           onEvent(evt);
           if (evt.type === "session.idle") resolve();
         },
@@ -1129,26 +1176,134 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // default model, same as an unset state.mode already falls back to
       // "build" just below.
       const model = state.model ? parseModelId(state.model) : null;
-      const postResult = await api(`/session/${realId}/message`, {
+      // §13e. This POST is SENT but no longer AWAITED for completion.
+      //
+      // opencode does not answer it until the entire turn is finished, so on
+      // a long turn it is an open socket that stays deliberately silent for
+      // minutes. Node's HTTP client has a 300s headersTimeout and cannot
+      // tell "working, nothing to say yet" from "dead peer", so it severs
+      // the connection and fetch reports a bare "fetch failed". Measured
+      // exactly: `POST /session/.../message failed after 300936ms`. Four
+      // delegated sessions died mid-work that way while opencode itself
+      // carried on perfectly and recorded no error of its own — the client
+      // hung up on a healthy server.
+      //
+      // The response body is still used, as the fallback below when nothing
+      // streamed. It simply no longer decides when the turn ENDS, so its
+      // failure is now a logged non-event instead of a killed turn.
+      let postResult = null;
+      let postSucceeded;
+      const postOk = new Promise((resolve) => { postSucceeded = resolve; });
+      api(`/session/${realId}/message`, {
         method: "POST",
         body: JSON.stringify({
           agent: state.mode || "build",
           ...(model ? { model } : {}),
           parts: [{ type: "text", text: promptText }],
         }),
+      }).then((r) => {
+        postResult = r;
+        postSucceeded();
+      }).catch((e) => {
+        // Deliberately does NOT resolve postOk. A failed POST must never
+        // look like a finished turn — treating it as one is the entire bug.
+        console.error(
+          `[opencode] turn POST for ${sessionId} failed; the turn continues and`
+          + ` completion will come from session.idle: ${e.message}`);
       });
-      // The POST above already resolves once the full assistant reply is
-      // generated server-side (confirmed empirically: the response body
-      // itself carries the finished message+parts) — but session.idle over
-      // SSE is still awaited so any in-flight permission/question exchange
-      // that arrived mid-turn has actually settled before this function
-      // returns, and so the live-streaming path above gets to run to
-      // completion for a browser watching in real time. A short race is
-      // possible if session.idle already fired before this awaits it (a
-      // very fast turn) — guarded by resolving `done` eagerly if the POST
-      // itself completes and no idle event ever arrives within a grace
-      // period.
-      await Promise.race([done, sleep(15000).then(() => {})]);
+      // Completion, in order of authority:
+      //
+      //   1. `done` — session.idle over SSE. The real signal, and always
+      //      was; it was merely queued behind the POST. Its waiter is
+      //      registered BEFORE the POST is sent, so it cannot be missed by
+      //      arriving early. It also REJECTS if the shared stream dies,
+      //      which is what still fails a turn fast when the connection goes.
+      //   2. `postOk` — the POST returning. Only ever resolves on success,
+      //      so a 300s timeout cannot masquerade as a finished turn. Kept
+      //      because it is a genuine second witness for short turns.
+      //   3. The ceiling — a last resort so a lost idle event cannot block
+      //      this function forever. NOT a limit on how long an agent may
+      //      work: opencode keeps going regardless, and anything streamed
+      //      has already been broadcast. It only bounds how long we wait
+      //      without hearing anything conclusive.
+      //
+      // Polling opencode for "is this session busy" was considered and
+      // rejected on evidence: there is no such endpoint (/session/active
+      // 500s), and inferring it from the message list is unsafe — a single
+      // turn emits one COMPLETED assistant message per tool round (seven in
+      // a measured case), so "last message is complete" is true between
+      // every round and would truncate the turn after the first tool call.
+      // The watchdog (layer 3). Catches the one case the signals above miss:
+      // a HEALTHY stream that simply never delivered this session's
+      // session.idle. It is a FALLBACK — it races alongside the others and
+      // is beaten by them in every normal turn, so it adds no latency to a
+      // healthy turn and can only ever shorten a hang.
+      //
+      // Two conditions, and it needs BOTH, because each alone is wrong:
+      //
+      //   silence alone     — an agent inside a twenty-minute bash call is
+      //                       equally silent. Acting on silence would cut
+      //                       live work off mid-task.
+      //   "finished" alone  — a turn emits one COMPLETED assistant message
+      //                       per tool round (seven in a measured case), so
+      //                       this is briefly true between EVERY round and
+      //                       would truncate the turn after the first tool.
+      //
+      // Together they separate cleanly, because a tool call lives INSIDE a
+      // message: while bash runs, that message cannot be marked completed.
+      // So "finished" rules out mid-tool, and the silence window rules out
+      // between-rounds — a gap measured in milliseconds against a threshold
+      // of minutes.
+      //
+      // The message fetch happens only AFTER the silence threshold is
+      // already met, so a healthy turn never makes this request at all.
+      let watchdogTimer = null;
+      let watchdogBusy = false;
+      const watchdog = new Promise((resolve) => {
+        watchdogTimer = setInterval(async () => {
+          if (watchdogBusy) return; // never let a slow fetch stack up
+          // Checked before the fetch as well as inside the decision, so a
+          // healthy turn issues no request at all.
+          if (Date.now() - lastEventAt < TURN_SILENCE_BEFORE_PROBE_MS) return;
+          watchdogBusy = true;
+          try {
+            const msgs = await api(`/session/${realId}/message`, { timeoutMs: 20000 });
+            const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
+            const silentMs = Date.now() - lastEventAt;
+            if (watchdogSaysFinished(silentMs, last)) {
+              console.error(
+                `[opencode] turn for ${sessionId}: silent for ${Math.round(silentMs / 1000)}s`
+                + ` and opencode reports its last message complete — treating the turn as`
+                + ` finished (session.idle lost)`);
+              resolve();
+            }
+          } catch {
+            // Transient; the next tick tries again. A failure here must not
+            // end a turn — that would be the old bug in a new costume.
+          } finally {
+            watchdogBusy = false;
+          }
+        }, TURN_WATCHDOG_POLL_MS);
+        watchdogTimer.unref?.();
+      });
+
+      let ceilingTimer = null;
+      const ceiling = new Promise((resolve) => {
+        ceilingTimer = setTimeout(() => {
+          console.error(
+            `[opencode] turn for ${sessionId} heard no completion signal in`
+            + ` ${TURN_IDLE_CEILING_MS}ms; finalizing whatever arrived`);
+          resolve();
+        }, TURN_IDLE_CEILING_MS);
+        // Must not hold the event loop open for an hour after a turn ends.
+        ceilingTimer.unref?.();
+      });
+      try {
+        await Promise.race([done, postOk, watchdog, ceiling]);
+      } finally {
+        clearTimeout(ceilingTimer);
+        clearInterval(watchdogTimer);
+      }
       await Promise.all(pendingApprovalPromises);
 
       // Finalize every still-streaming bubble: opencode broadcasts no

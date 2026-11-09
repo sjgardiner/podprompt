@@ -1750,7 +1750,7 @@
         <input type="checkbox" id="auto-approve-toggle"> Auto-approve
       </label>
       <label id="auto-deliver-row" title="Deliver messages to this session immediately, even while you are watching it. Use for a session that is meant to work on its own — otherwise mail is held so it cannot spend the turn you were about to type. On by default for delegated sessions.">
-        <input type="checkbox" id="auto-deliver-toggle"> Auto-deliver
+        <input type="checkbox" id="auto-deliver-toggle"> Auto-deliver<span id="auto-deliver-stopped"></span>
       </label>
     </div>
   </div>
@@ -1994,6 +1994,9 @@ function resetBackendControlsDisplay() {
   // recompute it locally — cleared here and rearmed from /turn-status.
   autoDeliverToggle.checked = false;
   autoDeliverRow.classList.remove('active');
+  // Cleared on session switch like every other per-session control: a stale
+  // "stopped" hint on a healthy session is worse than none at all.
+  applyStoppedHint(false, false);
   modelSelect.classList.remove('show');
   modelSelect.innerHTML = '';
   modeSelect.classList.remove('show');
@@ -5162,6 +5165,7 @@ async function resyncTurnStatus() {
     autoApproveRow.classList.toggle('active', !!data.autoApprove);
     autoDeliverToggle.checked = !!data.autoDeliver;
     autoDeliverRow.classList.toggle('active', !!data.autoDeliver);
+    applyStoppedHint(!!data.stopped, !!data.autoDeliver);
   } catch (e) {
     console.error('Failed to resync turn status:', e);
   }
@@ -5386,6 +5390,24 @@ autoApproveToggle.addEventListener('change', async () => {
 // default, because an unticked box on a delegated session has to MEAN "off"
 // and survive as such; `null` (clear the pin) is reachable only by the
 // driver, which is the right asymmetry for a control with two visible states.
+// After a Stop, say what Stop actually did.
+//
+// Stop halts the turn; it does NOT prevent incoming mail from starting a new
+// one. That is correct for "park this until something relevant arrives" and
+// wrong for "stay down", and the two are indistinguishable from the button.
+// The control that separates them is the Auto-deliver box this hint sits in
+// — so the hint names the consequence and points at its own checkbox rather
+// than adding a second control that would mean the same thing.
+function applyStoppedHint(stopped, autoDeliver) {
+  const el = document.getElementById('auto-deliver-stopped');
+  if (!el) return;
+  if (!stopped) { el.textContent = ''; el.removeAttribute('title'); return; }
+  el.textContent = autoDeliver ? ' · stopped — mail will wake this' : ' · stopped — mail held';
+  el.title = autoDeliver
+    ? 'You stopped this session. Incoming mail will still start a new turn; the agent is told it was stopped so it re-assesses rather than resuming. Uncheck Auto-deliver to hold mail instead.'
+    : 'You stopped this session, and mail is held rather than waking it. Check Auto-deliver, or deliver the mail yourself, to let it run again.';
+}
+
 autoDeliverToggle.addEventListener('change', async () => {
   if (!driverBase || !currentSessionId) { autoDeliverToggle.checked = false; return; }
   const enabling = autoDeliverToggle.checked;

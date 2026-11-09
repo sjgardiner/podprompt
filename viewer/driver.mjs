@@ -1550,6 +1550,42 @@ function composeDelivery(entries) {
   return `You have ${entries.length} messages waiting.\n\n${parts.join("\n\n")}`;
 }
 
+// What an agent cannot know from the inside: that a HUMAN stopped it.
+//
+// Being stopped and having a tool call glitch look identical from within the
+// transcript — the turn simply ends mid-action. Observed live: five seconds
+// after the user pressed Stop, mail woke the session and the agent reasoned
+// "my tool call was interrupted (probably because a message arrived)",
+// concluded nothing was wrong, and resumed the exact plan that had just been
+// halted, for another 36 seconds.
+//
+// Deliberately NOT "do not resume it, stop and ask". The user may well want
+// the prior work continued once the new message is accounted for, and an
+// instruction to stop and ask trains the wrong reflex — an agent that halts
+// for permission every time it is woken is its own failure mode. The ask is
+// to RE-ASSESS, which is the thing it could not do without this sentence.
+const STOP_NOTICE =
+  "[The user stopped your previous turn. Do not assume that you should"
+  + " immediately resume it. Address the new message(s) below, then re-assess.]";
+
+// Applied at delivery, not at compose: composeDelivery's output shape is
+// load-bearing for splitDeliveredMessages, and prepending inside it would
+// have silently broken the MD11 bubble split (whose anchor is ^-anchored at
+// the very start of the text). Keeping the two concerns separate, with one
+// shared constant, is what stops them drifting.
+function withStopNotice(sessionId, text) {
+  return sessionWasStopped(sessionId) ? `${STOP_NOTICE}\n\n${text}` : text;
+}
+
+// A session is "stopped" exactly while its resumable record says a human
+// aborted it. Reusing that record rather than adding a flag means revival is
+// automatic: startTurn clears the resumable, so the notice stops appearing
+// the moment the session is working again, with no second piece of state to
+// keep in sync.
+function sessionWasStopped(sessionId) {
+  return turnState[sessionId]?.resumable?.reason === "aborted";
+}
+
 // Take a coalesced delivery back apart for display. Returns null whenever
 // the text is not a verified multi-message delivery — which is the safe
 // answer, because the caller then renders exactly what it renders today.
@@ -1584,6 +1620,12 @@ function broadcastUserPrompt(sessionId, text, messageId, origin) {
 
 function splitDeliveredMessages(text) {
   if (typeof text !== "string") return null;
+  // The stop notice is prepended AFTER composition, so strip it before the
+  // anchored match below. Without this the ^-anchor fails on exactly those
+  // deliveries and the split silently degrades to a single bubble — no
+  // error, just the MD11 behaviour quietly absent whenever a stopped
+  // session is woken by several messages at once.
+  if (text.startsWith(STOP_NOTICE)) text = text.slice(STOP_NOTICE.length).replace(/^\n+/, "");
   const m = text.match(/^You have (\d+) messages waiting\.\n\n/);
   if (!m) return null;
   const declared = Number(m[1]);
@@ -1661,7 +1703,7 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   const originLabel = senders.size === 1
     ? `${group[0].kind === "result" ? "result" : "peer"}:${[...senders][0]}`
     : "peer";
-  const started = startTurn(sessionId, composeDelivery(group), {
+  const started = startTurn(sessionId, withStopNotice(sessionId, composeDelivery(group)), {
     source: "peer",
     origin: originLabel,
     userDirected,
@@ -1884,6 +1926,21 @@ function setAutoDeliver(sessionId, value) {
 function noteUserDirectedAction() {
   autonomy.noteHumanAction();
   return releaseAutonomyParked();
+}
+
+// DIRECTION HAS A SIGN, and MD7 originally missed it. Continue, approve and
+// lift-the-cap all mean "do more", so releasing parked mail alongside the
+// counter reset is right for them. Stop means "do LESS" — and routing it
+// through the same helper made Stop the single most autonomy-ENABLING
+// action in the system: it zeroed the counter (a fresh budget of automatic
+// turns) and then drained every inbox, starting turns.
+//
+// The counter reset is kept, and is correct on its own terms: pressing Stop
+// is direct evidence a human is present, which is the only thing the
+// dead-man's switch measures. What is dropped is the release — nothing
+// about halting a turn says held mail should now flow.
+function noteUserStopAction() {
+  autonomy.noteHumanAction();
 }
 
 // MD3. Mail held for a watcher that has gone away must move on its own —
@@ -3713,6 +3770,14 @@ const server = createServer(async (req, res) => {
       // checkbox — and because the value is DERIVED for delegated sessions,
       // the browser cannot work it out locally.
       autoDeliver: autoDeliverFor(sessionId),
+      // Stop is not a kill switch while auto-delivery is on: incoming mail
+      // will start a fresh turn. That is the DESIRED behaviour for "park
+      // this until something relevant arrives" — but it is invisible, and
+      // the user who meant "stay down" has no way to discover that the
+      // control they need is the auto-deliver box right next to it. Paired
+      // with autoDeliver so the browser can say which of the two situations
+      // this session is actually in.
+      stopped: sessionWasStopped(sessionId),
     }));
     return;
   }
@@ -4558,7 +4623,7 @@ const server = createServer(async (req, res) => {
   // running a turn it did not start.
   if (req.method === "POST" && path === "/stop-all") {
     requireControl(req);
-    noteUserDirectedAction();   // MD7
+    noteUserStopAction();   // MD7 — stop must not release parked mail
     let stopped = 0;
     for (const [sessionId, state] of sessions) {
       if (!state.turnInFlight) continue;
@@ -5302,7 +5367,7 @@ const server = createServer(async (req, res) => {
   // possible.
   if (req.method === "POST" && path === "/stop-subtree") {
     requireControl(req);
-    noteUserDirectedAction();   // MD7
+    noteUserStopAction();   // MD7 — stop must not release parked mail
     let body;
     try {
       body = await readBody(req);
@@ -5348,7 +5413,7 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && path === "/abort") {
-    noteUserDirectedAction();   // MD7
+    noteUserStopAction();   // MD7 — stop must not release parked mail
     let body;
     try {
       body = await readBody(req);

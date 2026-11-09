@@ -1067,7 +1067,15 @@ function reconcileTurnStateOnStartup() {
 //     a stale flag causes a wrongful kill, a stale id causes nothing.
 function markTurnStarted(sessionId) {
   const turnId = randomUUID();
-  turnState[sessionId] = { inFlight: true, startedAt: nowIso(), lastTool: null, turnId };
+  const prev = turnState[sessionId];
+  turnState[sessionId] = {
+    inFlight: true, startedAt: nowIso(), lastTool: null, turnId,
+    // Auto-resume strikes must survive the turn they provoked, or a session
+    // that crashes on every attempt would reset its own counter each time
+    // and retry forever. Dropped only by a turn that actually completes
+    // (see markTurnEnded).
+    ...(prev?.autoResume ? { autoResume: prev.autoResume } : {}),
+  };
   const state = sessions.get(sessionId);
   if (state) state.turnId = turnId;
   saveTurnState();
@@ -1109,6 +1117,9 @@ function markTurnEnded(sessionId, outcome) {
     // record describes. Nothing depends on it today; leaving it out made the
     // record silently lossy.
     ...(rec.turnId ? { turnId: rec.turnId } : {}),
+    // Carried while the session keeps failing; absent once it succeeds,
+    // which is what resets the strike count.
+    ...(bad && rec.autoResume ? { autoResume: rec.autoResume } : {}),
     ...(bad ? { resumable: {
       reason: outcome.reason,
       error: outcome.error || null,
@@ -1135,8 +1146,18 @@ function resumableFor(sessionId) {
 //
 // Every variant says "do not start over" in some form, because restarting
 // from scratch is the expensive failure — far worse than doing nothing.
-function resumePromptFor(resumable) {
+function resumePromptFor(resumable, { automatic = false } = {}) {
   if (!resumable) return null;
+  // A human clicking Continue has read the transcript and decided it is
+  // worth resuming. A timer has done neither, and the agent cannot tell the
+  // difference from the inside — so say so, or it will assume its work was
+  // reviewed and approved when nobody has looked at it.
+  const unreviewed = automatic
+    ? " You were resumed AUTOMATICALLY; no human has reviewed what happened."
+      + " Check any file, commit or delegated session you may have left half-finished"
+      + " before assuming it succeeded. If redoing something looks risky or ambiguous,"
+      + " stop and say so rather than guessing."
+    : "";
   const tool = resumable.lastTool
     ? ` You were interrupted while running ${resumable.lastTool}; its result is unknown,`
       + ` so check the current state before assuming it succeeded or failed.`
@@ -1148,12 +1169,12 @@ function resumePromptFor(resumable) {
     return "Your previous turn was interrupted when the environment restarted."
       + " Resume from where you left off; don't assume prior files, processes, etc. survived;"
       + " attempt to re-establish the prior setup for things that were lost, and pause to"
-      + " alert me if this cannot be done easily." + tool;
+      + " alert me if this cannot be done easily." + tool + unreviewed;
   }
   if (resumable.reason === "aborted") {
     return "Your previous turn was interrupted before it finished. Resume from where you"
       + " left off, keeping what was already completed. Do not restart from the beginning."
-      + tool;
+      + tool + unreviewed;
   }
   // Says plainly that nothing was wrong with the work, because the agent
   // cannot tell from its own transcript: from the inside, a stalled turn
@@ -1163,13 +1184,94 @@ function resumePromptFor(resumable) {
     return "Your previous turn stopped because the model provider stopped responding"
       + " mid-generation. This was an infrastructure fault, not a problem with your work"
       + " or your approach. Resume from where you left off, keeping everything already"
-      + " completed, and do not restart from the beginning." + tool;
+      + " completed, and do not restart from the beginning." + tool + unreviewed;
   }
   return "Your previous turn was cut short by a system error"
     + (resumable.error ? `: ${resumable.error}` : "")
     + ". Everything above is what actually happened. Resume from where you left off — keep"
-    + " work that is already complete, and do not start over." + tool;
+    + " work that is already complete, and do not start over." + tool + unreviewed;
 }
+
+// ── Keep-alive: resume turns that died through no fault of their own ─────
+//
+// A turn can end badly with nobody watching: the environment restarted, a
+// backend process crashed, a provider stopped answering. Until now the only
+// recovery was a human noticing and clicking Continue, so an agent that died
+// at 3am stayed dead and whatever it was doing was simply lost.
+//
+// THE TRAP THIS AVOIDS, and the reason it is worth stating loudly: /continue
+// and startTurn(source:"resume") both call autonomy.noteHumanAction(), which
+// ZEROES the global counter. A supervisor built on that path would not spend
+// the budget, it would RESET it on every tick — and because the counter is
+// global (AD2), one crash-looping session would hand every other session a
+// fresh twenty turns, repeatedly, forever. Hence a distinct source that
+// falls through to chargeAutomaticTurn(): an auto-resumed turn costs exactly
+// what any other automatic turn costs, and the gate closes on schedule.
+const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
+// "aborted" is deliberately absent. Resuming a turn the user stopped on
+// purpose is the worst thing this could do. (It is also slightly
+// over-broad: "aborted" currently covers both a human Stop and a cascade
+// abort, and the record cannot tell them apart.)
+//
+// "error" IS included, on the grounds that it is frequently a crashed
+// backend process where one retry simply works. It is unclassified free
+// text, so it could equally be a permanently malformed request — which is
+// what the strike cap is for. Three attempts, then it waits for a human.
+const AUTO_RESUME_MAX_STRIKES = 3;
+// Spacing between attempts for the SAME session, by strike. A crash that
+// repeats instantly should not burn three turns in three seconds: a
+// transient condition needs time to clear before the retry means anything.
+const AUTO_RESUME_BACKOFF_MS = [60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000];
+const AUTO_RESUME_SWEEP_MS = 60 * 1000;
+
+function autoResumeSweep() {
+  for (const [sessionId, rec] of Object.entries(turnState)) {
+    const resumable = rec?.resumable;
+    if (!resumable || rec.inFlight) continue;
+    if (!AUTO_RESUME_REASONS.has(resumable.reason)) continue;
+
+    const prior = rec.autoResume || null;
+    const strikes = prior?.strikes || 0;
+    if (strikes >= AUTO_RESUME_MAX_STRIKES) continue; // poison pill: leave it for a human
+
+    const waited = Date.now()
+      - new Date(prior?.lastAt || resumable.at || 0).getTime();
+    if (!(waited >= AUTO_RESUME_BACKOFF_MS[Math.min(strikes, AUTO_RESUME_BACKOFF_MS.length - 1)])) {
+      continue;
+    }
+    if (!sessionIsIdle(sessionId)) continue;
+
+    // Recorded BEFORE starting, because startTurn clears the resumable
+    // record and markTurnStarted replaces this row — the strike has to
+    // already be in place for markTurnStarted to carry it across. Rolled
+    // back if the turn is refused, so a closed autonomy gate does not
+    // silently consume attempts.
+    turnState[sessionId] = { ...turnState[sessionId], autoResume: { strikes: strikes + 1, lastAt: nowIso() } };
+    saveTurnState();
+
+    const started = startTurn(sessionId, resumePromptFor(resumable, { automatic: true }), {
+      source: "auto-resume",
+      origin: `auto-resume:${resumable.reason}`,
+    });
+    if (!started.ok) {
+      turnState[sessionId] = { ...turnState[sessionId], ...(prior ? { autoResume: prior } : {}) };
+      if (!prior) delete turnState[sessionId].autoResume;
+      saveTurnState();
+      // Not an error: the gate being shut is the system working. The next
+      // sweep tries again, and if the user lifts the cap it goes through.
+      continue;
+    }
+    console.log(
+      `[driver] auto-resume ${sessionId}: reason=${resumable.reason}`
+      + ` attempt ${strikes + 1}/${AUTO_RESUME_MAX_STRIKES}`);
+  }
+}
+
+setInterval(() => {
+  try { autoResumeSweep(); } catch (e) {
+    console.error("[driver] auto-resume sweep failed:", e.message);
+  }
+}, AUTO_RESUME_SWEEP_MS).unref?.();
 
 // Provenance survives a live turn (broadcast carries `origin`, and server.py
 // stores it on the log entry) but NOT a rebuild of that log from the backend

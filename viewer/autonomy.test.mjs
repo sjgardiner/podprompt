@@ -206,61 +206,82 @@ const fresh = (opts = {}) =>
 rmSync(dir, { recursive: true, force: true });
 // ── AD6: the autonomy setting has a UI at all ────────────────────────────
 //
-// THE HOLE THIS CLOSES. The driver has always had setPauseAfter and a
-// liftCap that accepts `until: null`, both validated and routed. The browser
-// called NEITHER. pauseAfter appeared in viewer.html exactly twice: once as
-// a hard-coded default of 20 in local state, once to label a button. So the
-// cap was effectively a compile-time constant.
+// THE HOLE THIS CLOSES. The driver has always had setPauseAfter, and a
+// liftCap accepting `until: null`. Both validated, both routed. The browser
+// called NEITHER — pauseAfter appeared in viewer.html exactly twice: once as
+// a hard-coded 20 in local state, once to label a button. The cap was a
+// compile-time constant.
 //
-// Worse, renderAutonomyStrip() returns early unless the state is paused or
-// uncapped, so in normal operation it renders nothing — not even
-// "Don't pause". Unattended work was therefore impossible to ARRANGE: you
-// had to start, wait however many automatic turns it took to hit the wall,
-// lift the cap, and only then walk away.
+// Worse, renderAutonomyStrip() returns early unless paused or uncapped, so
+// in normal operation it renders nothing — not even "Don't pause".
+// Unattended work was impossible to ARRANGE: you had to start, wait however
+// many automatic turns it took to hit the wall, lift the cap, and only then
+// walk away.
 {
   const html = readFileSync(new URL("./viewer.html", import.meta.url), "utf8");
 
-  check("the panel exposes an autonomy control", /id="autonomy-mode"/.test(html));
-  check("...with a supervised half", /<optgroup label="Supervised">/.test(html));
-  check("...and an unattended half", /<optgroup label="Unattended">/.test(html));
+  check("the panel exposes an autonomy control", /id="autonomy-btn"/.test(html));
 
-  // ONE control, not two. A budget and a time window presented as separate
-  // settings read as contradictory and needed prose to explain that they
-  // are not; they are one choice with two modes, which is what the store
-  // already says (pauseAfter is not consulted while an override is live).
-  check("it is a single select, so the two modes cannot conflict",
-    (html.match(/id="autonomy-mode"/g) || []).length === 1);
+  // A BUTTON, NOT A SELECT. A native select commits the instant you pick an
+  // option, so choosing "Pause after…" would display a state that is not yet
+  // true, and cancelling would need a programmatic revert — a control that
+  // occasionally lies about the current state.
+  check("it is not a <select>", !/id="autonomy-mode"/.test(html));
+  check("...it opens a menu", /function toggleAutonomyMenu/.test(html));
+  check("...reusing the strip's row styling", /className = 'lift-row'/.test(html));
+
+  // ONE control: a budget and a time window shown as separate settings read
+  // as contradictory and needed prose to explain that they are not. They are
+  // one choice with two modes, which is what the store already says —
+  // pauseAfter is not consulted while an override is live.
+  check("both modes live in one menu",
+    /Pause after \$\{n\} automatic turns/.test(html)
+    && /Run unattended indefinitely/.test(html));
+  check("...separated visually, not by prose", /className = 'menu-sep'/.test(html));
 
   // The previously unreachable states.
-  check("an arbitrary turn count is reachable", /id="autonomy-turns"/.test(html));
-  check("an arbitrary deadline is reachable", /id="autonomy-until"/.test(html));
-  check("indefinite is reachable", /value="t:never"/.test(html));
+  check("an arbitrary turn count is reachable", /custom: 'turns'/.test(html));
+  check("an arbitrary deadline is reachable", /custom: 'until'/.test(html));
+  check("indefinite is reachable", /lift: true, until: null/.test(html));
 
-  // Wiring to the routes the driver already had.
-  check("it sets pauseAfter", /autonomyPost\(\{ pauseAfter: n \}\)/.test(html));
-  check("it lifts with a deadline", /lift: true, until: ms/.test(html));
-  check("it lifts indefinitely", /lift: true, until: null/.test(html));
-  // Choosing supervision must also END an unattended window, or the control
-  // would show a budget while the override silently kept overriding it.
-  check("a supervised choice cancels an unattended window",
+  // Wiring to routes the driver already had.
+  check("it sets pauseAfter", /autonomyPost\(\{ pauseAfter: /.test(html));
+  check("a supervised choice also cancels an unattended window",
     /autonomyPost\(\{ pauseAfter: n \}\)\.then\(\(\) => autonomyPost\(\{\}\)\)/.test(html));
 
-  // Reflects live state: a window can lapse by itself and other tabs can
-  // change it, so the control is rendered from /autonomy rather than from
-  // whatever was last clicked.
-  check("the control re-renders from live state",
-    /renderAutonomySetting\(\);/.test(html) && /function renderAutonomySetting/.test(html));
-  check("...without stomping a field being edited",
-    /document\.activeElement === autonomyTurns/.test(html));
-  // Committing per keystroke would post a budget of 2 en route to 200.
-  check("custom fields commit on change, not on input",
-    /autonomyTurns\.addEventListener\('change'/.test(html));
+  // Closing the menu mid-type STORES the value — explicitly requested, and
+  // typing then clicking away is the common gesture.
+  check("a pending edit survives the menu closing",
+    /function commitAutonomyPending/.test(html)
+    && /closeAutonomyMenu[\s\S]{0,400}commitAutonomyPending\(\);/.test(html));
+  // Per-keystroke commits would post a budget of 2 en route to 200; the
+  // pending value is recorded on input but only SENT on change or close.
+  check("it does not commit per keystroke",
+    !/addEventListener\('input', \(\) => \{ autonomyPost/.test(html));
 
-  // AD5: the container is on UTC; a wall-clock time must be resolved by the
+  // The closed control states what the system is doing, rather than naming a
+  // setting whose effect you must remember.
+  check("the closed control reads as a sentence", /function autonomyLabel/.test(html));
+  // Rendered from live state: a window can lapse by itself, and other tabs
+  // can change it.
+  check("it re-renders from live state",
+    /renderAutonomySetting\(\);/.test(html) && /function renderAutonomySetting/.test(html));
+  check("...but never rebuilds an open menu mid-type",
+    /Deliberately does NOT rebuild an open menu/.test(html));
+
+  // Every timed row shows its resolved absolute time: "for 4 hours" crosses
+  // midnight with the same ambiguity that makes a bare "8:00 AM" unclear at
+  // 7 AM.
+  check("timed rows show the resolved time", /when\.textContent = fmtWhen\(c\.when\)/.test(html));
+  check("the current row is checkmarked", /autonomyCurrentKey\(\)/.test(html));
+  check("...in a reserved column so rows do not shift",
+    /#autonomy-menu \.lift-row::before \{[\s\S]*?visibility: hidden;/.test(html));
+
+  // AD5: the container is on UTC; a wall-clock time is resolved by the
   // BROWSER and sent as epoch ms.
   check("the deadline is resolved browser-side to epoch ms",
-    /function toLocalInputValue/.test(html) && /new Date\(autonomyUntil\.value\)\.getTime\(\)/.test(html));
-  check("a deadline in the past is refused", /ms <= Date\.now\(\)\) return/.test(html));
+    /function toLocalInputValue/.test(html) && /new Date\(p\.value\)\.getTime\(\)/.test(html));
+  check("a deadline in the past is refused", /ms <= Date\.now\(\)\) return;/.test(html));
 
   // Three columns, right-anchored so the panel grows leftwards and its right
   // edge stays flush with the chat area.

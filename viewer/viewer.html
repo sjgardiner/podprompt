@@ -551,6 +551,47 @@
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px;
   }
 
+  /* The autonomy control: a button that opens a menu, styled to sit in the
+     settings panel while reusing .lift-row from the strip's own menu. */
+  #autonomy-wrap { position: relative; margin-bottom: 0; }
+  #autonomy-btn {
+    width: 100%; text-align: left; cursor: pointer;
+    font: inherit; font-size: 13px;
+    padding: 6px 8px; border-radius: 6px;
+    background: var(--code-bg); color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #autonomy-btn:hover { border-color: var(--muted); }
+  #autonomy-btn::after { content: ' \25BE'; color: var(--muted); float: right; }
+  #autonomy-menu {
+    position: absolute; left: 0; right: 0; top: 100%; z-index: 42;
+    margin-top: 4px; padding: 4px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 6px 20px rgba(0,0,0,.28);
+  }
+  /* The checkmark occupies a reserved column on EVERY row, so rows do not
+     shift sideways as the selection moves. */
+  #autonomy-menu .lift-row::before {
+    content: '\2713'; width: 12px; flex: 0 0 12px;
+    color: var(--accent); visibility: hidden;
+  }
+  #autonomy-menu .lift-row.checked::before { visibility: visible; }
+  #autonomy-menu .lift-row > span:first-of-type { flex: 1 1 auto; }
+  #autonomy-menu .menu-sep {
+    height: 1px; margin: 4px 6px; background: var(--border);
+  }
+  #autonomy-menu input[type="number"] {
+    width: 64px; font-size: 12px; text-align: right;
+    background: var(--code-bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px;
+  }
+  #autonomy-menu input[type="datetime-local"] {
+    font-size: 12px;
+    background: var(--code-bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px;
+  }
+
   .settings-row.disabled label { opacity: .45; }
   /* Explains why notifications are unavailable or blocked. Hidden unless it
      has something to say, so the group stays as compact as the others when
@@ -1774,40 +1815,18 @@
         <div class="settings-group">
           <div class="settings-group-title" id="autonomy-group-title"
                title="While running unattended the turn limit does not apply. When the window ends, automatic work stops until you are back — your next message starts a fresh budget.">Autonomy</div>
-          <div class="settings-row select-row">
-            <label><span>Mode</span>
-              <select id="autonomy-mode">
-                <optgroup label="Supervised">
-                  <option value="n:5">Pause after 5 automatic turns</option>
-                  <option value="n:10">Pause after 10 automatic turns</option>
-                  <option value="n:20">Pause after 20 automatic turns</option>
-                  <option value="n:50">Pause after 50 automatic turns</option>
-                  <option value="n:100">Pause after 100 automatic turns</option>
-                  <option value="n:custom">Pause after&hellip; (choose below)</option>
-                </optgroup>
-                <optgroup label="Unattended">
-                  <option value="t:1h">Run unattended for 1 hour</option>
-                  <option value="t:4h">Run unattended for 4 hours</option>
-                  <option value="t:8am">Run unattended until 8:00 AM</option>
-                  <option value="t:custom">Run unattended until&hellip; (choose below)</option>
-                  <option value="t:never">Run unattended indefinitely</option>
-                </optgroup>
-              </select>
-            </label>
-          </div>
-          <!-- Greyed rather than hidden, following this panel's own
-               convention (see deep-history): a control that vanishes reads
-               as a bug, and a fixed height stops the group jumping as you
-               move between modes. -->
-          <div class="settings-row" id="autonomy-turns-row">
-            <label><span>Turns</span>
-              <input type="number" id="autonomy-turns" min="1" max="100000" step="1" value="20">
-            </label>
-          </div>
-          <div class="settings-row" id="autonomy-until-row">
-            <label><span>Until</span>
-              <input type="datetime-local" id="autonomy-until">
-            </label>
+          <!-- A button, not a <select>. A native select commits the
+               moment you pick an option, so choosing "Pause after…" would
+               immediately display a state that is not yet true, and
+               cancelling would need a programmatic revert — a control that
+               occasionally lies about the current state. A menu commits
+               nothing until you commit, so the problem cannot arise.
+
+               Mirrors the strip's own #lift-menu, which already solves this
+               exact shape for time windows. Mouse-only for now, by
+               agreement; keyboard support is a later addition. -->
+          <div class="settings-row" id="autonomy-wrap">
+            <button type="button" id="autonomy-btn" aria-haspopup="true" aria-expanded="false"></button>
           </div>
         </div>
       </div>
@@ -3788,15 +3807,17 @@ async function refreshAutonomy() {
 }
 
 // ── The autonomy setting: one control, two modes ────────────────────────
-const autonomyMode = document.getElementById('autonomy-mode');
-const autonomyTurnsRow = document.getElementById('autonomy-turns-row');
-const autonomyTurns = document.getElementById('autonomy-turns');
-const autonomyUntilRow = document.getElementById('autonomy-until-row');
-const autonomyUntil = document.getElementById('autonomy-until');
+//
+// A BUTTON AND A MENU, not a <select>. A native select commits the instant
+// you pick an option, so choosing "Pause after…" would display a state that
+// is not yet true and cancelling would need a programmatic revert. A menu
+// commits nothing until you commit. Mirrors the strip's #lift-menu, which
+// already solves this shape for time windows.
+const autonomyBtn = document.getElementById('autonomy-btn');
 const TURN_PRESETS = [5, 10, 20, 50, 100];
 
 // <input type="datetime-local"> speaks LOCAL wall-clock with no zone, so it
-// has to be fed and read in local terms. The driver never interprets a
+// must be fed and read in local terms. The driver never interprets a
 // wall-clock time (AD5) — the browser resolves it to epoch ms and sends
 // that — which is why this conversion lives here and only here.
 function toLocalInputValue(ms) {
@@ -3805,71 +3826,185 @@ function toLocalInputValue(ms) {
   return d.toISOString().slice(0, 16);
 }
 
-// Reflects the LIVE state rather than the last thing clicked: an unattended
-// window can lapse on its own, and another tab can change any of this.
-// Driven from refreshAutonomy so there is one source of truth.
-function renderAutonomySetting() {
-  if (!autonomyMode) return;
-  // Never rewrite a field being edited — a poll landing between keystrokes
-  // would yank the value out from under the user.
-  if (document.activeElement === autonomyTurns || document.activeElement === autonomyUntil) return;
+// The closed control reads as a sentence describing what the system is
+// doing right now, rather than naming a setting whose effect you have to
+// remember.
+function autonomyLabel() {
   const a = autonomyState;
   if (a.state === 'uncapped') {
-    if (a.uncappedUntil) {
-      autonomyMode.value = 't:custom';
-      autonomyUntil.value = toLocalInputValue(a.uncappedUntil);
-    } else {
-      autonomyMode.value = 't:never';
-    }
-  } else {
-    const n = Number(a.pauseAfter);
-    autonomyMode.value = TURN_PRESETS.includes(n) ? `n:${n}` : 'n:custom';
-    autonomyTurns.value = String(n || 20);
+    return a.uncappedUntil
+      ? `Run unattended until ${fmtWhen(a.uncappedUntil)}`
+      : 'Run unattended indefinitely';
   }
-  syncAutonomyRows();
+  return `Pause after ${a.pauseAfter} automatic turns`;
 }
 
-function syncAutonomyRows() {
-  const v = autonomyMode.value;
-  autonomyTurnsRow.classList.toggle('disabled', v !== 'n:custom');
-  autonomyUntilRow.classList.toggle('disabled', v !== 't:custom');
-  autonomyTurns.disabled = v !== 'n:custom';
-  autonomyUntil.disabled = v !== 't:custom';
+function renderAutonomySetting() {
+  if (!autonomyBtn) return;
+  autonomyBtn.textContent = autonomyLabel();
+  // Deliberately does NOT rebuild an open menu: a poll landing mid-type
+  // would replace the field under the cursor.
+  if (!document.getElementById('autonomy-menu')) return;
+  for (const row of document.querySelectorAll('#autonomy-menu .lift-row')) {
+    row.classList.toggle('checked', row.dataset.key === autonomyCurrentKey());
+  }
 }
 
-function applyAutonomyMode() {
-  const v = autonomyMode.value;
-  syncAutonomyRows();
-  if (v.startsWith('n:')) {
-    // Picking ANY supervised option also ends an unattended window: it is
-    // the obvious thing to reach for when you want supervision back, and a
-    // separate "cancel" control would be a second way to say the same thing.
-    const n = v === 'n:custom' ? Number(autonomyTurns.value) : Number(v.slice(2));
-    if (!Number.isFinite(n) || n < 1) return;   // custom field mid-edit
-    autonomyPost({ pauseAfter: n }).then(() => autonomyPost({}));
+// Which row carries the checkmark. Time presets are relative to NOW, so an
+// exact match is meaningless — an active window checks the custom row and
+// shows its deadline, which is the honest answer.
+function autonomyCurrentKey() {
+  const a = autonomyState;
+  if (a.state === 'uncapped') return a.uncappedUntil ? 'until-custom' : 'never';
+  const n = Number(a.pauseAfter);
+  return TURN_PRESETS.includes(n) ? `turns:${n}` : 'turns-custom';
+}
+
+// Pending edits, committed when the field changes OR when the menu closes.
+// Closing mid-type stores the value rather than discarding it: the user
+// asked for that explicitly, and typing then clicking away is the common
+// gesture.
+let autonomyPending = null;
+
+function commitAutonomyPending() {
+  const p = autonomyPending;
+  autonomyPending = null;
+  if (!p) return;
+  if (p.kind === 'turns') {
+    const n = Number(p.value);
+    if (!Number.isFinite(n) || n < 1) return;
+    // Picking supervision also ENDS an unattended window — the obvious
+    // thing to reach for when you want supervision back.
+    autonomyPost({ pauseAfter: Math.floor(n) }).then(() => autonomyPost({}));
     return;
   }
-  if (v === 't:never') { autonomyPost({ lift: true, until: null }); return; }
-  if (v === 't:1h')  { autonomyPost({ lift: true, until: Date.now() + 3600e3 }); return; }
-  if (v === 't:4h')  { autonomyPost({ lift: true, until: Date.now() + 4 * 3600e3 }); return; }
-  if (v === 't:8am') { autonomyPost({ lift: true, until: nextLocalHour(8) }); return; }
-  if (v === 't:custom') {
-    // Seed a sensible target rather than posting nothing: an empty picker
-    // with no default is a dead end.
-    if (!autonomyUntil.value) autonomyUntil.value = toLocalInputValue(nextLocalHour(8));
-    const ms = new Date(autonomyUntil.value).getTime();
-    if (!Number.isFinite(ms) || ms <= Date.now()) return;  // wait for a real time
-    autonomyPost({ lift: true, until: ms });
-  }
+  const ms = new Date(p.value).getTime();
+  if (!Number.isFinite(ms) || ms <= Date.now()) return;
+  autonomyPost({ lift: true, until: ms });
 }
 
-if (autonomyMode) {
-  autonomyMode.addEventListener('change', applyAutonomyMode);
-  // `change`, not `input`: committing per keystroke would post a budget of
-  // 2 on the way to typing 200.
-  autonomyTurns.addEventListener('change', applyAutonomyMode);
-  autonomyUntil.addEventListener('change', applyAutonomyMode);
+function closeAutonomyMenu() {
+  const m = document.getElementById('autonomy-menu');
+  if (m) m.remove();
+  if (autonomyBtn) autonomyBtn.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('mousedown', onAutonomyOutside, true);
+  commitAutonomyPending();
 }
+
+function onAutonomyOutside(e) {
+  const wrap = document.getElementById('autonomy-wrap');
+  if (wrap && wrap.contains(e.target)) return;
+  closeAutonomyMenu();
+}
+
+function autonomyMenuRows() {
+  const now = Date.now();
+  return [
+    ...TURN_PRESETS.map((n) => ({
+      key: `turns:${n}`, label: `Pause after ${n} automatic turns`,
+      act: () => autonomyPost({ pauseAfter: n }).then(() => autonomyPost({})),
+    })),
+    { key: 'turns-custom', label: 'Pause after', custom: 'turns' },
+    { sep: true },
+    { key: 'until:1h', label: 'Run unattended for 1 hour', when: now + 3600e3 },
+    { key: 'until:4h', label: 'Run unattended for 4 hours', when: now + 4 * 3600e3 },
+    { key: 'until:8am', label: 'Run unattended until 8:00 AM', when: nextLocalHour(8) },
+    { key: 'until-custom', label: 'Run unattended until', custom: 'until' },
+    {
+      key: 'never', label: 'Run unattended indefinitely',
+      act: () => autonomyPost({ lift: true, until: null }),
+    },
+  ];
+}
+
+function toggleAutonomyMenu() {
+  if (document.getElementById('autonomy-menu')) { closeAutonomyMenu(); return; }
+  const wrap = document.getElementById('autonomy-wrap');
+  if (!wrap) return;
+  const menu = document.createElement('div');
+  menu.id = 'autonomy-menu';
+  const current = autonomyCurrentKey();
+
+  for (const c of autonomyMenuRows()) {
+    if (c.sep) {
+      const hr = document.createElement('div');
+      hr.className = 'menu-sep';
+      menu.appendChild(hr);
+      continue;
+    }
+    const row = document.createElement('div');
+    row.className = 'lift-row' + (c.key === current ? ' checked' : '');
+    row.dataset.key = c.key;
+
+    const left = document.createElement('span');
+    left.textContent = c.label;
+    row.appendChild(left);
+
+    if (c.custom === 'turns') {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '1';
+      input.max = '100000';
+      input.value = String(autonomyState.pauseAfter || 20);
+      // Clicks inside the field must not count as choosing the row.
+      input.addEventListener('mousedown', (e) => e.stopPropagation());
+      input.addEventListener('click', (e) => e.stopPropagation());
+      input.addEventListener('input', () => { autonomyPending = { kind: 'turns', value: input.value }; });
+      // `change` fires on Enter and on blur — both mean "done typing".
+      input.addEventListener('change', () => {
+        autonomyPending = { kind: 'turns', value: input.value };
+        closeAutonomyMenu();
+      });
+      row.appendChild(input);
+      const unit = document.createElement('span');
+      unit.className = 'lift-when';
+      unit.textContent = 'turns';
+      row.appendChild(unit);
+    } else if (c.custom === 'until') {
+      const input = document.createElement('input');
+      input.type = 'datetime-local';
+      input.value = toLocalInputValue(
+        autonomyState.uncappedUntil || nextLocalHour(8));
+      input.addEventListener('mousedown', (e) => e.stopPropagation());
+      input.addEventListener('click', (e) => e.stopPropagation());
+      input.addEventListener('input', () => { autonomyPending = { kind: 'until', value: input.value }; });
+      input.addEventListener('change', () => {
+        autonomyPending = { kind: 'until', value: input.value };
+        closeAutonomyMenu();
+      });
+      row.appendChild(input);
+    } else if (c.when) {
+      // The resolved absolute time, on every timed entry: "for 4 hours"
+      // crosses midnight with the same ambiguity that makes a bare
+      // "8:00 AM" unclear at 7 AM.
+      const when = document.createElement('span');
+      when.className = 'lift-when';
+      when.textContent = fmtWhen(c.when);
+      row.appendChild(when);
+      row.addEventListener('mousedown', () => {
+        autonomyPending = null;
+        autonomyPost({ lift: true, until: c.when });
+        closeAutonomyMenu();
+      });
+    }
+
+    if (c.act) {
+      row.addEventListener('mousedown', () => {
+        autonomyPending = null;
+        c.act();
+        closeAutonomyMenu();
+      });
+    }
+    menu.appendChild(row);
+  }
+
+  wrap.appendChild(menu);
+  autonomyBtn.setAttribute('aria-expanded', 'true');
+  // Capture phase, so a click on another control closes this first.
+  document.addEventListener('mousedown', onAutonomyOutside, true);
+}
+
+if (autonomyBtn) autonomyBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleAutonomyMenu(); });
 
 // MD9: the strip now has two independent halves — held mail on the left,
 // autonomy state on the right — and either alone is reason enough to show

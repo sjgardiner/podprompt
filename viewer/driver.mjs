@@ -545,6 +545,41 @@ function stampSessionHost(sessionId, cwd) {
   }
 }
 
+// ── Per-session preferences (MD9) ────────────────────────────────────────
+// Durable, unlike autoApprove — which lives on the in-memory session state
+// and so resets every restart. That is tolerable for a permission flag the
+// user re-grants while sitting there; it is not tolerable for auto-delivery,
+// whose whole purpose is to let a session run unattended. A setting that
+// silently reverts on restart would strand the very worker it was turned on
+// for, with no visible cause.
+//
+// Deliberately its own tiny file rather than a field on the relation index
+// or the session-hosts record: the relation index only has rows for sessions
+// with a parent (so no root session could hold a preference), and
+// stampSessionHost() rewrites its whole record on every touch, which would
+// silently drop anything stored alongside it.
+const SESSION_PREFS_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-prefs.json");
+
+let sessionPrefs = loadSessionPrefs();
+
+function loadSessionPrefs() {
+  try {
+    const raw = JSON.parse(readFileSync(SESSION_PREFS_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {}; // missing or corrupt — defaults are safe, so start fresh
+  }
+}
+
+function saveSessionPrefs() {
+  try {
+    writeFileSync(`${SESSION_PREFS_FILE}.tmp`, JSON.stringify(sessionPrefs));
+    renameSync(`${SESSION_PREFS_FILE}.tmp`, SESSION_PREFS_FILE);
+  } catch (e) {
+    console.error("[driver] failed to write session-prefs file:", e.message);
+  }
+}
+
 // ── Session relation index + sub-agent registry ──────────────────────────
 // A sub-agent is modelled as a CHILD SESSION: it gets a PodPrompt-minted
 // session id of its own, so opening one reuses /events?session=X, the
@@ -1212,7 +1247,7 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Checked BEFORE the gate because it is the more specific condition —
   // and skipped entirely for a delivery the user explicitly asked for,
   // which is the whole point of the button.
-  if (!userDirected && isWatched(sessionId)) {
+  if (!userDirected && isWatched(sessionId) && !autoDeliverFor(sessionId)) {
     for (const e of group) inbox.park(e.id, "watched");
     broadcastStatus(sessionId, { type: "inbox_changed" });
     return false;
@@ -1376,6 +1411,51 @@ function isWatched(sessionId) {
   if (!until) return false;
   if (Date.now() > until) { viewingUntil.delete(sessionId); return false; }
   return true;
+}
+
+// MD9: does mail for this session bypass the watched gate?
+//
+// MD1 holds mail while you are looking at a session, on the premise that it
+// would spend the turn you were about to type into. That premise conflates
+// two postures: PARTICIPATING (you are about to type — holding is right) and
+// SPECTATING (you are watching a worker run — holding is perverse, because
+// the agent then stalls BECAUSE you are watching it). This names the
+// difference. Autonomy still applies either way: an auto-delivering session
+// accrues automatic turns and still pauses at the cap, and viewing is not in
+// noteUserDirectedAction()'s list, so spectating never refills the budget.
+//
+// TRI-STATE, and resolved at read time rather than stamped at creation. A
+// delegated session IS an autonomous worker, so it defaults on; an explicit
+// choice either way wins. Deriving the default here (rather than writing
+// `autoDeliver: true` onto new delegated children) is what makes dropping
+// the default later a one-line change that applies retroactively, instead of
+// leaving every existing delegated session auto-delivering forever.
+function autoDeliverFor(sessionId) {
+  if (!sessionId) return false;
+  const explicit = sessionPrefs[sessionId]?.autoDeliver;
+  if (explicit === true || explicit === false) return explicit;
+  return sessionRelations[sessionId]?.childKind === "delegated";
+}
+
+// value: true | false to pin, null to clear back to the derived default.
+// Returns the effective setting afterwards.
+function setAutoDeliver(sessionId, value) {
+  if (!sessionId) return false;
+  if (value === null || value === undefined) {
+    if (sessionPrefs[sessionId]) {
+      delete sessionPrefs[sessionId].autoDeliver;
+      if (!Object.keys(sessionPrefs[sessionId]).length) delete sessionPrefs[sessionId];
+      saveSessionPrefs();
+    }
+  } else {
+    sessionPrefs[sessionId] = { ...(sessionPrefs[sessionId] || {}), autoDeliver: !!value };
+    saveSessionPrefs();
+  }
+  // Turning it on must free what the old setting is already holding —
+  // otherwise the first thing the user sees after enabling it is the mail it
+  // was supposed to stop holding, still sitting there.
+  if (autoDeliverFor(sessionId)) releaseWatchedFor(sessionId);
+  return autoDeliverFor(sessionId);
 }
 
 // MD7: the complete list of things that count as the user DIRECTING the
@@ -3119,6 +3199,11 @@ const server = createServer(async (req, res) => {
       delegationAnchor: sessionId ? delegationAnchorFor(sessionId) : null,
       parentSessionId: sessionId ? parentOfSession(sessionId) : null,
       autoApprove: effectiveAutoApprove(sessionId, state),
+      // MD9. Same resync reasoning as autoApprove above: the browser clears
+      // its controls on every session switch, so this is what rearms the
+      // checkbox — and because the value is DERIVED for delegated sessions,
+      // the browser cannot work it out locally.
+      autoDeliver: autoDeliverFor(sessionId),
     }));
     return;
   }
@@ -3812,6 +3897,37 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, autoApprove: enabled }));
+    return;
+  }
+
+  // MD9: pin auto-delivery for one session, or clear back to the derived
+  // default. Unlike /auto-approve this needs no preSeeds dance — the
+  // preference is durable and keyed by session id on its own, so it can be
+  // set before any state exists without pinning cwd or backend.
+  if (req.method === "POST" && path === "/auto-deliver") {
+    requireControl(req);
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    if (!body.sessionId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"sessionId required"}');
+      return;
+    }
+    // null/undefined clears the pin; anything else is an explicit choice.
+    const want = body.enabled === null || body.enabled === undefined ? null : !!body.enabled;
+    const effective = setAutoDeliver(body.sessionId, want);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      autoDeliver: effective,
+      explicit: sessionPrefs[body.sessionId]?.autoDeliver ?? null,
+    }));
     return;
   }
 

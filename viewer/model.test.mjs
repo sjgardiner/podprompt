@@ -63,6 +63,18 @@ function freshDriver(backends) {
   return new Function(sandbox)(backends);
 }
 
+// ⚠ NOT THE REAL MODEL LIST. These are plausible-shaped fixtures and are
+// deliberately INCOMPLETE — the live backends carry more ids than this, and
+// different ones over time.
+//
+// Flagged by a delegated session that was asked to discover the real ids
+// with no help: grepping the repo for model lists led it straight here, and
+// it reported that a filesystem-only investigation "would have produced an
+// incorrect answer from the test fixture." The real lists are not in the
+// repo at all — claude-code's come from a live SDK query and opencode's from
+// /config/providers — so the only correct way to learn them is to ask a
+// running backend, or to guess a model id and read the ids that come back in
+// the rejection (see resolveModelId in driver.mjs).
 const realish = {
   "claude-code": {
     listModels: async () => ({

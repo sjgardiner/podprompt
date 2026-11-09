@@ -841,42 +841,55 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button.danger { color: var(--danger); border-color: var(--danger); }
 
-  /* MD4: the mail bar. In the feed, anchored last, so delivered mail and
-     the turn it provokes render above it. Styled like a bubble-width panel
-     rather than chrome — it belongs to the conversation. */
-  #mail-bar { display: none; }
-  #mail-bar.show {
-    display: block; margin: 0 auto; max-width: var(--content-width, 860px);
-    border: 1px solid var(--accent); border-radius: 6px;
-    background: var(--surface); font-size: 13px;
+  /* MD9: the mail interface, in the strip's LEFT half.
+     It used to be a panel in the feed, anchored last. Two things killed
+     that: it scrolled out of view (appended as the feed's last child, so
+     scrolling up hid the only control that could unblock the session), and
+     it duplicated the strip, which was already announcing the same held
+     mail from the chrome. The strip never scrolls and was already the place
+     you look when something needs you.
+     Scoped to the session on screen, which costs nothing: mail can only be
+     held for a session a VISIBLE tab is watching, so a second tab shows its
+     own count and there is no cross-session state to aggregate. */
+  #ps-mail { display: none; align-items: center; gap: 10px; }
+  #ps-mail.show { display: inline-flex; }
+  #paused-strip .mb-toggle { cursor: pointer; user-select: none; }
+  #paused-strip .mb-toggle::before { content: '▸ '; }
+  #paused-strip.mail-open .mb-toggle::before { content: '▾ '; }
+  #paused-strip .mb-toggle:hover { text-decoration: underline; }
+  /* Overlays rather than pushing the feed down, and anchored to the STRIP
+     from the left (the lift menu above does the same from the right) so it
+     cannot be clipped by the strip's own overflow. */
+  #ps-mail-list { display: none; }
+  #paused-strip.mail-open #ps-mail-list {
+    display: block;
+    position: absolute; left: 14px; top: 100%; z-index: 42;
+    min-width: 420px; max-width: 70vw; max-height: 50vh; overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 6px 20px rgba(0,0,0,.28);
   }
-  #mail-bar .mb-head { display: flex; align-items: center; gap: 10px; padding: 6px 12px; }
-  #mail-bar .mb-spacer { flex: 1; }
-  #mail-bar .mb-toggle { cursor: pointer; user-select: none; color: var(--accent); }
-  #mail-bar .mb-toggle::before { content: '▸ '; }
-  #mail-bar.open .mb-toggle::before { content: '▾ '; }
-  #mail-bar .mb-toggle:hover { text-decoration: underline; }
-  #mail-bar .mb-deliver {
+  #paused-strip .mb-deliver {
     font-size: 12px; padding: 2px 10px;
     border-color: var(--accent); color: var(--accent); background: transparent;
   }
-  #mail-bar .mb-deliver:disabled { opacity: .45; cursor: default; }
-  #mail-bar .mb-list { border-top: 1px solid var(--border); padding: 4px 6px; }
-  #mail-bar .mb-row {
+  #paused-strip .mb-deliver:disabled { opacity: .45; cursor: default; }
+  #ps-mail-list .mb-row {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 6px; border-radius: 5px; cursor: pointer;
   }
-  #mail-bar .mb-row:hover { background: var(--code-bg); }
-  #mail-bar .mb-who { color: var(--accent); flex-shrink: 0; }
-  #mail-bar .mb-text {
+  #ps-mail-list .mb-row:hover { background: var(--code-bg); }
+  #ps-mail-list .mb-who { color: var(--accent); flex-shrink: 0; }
+  #ps-mail-list .mb-text {
     flex: 1; min-width: 0; color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  #mail-bar .mb-drop {
+  #ps-mail-list .mb-drop {
     font-size: 11px; padding: 0 5px; flex-shrink: 0;
     color: var(--muted); border-color: var(--border); background: transparent;
   }
-  #mail-bar .mb-drop:hover { color: var(--danger); border-color: var(--danger); }
+  #ps-mail-list .mb-drop:hover { color: var(--danger); border-color: var(--danger); }
 
   .session-group-header {
     padding: 8px 14px 4px;
@@ -1037,20 +1050,25 @@
   #controls-row select.show { display: inline-block; }
   /* The model/mode pickers stay hidden until their options load; this one's
      options are fixed, so it is ready immediately. */
-  #auto-approve-row {
+  #auto-approve-row, #auto-deliver-row {
     display: flex;
     align-items: center;
     gap: 5px;
     cursor: pointer;
     user-select: none;
   }
-  #auto-approve-row input[type="checkbox"] {
+  #auto-approve-row input[type="checkbox"],
+  #auto-deliver-row input[type="checkbox"] {
     width: 1.15em;
     height: 1.15em;
   }
   /* Deliberately the same amber used for the context-usage warning
      threshold — both are "pay attention" states, not errors. */
   #auto-approve-row.active { color: #f59e0b; font-weight: 600; }
+  /* MD9: accent, not amber. Auto-approve's amber says "you have lowered a
+     guard"; auto-delivery grants nothing and removes no review, it only
+     declines to hold mail — so it reads as an active mode, not a warning. */
+  #auto-deliver-row.active { color: var(--accent); font-weight: 600; }
 
   /* ── Input bar ─────────────────────────────────────────────────────── */
   #input-bar {
@@ -1504,9 +1522,11 @@
   </header>
 
   <div id="paused-strip">
+    <span id="ps-mail"></span>
     <span id="ps-text"></span>
     <span class="ps-spacer"></span>
     <span id="ps-actions"></span>
+    <div id="ps-mail-list"></div>
   </div>
 
   <div id="sessions-panel">
@@ -1720,6 +1740,9 @@
       <label id="auto-approve-row" title="Automatically approve all tool permission requests for this session, until turned back off">
         <input type="checkbox" id="auto-approve-toggle"> Auto-approve
       </label>
+      <label id="auto-deliver-row" title="Deliver messages to this session immediately, even while you are watching it. Use for a session that is meant to work on its own — otherwise mail is held so it cannot spend the turn you were about to type. On by default for delegated sessions.">
+        <input type="checkbox" id="auto-deliver-toggle"> Auto-deliver
+      </label>
     </div>
   </div>
 
@@ -1871,6 +1894,8 @@ const modelSelect       = document.getElementById('model-select');
 const modeSelect        = document.getElementById('mode-select');
 const autoApproveRow    = document.getElementById('auto-approve-row');
 const autoApproveToggle = document.getElementById('auto-approve-toggle');
+const autoDeliverRow    = document.getElementById('auto-deliver-row');
+const autoDeliverToggle = document.getElementById('auto-deliver-toggle');
 
 // Whether loadModels()/loadModes() have reached a DEFINITIVE answer for the
 // session currently being viewed — either "this backend has no such concept
@@ -1956,6 +1981,10 @@ function resetBackendControlsDisplay() {
   lastPlanUsageStatus = null;
   autoApproveToggle.checked = false;
   autoApproveRow.classList.remove('active');
+  // MD9: the value is DERIVED for delegated sessions, so the browser cannot
+  // recompute it locally — cleared here and rearmed from /turn-status.
+  autoDeliverToggle.checked = false;
+  autoDeliverRow.classList.remove('active');
   modelSelect.classList.remove('show');
   modelSelect.innerHTML = '';
   modeSelect.classList.remove('show');
@@ -3230,8 +3259,10 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   heldMail = [];
   mailExpanded = false;
   delegationAnchor = null;
-  const oldMailBar = document.getElementById('mail-bar');
-  if (oldMailBar) { oldMailBar.classList.remove('show'); oldMailBar.innerHTML = ''; }
+  // MD9: the mail half belongs to the session being left, so clear it rather
+  // than let the next session briefly inherit its count. refreshMail()
+  // repopulates a moment later.
+  renderMailBar();
   currentSessionIsChild = knownChild;
   resumeBar.classList.remove('show');
   refreshResumeBar();
@@ -3616,22 +3647,35 @@ async function refreshAutonomy() {
   renderAutonomyStrip();
 }
 
+// MD9: the strip now has two independent halves — held mail on the left,
+// autonomy state on the right — and either alone is reason enough to show
+// it. Both renderers call this rather than each toggling `.show`, or
+// whichever ran last would hide the other's half.
+function stripHasAutonomyState() {
+  return autonomyState.state === 'paused' || autonomyState.state === 'uncapped';
+}
+function updateStripVisibility() {
+  autonomyStrip.classList.toggle('show', stripHasAutonomyState() || heldMail.length > 0);
+}
+
 function renderAutonomyStrip() {
   const a = autonomyState;
-  const show = a.state === 'paused' || a.state === 'uncapped' || (a.parked || 0) > 0;
-  autonomyStrip.classList.toggle('show', show);
-  if (!show) return;
+  updateStripVisibility();
+  // The old third state — "N messages waiting", counting inbox.stuck()
+  // across every session — is gone. It double-announced mail the left half
+  // now owns, and its count was global while the action was local, which is
+  // exactly why it fired for three messages belonging to the session on
+  // screen. Mail visibility is the left half's business alone.
+  if (!stripHasAutonomyState()) { asText.textContent = ''; asActions.innerHTML = ''; return; }
 
   if (a.state === 'uncapped') {
     asText.textContent = a.uncappedUntil
       ? `⚡ Autonomous work is uncapped until ${fmtWhen(a.uncappedUntil)} (${fmtUntilRelative(a.uncappedUntil)}).`
       : '⚡ Autonomous work is uncapped until you turn it back on.';
-  } else if (a.state === 'paused') {
+  } else {
     const where = a.parkedSessions > 1 ? ` across ${a.parkedSessions} sessions` : '';
     asText.textContent =
       `⏸ Autonomous work paused — ${a.count} turns${where} since you were last active.`;
-  } else {
-    asText.textContent = `${a.parked} message${a.parked === 1 ? '' : 's'} waiting.`;
   }
 
   asActions.innerHTML = '';
@@ -3733,29 +3777,24 @@ async function autonomyPost(body) {
 }
 
 
-// ── MD4/MD5: the mail bar ───────────────────────────────────────────────
-// Lives in the FEED, forced last, so mail delivered from it and the turn it
-// provokes render ABOVE it — same mechanism placeResumeBar() uses. It is a
-// statement about this conversation, not a global status, so it does not
-// belong in the chrome where the autonomy strip already sits (MD6).
+// ── MD9: the mail interface, in the strip's left half ───────────────────
+// It used to live in the feed, forced last. That was wrong twice over: the
+// feed SCROLLS, so the only control that could unblock the session hid
+// itself the moment you scrolled up, and the strip was separately
+// announcing the same held mail from the chrome — the same fact stated in
+// two places, which is what made it look like a bug.
+//
+// Scoped to the session on screen, which loses nothing: mail parks with
+// reason "watched" only while a VISIBLE tab is looking at that session (a
+// hidden tab reports visible:false, noteViewing deletes the entry and the
+// sweep releases the mail), so there is no reachable state where held mail
+// exists somewhere a visible tab is not already showing it. A second window
+// on another session shows its own count, full stop.
 let heldMail = [];
 let mailExpanded = false;
 
-function mailBarEl() {
-  let el = document.getElementById('mail-bar');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'mail-bar';
-    feed.appendChild(el);
-  }
-  return el;
-}
-
-// Anchors the bottom of the feed. Messages are appended, so without this it
-// would drift upward as the delivered turn produces output.
-function placeMailBar(el) {
-  if (el.parentElement !== feed || feed.lastElementChild !== el) feed.appendChild(el);
-}
+const mailHeadEl = document.getElementById('ps-mail');
+const mailListEl = document.getElementById('ps-mail-list');
 
 async function refreshMail() {
   if (!driverBase || !currentSessionId) { heldMail = []; renderMailBar(); return; }
@@ -3772,20 +3811,28 @@ async function refreshMail() {
 }
 
 function renderMailBar() {
-  const el = mailBarEl();
-  if (!heldMail.length) { el.classList.remove('show'); el.innerHTML = ''; return; }
+  const el = mailHeadEl;
+  if (!heldMail.length) {
+    el.classList.remove('show');
+    el.innerHTML = '';
+    mailListEl.innerHTML = '';
+    mailExpanded = false;
+    autonomyStrip.classList.remove('mail-open');
+    updateStripVisibility();
+    return;
+  }
   const n = heldMail.length;
   const checked = new Set(
-    [...el.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id));
+    [...mailListEl.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id));
   // Checked by default: delivering everything is the common intent, so the
   // frequent case stays one click and unchecking is the exception.
   const isChecked = (id) => (el.classList.contains('show') ? checked.has(id) : true);
 
   el.classList.add('show');
   el.innerHTML = '';
+  updateStripVisibility();
 
-  const head = document.createElement('div');
-  head.className = 'mb-head';
+  const head = el;
   const toggle = document.createElement('span');
   toggle.className = 'mb-toggle';
   // A single message names its sender in the collapsed line — "1 message
@@ -3795,19 +3842,17 @@ function renderMailBar() {
     : `✉ ${n} messages waiting`;
   toggle.addEventListener('click', () => { mailExpanded = !mailExpanded; renderMailBar(); });
   head.appendChild(toggle);
-  const spacer = document.createElement('span');
-  spacer.className = 'mb-spacer';
-  head.appendChild(spacer);
 
   const deliver = document.createElement('button');
   deliver.className = 'mb-deliver';
   head.appendChild(deliver);
-  el.appendChild(head);
 
-  const list = document.createElement('div');
-  list.className = 'mb-list';
-  el.classList.toggle('open', mailExpanded);
-  if (!mailExpanded) list.style.display = 'none';
+  // The list is a sibling overlay on the strip, not a child of the head —
+  // the head is an inline flex row, and an expanding block inside it would
+  // stretch the strip instead of hanging below it.
+  const list = mailListEl;
+  list.innerHTML = '';
+  autonomyStrip.classList.toggle('mail-open', mailExpanded);
   for (const e of heldMail) {
     const row = document.createElement('label');
     row.className = 'mb-row';
@@ -3833,22 +3878,19 @@ function renderMailBar() {
     row.appendChild(cb); row.appendChild(who); row.appendChild(txt); row.appendChild(drop);
     list.appendChild(row);
   }
-  el.appendChild(list);
 
   function updateDeliverLabel() {
-    const k = el.querySelectorAll('.mb-row input:checked').length;
+    const k = list.querySelectorAll('.mb-row input:checked').length;
     deliver.textContent = k === n ? (n === 1 ? 'Deliver' : `Deliver all ${n}`) : `Deliver ${k}`;
     deliver.disabled = k === 0;
   }
   updateDeliverLabel();
   deliver.addEventListener('click', async () => {
-    const ids = [...el.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id);
+    const ids = [...list.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id);
     if (!ids.length) return;
     deliver.disabled = true;
     await mailPost({ action: 'deliver', sessionId: currentSessionId, entryIds: ids });
   });
-
-  placeMailBar(el);
 }
 
 async function mailPost(body) {
@@ -3934,14 +3976,10 @@ const RESUME_WORDING = {
 // keeps it as the last thing in the conversation, which is the only position
 // that reads correctly ("...and that is where it stopped").
 function placeResumeBar() {
-  const mail = document.getElementById('mail-bar');
-  const anchorEl = (mail && mail.classList.contains('show')) ? mail : null;
-  // MD4: the mail bar anchors the bottom, so Continue sits just above it.
-  // A standing control that hops position as a transient one comes and goes
-  // is worse than the reverse.
-  if (anchorEl) {
-    if (resumeBar.nextElementSibling !== anchorEl) feed.insertBefore(resumeBar, anchorEl);
-  } else if (resumeBar.parentElement !== feed || feed.lastElementChild !== resumeBar) {
+  // MD9: nothing else competes for the bottom of the feed any more. The mail
+  // bar used to live here and anchor it, so Continue had to sit just above;
+  // mail moved to the strip, so Continue is simply last.
+  if (resumeBar.parentElement !== feed || feed.lastElementChild !== resumeBar) {
     feed.appendChild(resumeBar);
   }
   // Only when already following along. Yanking the view down on someone who
@@ -5049,6 +5087,8 @@ async function resyncTurnStatus() {
     refreshSubAgents();
     autoApproveToggle.checked = !!data.autoApprove;
     autoApproveRow.classList.toggle('active', !!data.autoApprove);
+    autoDeliverToggle.checked = !!data.autoDeliver;
+    autoDeliverRow.classList.toggle('active', !!data.autoDeliver);
   } catch (e) {
     console.error('Failed to resync turn status:', e);
   }
@@ -5263,6 +5303,38 @@ autoApproveToggle.addEventListener('change', async () => {
     console.error('Failed to set auto-approve:', e);
     autoApproveToggle.checked = !enabling;
     autoApproveRow.classList.toggle('active', !enabling);
+  }
+});
+
+// MD9. No confirm() unlike auto-approve: this grants no privilege and
+// nothing irreversible happens — the worst case is a message arriving sooner
+// than you wanted, and the autonomy cap still governs how much work follows.
+// Sends an explicit true/false rather than clearing back to the derived
+// default, because an unticked box on a delegated session has to MEAN "off"
+// and survive as such; `null` (clear the pin) is reachable only by the
+// driver, which is the right asymmetry for a control with two visible states.
+autoDeliverToggle.addEventListener('change', async () => {
+  if (!driverBase || !currentSessionId) { autoDeliverToggle.checked = false; return; }
+  const enabling = autoDeliverToggle.checked;
+  try {
+    const res = await fetch(`${driverBase}/auto-deliver`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, enabled: enabling }),
+    });
+    if (!res.ok) throw new Error(`driver returned ${res.status}`);
+    const d = await res.json().catch(() => ({}));
+    // Trust the driver's effective value over the click: it resolves the
+    // tri-state, so this is also what corrects the box if the two disagree.
+    autoDeliverToggle.checked = !!d.autoDeliver;
+    autoDeliverRow.classList.toggle('active', !!d.autoDeliver);
+    // Enabling releases whatever was being held, so the left half of the
+    // strip has to re-render rather than keep showing stale mail.
+    refreshMail();
+  } catch (e) {
+    console.error('Failed to set auto-deliver:', e);
+    autoDeliverToggle.checked = !enabling;
+    autoDeliverRow.classList.toggle('active', !enabling);
   }
 });
 

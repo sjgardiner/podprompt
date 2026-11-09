@@ -258,14 +258,51 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
     return { ok: true, entry: e };
   }
 
-  function release(id) {
+  function release(id, { by = "auto" } = {}) {
     const e = byId(id);
     if (!e) return { ok: false, reason: "no-such-entry" };
     if (e.state !== "parked") return { ok: false, reason: "not-parked" };
     e.state = "queued";
-    e.parkedReason = null;
+    // parkedReason is NOT cleared any more.
+    //
+    // It used to be, and that erased the only record that a message had ever
+    // been held. A message held for two minutes and manually delivered then
+    // looked byte-identical to one that sailed straight through, so
+    // "why was that held?" was unanswerable from state — only from a log
+    // that scrolls away. Caught the hard way: I read parkedReason:null off a
+    // live record and concluded six messages were never parked, while the
+    // driver log showed them parked and released a second apart.
+    //
+    // Nothing reads parkedReason without also checking state (stuck() filters
+    // on state === "parked"), so keeping it is inert apart from being true.
+    e.releasedBy = by;
     save();
     return { ok: true, entry: e };
+  }
+
+  // Per-MESSAGE approval, durable because it lives on the stored entry.
+  //
+  // WHY PER MESSAGE. The drain used to deliver everything queued for a
+  // session, so a user who approved two messages also silently approved any
+  // that arrived before the turn ended. That defeats the whole point of
+  // holding mail for a watched session: you would be authorising mail you
+  // had never seen.
+  //
+  // Durable because the approval has to OUTLIVE the turn that was running
+  // when you clicked. Approving during a busy turn previously did nothing at
+  // all — the click was discarded with the rest of the call.
+  function approve(ids) {
+    const want = new Set(Array.isArray(ids) ? ids : [ids]);
+    const out = [];
+    for (const e of store.entries) {
+      if (!want.has(e.id)) continue;
+      if (e.state !== "queued" && e.state !== "parked") continue;
+      e.approved = true;
+      if (e.state === "parked") { e.state = "queued"; e.releasedBy = "user"; }
+      out.push(e);
+    }
+    if (out.length) save();
+    return out;
   }
 
   function discard(id) {
@@ -312,7 +349,7 @@ export function createInbox({ file, onError = () => {}, now = () => Date.now() }
 
   return {
     enqueue, byId, pendingFor, markDelivered,
-    park, release, discard, stuck, open, sessionsWithPending, prune, forgetSessions,
+    park, release, approve, discard, stuck, open, sessionsWithPending, prune, forgetSessions,
     all: () => store.entries.slice(),
     _store: () => store,
   };

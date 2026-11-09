@@ -169,17 +169,42 @@ const NATIVE = { kid: { childKind: "native-task" } };
   check("the hold decision reads isWatched", /isWatched\(sessionId\)/.test(drain));
   check("the hold decision reads autoDeliverFor", /autoDeliverFor\(sessionId\)/.test(drain));
   check("mail is parked as 'watched' only behind that decision",
-    /if \(!userDirected && watched && !auto\) \{\s*\n\s*for \(const e of group\) inbox\.park\(e\.id, "watched"\);/.test(drain),
+    /if \(watched && !auto\) group = parkUnapproved\(sessionId, group, "watched", approved\);/.test(drain),
     drain.slice(drain.indexOf("watched && !auto") - 60, drain.indexOf("watched && !auto") + 120));
 
   // The autonomy gate must NOT be bypassed by it: the user asked for
   // visibility-gating to be skippable, explicitly keeping the budget as the
-  // remaining brake. If autoDeliverFor ever appears in the autonomy branch,
-  // a spectated session could run unbounded.
-  const autonomyBranch = src.slice(src.indexOf('inbox.park(e.id, "watched")'));
-  const autonomyGate = autonomyBranch.slice(0, autonomyBranch.indexOf('inbox.park(e.id, "autonomy")'));
+  // remaining brake. If autoDeliverFor (or its local `auto`) ever appears in
+  // the autonomy branch, a spectated session could run unbounded.
+  //
+  // THE ANCHORS ARE ASSERTED BEFORE THEY ARE USED. The previous version
+  // sliced between two literals that a refactor removed; indexOf returned
+  // -1, the slice came out empty, and the test went on passing while
+  // testing nothing at all. A string-anchored test that cannot find its
+  // anchor must FAIL, not shrug.
+  const watchedAt = drain.indexOf('"watched", approved');
+  const autonomyAt = drain.indexOf('"autonomy", approved');
+  check("the watched park is still findable", watchedAt > 0, watchedAt);
+  check("the autonomy park is still findable", autonomyAt > watchedAt, [watchedAt, autonomyAt]);
+  const autonomyGate = drain.slice(watchedAt, autonomyAt);
   check("auto-delivery does not weaken the autonomy gate",
-    !/autoDeliverFor/.test(autonomyGate), autonomyGate.slice(0, 200));
+    !/autoDeliverFor|!auto\b/.test(autonomyGate), autonomyGate);
+  check("...and the gate is still the autonomy status",
+    /autonomy\.status\(\)\.paused/.test(autonomyGate), autonomyGate);
+
+  // Approval is PER MESSAGE: a call-level override would re-open the leak
+  // where approving two messages also delivered anything that arrived
+  // afterwards and was never seen.
+  check("the hold respects per-entry approval",
+    /const approved = \(e\) => userDirected \|\| e\.approved === true;/.test(drain), drain.slice(0, 400));
+  check("only unapproved entries are parked",
+    /const toPark = group\.filter\(\(e\) => !approved\(e\)\);/.test(bodyOf("parkUnapproved")));
+
+  // Busy is now the LAST gate. If it climbs back above the hold decision,
+  // mid-turn mail becomes invisible again — the bug this all came from.
+  check("the busy check comes after the hold decision",
+    drain.indexOf("sessionIsIdle") > drain.indexOf('"watched", approved'),
+    [drain.indexOf("sessionIsIdle"), drain.indexOf('"watched", approved')]);
 
   // And the browser has to be able to see the resolved value, because it is
   // derived and cannot be recomputed client-side.

@@ -3863,12 +3863,36 @@ async function refreshMail() {
     // bar that flickered for it would train the eye to ignore the bar.
     heldMail = (d.entries || []).filter(
       (e) => e.state === 'parked' && e.to?.id === currentSessionId);
+    // Approved, but the session is mid-turn so it cannot be delivered yet.
+    // Without this the bar empties the instant you click and nothing visibly
+    // happens until the turn ends — which is indistinguishable from the
+    // click having been swallowed, and swallowing it is exactly what the old
+    // code did.
+    approvedPending = (d.entries || []).filter(
+      (e) => e.state === 'queued' && e.approved && e.to?.id === currentSessionId).length;
   } catch { return; }
   renderMailBar();
 }
 
+let approvedPending = 0;
+
 function renderMailBar() {
   const el = mailHeadEl;
+  if (!heldMail.length && approvedPending) {
+    // Nothing left needing a decision, but something is still on its way.
+    el.classList.add('show');
+    el.innerHTML = '';
+    mailListEl.innerHTML = '';
+    mailExpanded = false;
+    autonomyStrip.classList.remove('mail-open');
+    const note = document.createElement('span');
+    note.className = 'mb-toggle';
+    note.textContent = `${approvedPending} message${approvedPending === 1 ? '' : 's'} — delivering when this turn ends`;
+    note.title = 'You approved these. They are waiting for the current turn to finish.';
+    el.appendChild(note);
+    updateStripVisibility();
+    return;
+  }
   if (!heldMail.length) {
     el.classList.remove('show');
     el.innerHTML = '';

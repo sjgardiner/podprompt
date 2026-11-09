@@ -1681,22 +1681,23 @@ function splitDeliveredMessages(text) {
   return found;
 }
 
+// Park every entry the user has NOT approved, and return the survivors.
+// Approval is per message (inbox.approve), so a batch can be half delivered
+// and half held without either half learning about the other.
+function parkUnapproved(sessionId, group, reason, approved) {
+  const toPark = group.filter((e) => !approved(e));
+  if (!toPark.length) return group;
+  for (const e of toPark) inbox.park(e.id, reason);
+  broadcastStatus(sessionId, { type: "inbox_changed" });
+  return group.filter(approved);
+}
+
 function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
-  if (!sessionIsIdle(sessionId)) {
-    // Mail that arrives mid-turn is left QUEUED and retried when the turn
-    // ends, so it never reaches the hold decision below on this pass. That
-    // is correct, but it is also a second silent state — logged so the
-    // timeline reads continuously rather than skipping from "sent" to
-    // "delivered" with an unexplained gap in between.
-    const waiting = inbox.pendingFor(sessionId).length;
-    if (waiting) console.log(`[driver] mail ${sessionId}: ${waiting} msg(s) queued, session busy`);
-    return false;
-  }
   // Everything pending, not a per-chain slice. nextDrainGroup existed solely
   // so one chain's budget could not pay for another's work; with a single
   // global counter (AD2) there is nothing left to keep apart, and coalescing
   // the lot into one turn is strictly cheaper than one turn per sender.
-  const group = inbox.pendingFor(sessionId);
+  let group = inbox.pendingFor(sessionId);
   if (!group.length) return false;
   // MD1: the user is looking at this conversation, so this message would
   // spend the turn they were about to use. Held for them to decide.
@@ -1713,21 +1714,49 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Cheap: one line per arrival of mail, not per message.
   const watched = isWatched(sessionId);
   const auto = autoDeliverFor(sessionId);
+  // A message the user has already approved is never re-held. Approval is
+  // durable (it lives on the stored entry), which is what lets it outlive
+  // the turn that was running when the button was clicked.
+  const approved = (e) => userDirected || e.approved === true;
   console.log(
     `[driver] mail ${sessionId}: ${group.length} msg(s), watched=${watched}`
     + ` autoDeliver=${auto} userDirected=${userDirected}`
-    + ` -> ${!userDirected && watched && !auto ? "HOLD" : "deliver"}`);
-  if (!userDirected && watched && !auto) {
-    for (const e of group) inbox.park(e.id, "watched");
-    broadcastStatus(sessionId, { type: "inbox_changed" });
-    return false;
-  }
+    + ` approved=${group.filter(approved).length}`
+    + ` -> ${group.every((e) => !approved(e)) && watched && !auto ? "HOLD" : "deliver"}`);
+
+  // MD1, now evaluated ON ARRIVAL rather than only when the turn ends.
+  //
+  // THE BUG THIS FIXES. The busy check used to sit above this one and
+  // return early, so while a turn ran, "is the user watching?" was never
+  // asked — the mail sat in `queued`, which the bar does not render, and
+  // nothing appeared until the turn finished. Measured live: six messages
+  // invisible for the length of a multi-minute turn, then held the instant
+  // it ended.
+  //
+  // The mail was waiting on the USER the whole time; the system simply had
+  // not got round to noticing. Deciding here means the bar shows it
+  // immediately, and the bar keeps its single meaning — "waiting on you" —
+  // because that is exactly what these are.
+  //
+  // Mail for an auto-deliver session, or one nobody is watching, is NOT
+  // parked by this and stays invisible until it flows at turn end. That is
+  // what keeps the bar from flickering for mail that resolves itself.
+  if (watched && !auto) group = parkUnapproved(sessionId, group, "watched", approved);
   // Parked rather than left queued, so the strip can show it as stuck. A
   // queued message is merely waiting its turn; a parked one is waiting on
   // the USER, and those must not look alike.
-  if (!userDirected && autonomy.status().paused) {
-    for (const e of group) inbox.park(e.id, "autonomy");
-    broadcastStatus(sessionId, { type: "inbox_changed" });
+  if (group.length && autonomy.status().paused) {
+    group = parkUnapproved(sessionId, group, "autonomy", approved);
+  }
+  if (!group.length) return false;
+
+  // Being busy is now the LAST gate, not the first: the hold decision above
+  // has to happen on arrival so the bar can show it, but nothing can
+  // actually be delivered into a running turn. Whatever survives stays
+  // queued (approved entries keep their approval) and the turn-end drain
+  // picks it up.
+  if (!sessionIsIdle(sessionId)) {
+    console.log(`[driver] mail ${sessionId}: ${group.length} msg(s) queued, session busy`);
     return false;
   }
   // One sender gets named; several become "peer" without a handle, since no
@@ -4755,14 +4784,22 @@ const server = createServer(async (req, res) => {
       const entry = inbox.byId(entryId);
       if (!entry) result = { ok: false, reason: "no-such-entry" };
       else {
+        // Approve THIS message, then try to drain. If the session is busy
+        // the approval persists and the turn-end drain honours it, so the
+        // click is no longer discarded — which is what used to happen, with
+        // a "not-parked" error, for anything that arrived mid-turn.
         // MD8: a delivery the user explicitly clicked is NOT autonomous
         // work. It bypasses the gate, is not charged, and — unlike every
         // earlier version of this code — does not reset the counter, so it
         // cannot release other sessions' parked mail as a side effect. That
         // only became possible once MD7 removed the blanket mousedown
         // listener, which used to fire before any handler here could run.
-        result = inbox.release(entryId);
-        if (result.ok) maybeDrainInbox(entry.to?.id, { userDirected: true });
+        const ok = inbox.approve([entryId]).length > 0;
+        result = ok ? { ok: true } : { ok: false, reason: "not-deliverable" };
+        // NOT userDirected: approval is carried per entry now, so a
+        // call-level override would also sweep up anything else queued —
+        // exactly the leak this change exists to close.
+        if (ok) maybeDrainInbox(entry.to?.id);
       }
     } else if (body.action === "deliver") {
       // MD5: deliver the CHECKED subset as one coalesced turn. Unchecked
@@ -4772,16 +4809,21 @@ const server = createServer(async (req, res) => {
       // costing a turn per message.
       const ids = Array.isArray(body.entryIds) ? body.entryIds : [];
       const target = body.sessionId || inbox.byId(ids[0])?.to?.id || null;
-      let released = 0;
-      for (const id of ids) {
+      const wanted = ids.filter((id) => {
         const e = inbox.byId(id);
-        if (!e || (target && e.to?.id !== target)) continue;
-        if (inbox.release(id).ok) released++;
-      }
-      if (!released) result = { ok: false, reason: "nothing-to-deliver" };
+        return e && (!target || e.to?.id === target);
+      });
+      const approved = inbox.approve(wanted);
+      if (!approved.length) result = { ok: false, reason: "nothing-to-deliver" };
       else {
-        maybeDrainInbox(target, { userDirected: true });
-        result = { ok: true, delivered: released };
+        // Deliberately NOT { userDirected: true }. That is a call-level
+        // override which would deliver EVERYTHING queued for the session —
+        // including messages that arrived after you looked and which you
+        // have therefore never seen. Approval is per message now, so the
+        // drain delivers exactly what was approved and gives anything newer
+        // its own decision, which the bar then shows as a fresh arrival.
+        maybeDrainInbox(target);
+        result = { ok: true, delivered: approved.length };
       }
     } else result = { ok: false, reason: "unknown-action" };
     if (!result.ok) {

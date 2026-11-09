@@ -306,6 +306,92 @@ rmSync(dir, { recursive: true, force: true });
     /rescans the finished message at turn end/.test(cc));
 }
 
+let md13n = 0;
+// ── Per-message approval (MD13) ──────────────────────────────────────────
+//
+// THE BUG. The drain delivered EVERYTHING queued for a session, so a user
+// who approved two held messages also silently approved any that arrived
+// before the turn ended. For a watched session with auto-deliver off — i.e.
+// one where the user has deliberately asked to vet mail — that means
+// delivering messages they never saw. The approval has to be per message.
+//
+// SECOND BUG, same fix. Approving during a busy turn did nothing at all:
+// release() rejected anything not already parked, and the userDirected flag
+// was discarded by the early return. The click was lost, with an error.
+{
+  const inbox = createInbox({ file: file("md13-" + (md13n++)), now });
+  const to = { realm: LOCAL_REALM, id: "s1" };
+  const from = { realm: LOCAL_REALM, id: "sender" };
+  const a = inbox.enqueue({ to, from, fromHandle: "a", text: "one" });
+  const b = inbox.enqueue({ to, from, fromHandle: "b", text: "two" });
+
+  inbox.park(a.id, "watched");
+  inbox.park(b.id, "watched");
+  check("both start held", inbox.stuck().length === 2);
+
+  const approved = inbox.approve([a.id]);
+  check("approving returns what it approved", approved.length === 1, approved.length);
+  check("...and marks the entry", inbox.byId(a.id).approved === true);
+  check("...and requeues it", inbox.byId(a.id).state === "queued");
+  // The whole point: the other one is untouched.
+  check("the unapproved message stays held", inbox.byId(b.id).state === "parked");
+  check("...and is NOT marked approved", !inbox.byId(b.id).approved);
+
+  // A message that arrives AFTER the approval must not inherit it. This is
+  // the leak: it would be delivered alongside without ever being seen.
+  const c = inbox.enqueue({ to, from, fromHandle: "c", text: "three" });
+  check("a later arrival is not approved", !inbox.byId(c.id).approved);
+  check("...and is queued on its own merits", inbox.byId(c.id).state === "queued");
+
+  // Approval is durable, because it has to outlive the turn that was
+  // running when the button was clicked — so it must be ON THE ENTRY, not
+  // in a side table the next restart forgets.
+  check("approval is recorded on the stored entry",
+    JSON.stringify(inbox.byId(a.id)).includes('"approved":true'));
+}
+
+// ── Releasing must not erase why it was held ─────────────────────────────
+//
+// It used to. A message held for two minutes and manually delivered became
+// byte-identical to one that sailed straight through, so "why was that
+// held?" was unanswerable from state. Caught the hard way: parkedReason:null
+// on a live record led to the conclusion that six messages had never been
+// parked, while the driver log showed them parked and released a second
+// apart.
+{
+  const inbox = createInbox({ file: file("md13-" + (md13n++)), now });
+  const to = { realm: LOCAL_REALM, id: "s1" };
+  const from = { realm: LOCAL_REALM, id: "sender" };
+  const e = inbox.enqueue({ to, from, fromHandle: "a", text: "x" });
+
+  inbox.park(e.id, "watched");
+  inbox.release(e.id, { by: "user" });
+  check("the message is queued again", inbox.byId(e.id).state === "queued");
+  check("why it was held survives", inbox.byId(e.id).parkedReason === "watched");
+  check("who released it is recorded", inbox.byId(e.id).releasedBy === "user");
+
+  // And a released entry must not still count as held, or the bar would
+  // show it forever.
+  check("a released entry is no longer stuck", inbox.stuck().length === 0);
+  check("...but is pending delivery", inbox.pendingFor("s1").length === 1);
+}
+
+// ── approve() is inert on things it cannot act on ────────────────────────
+{
+  const inbox = createInbox({ file: file("md13-" + (md13n++)), now });
+  const to = { realm: LOCAL_REALM, id: "s1" };
+  const from = { realm: LOCAL_REALM, id: "sender" };
+  const e = inbox.enqueue({ to, from, fromHandle: "a", text: "x" });
+  inbox.markDelivered([e.id]);
+
+  check("an already-delivered message cannot be approved",
+    inbox.approve([e.id]).length === 0);
+  check("an unknown id is a no-op", inbox.approve(["nope"]).length === 0);
+  check("an empty list is a no-op", inbox.approve([]).length === 0);
+  check("a bare id is accepted as well as a list",
+    inbox.approve(inbox.enqueue({ to, from, fromHandle: "b", text: "y" }).id).length === 1);
+}
+
 console.log(`\nmessaging.mjs: ${pass} passed, ${fail} failed`);
 if (failures.length) {
   console.log("\nFailures:");

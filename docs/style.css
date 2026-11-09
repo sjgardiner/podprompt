@@ -31,22 +31,11 @@
   --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
-  /* Three tiers, deliberately. A single cap on main used to override every
-     `max-width: none` further down the file, squeezing diagrams into the text
-     measure; widening the headings' rules to the figure width then left those
-     rules stretching far past the prose they were meant to frame. Text,
-     framing and figures each get their own width instead. */
-  /* In px, not ch, on purpose: `ch` resolves against each element's own font
-     size, so the same `74ch` made an h2's rule far wider than the paragraph
-     beneath it — which is the overhang these tiers exist to remove. */
-  --prose-width: 648px;     /* body text — about 85 characters at 15px, the
-                               top of the comfortable range, so it does not
-                               get any wider */
-  --text-column: 704px;     /* headings and their rules: a little past the
-                               text, so a rule frames the prose instead of
-                               trailing off into empty space */
-  --content-width: 1040px;  /* figures and wide tables, which are expected to
-                               break out past the text */
+  /* ONE column. Text, headings, rules, tables and figures all share it and
+     all end at the same right edge, so nothing wraps early while something
+     beside it runs wide. The column grows with the window up to this cap and
+     is then centred. */
+  --content-width: 1180px;
   --sidebar-width: 220px;
 
   --app-radius: 10px;      /* the app's corner radius, for diagrams */
@@ -166,7 +155,6 @@ main {
 /* ── Page header ────────────────────────────────────────────── */
 
 .page-header {
-  max-width: var(--text-column);
   margin-bottom: 3rem;
   padding-bottom: 2rem;
   border-bottom: 1px solid var(--border);
@@ -193,7 +181,6 @@ main {
 .page-header .subtitle {
   color: var(--text-muted);
   font-size: .95rem;
-  max-width: var(--prose-width);
 }
 
 /* ── Sections ───────────────────────────────────────────────── */
@@ -201,7 +188,6 @@ main {
 section { margin-bottom: 3rem; }
 
 section h2 {
-  max-width: var(--text-column);
   font-size: 1.1rem;
   font-weight: 600;
   color: var(--heading);
@@ -246,13 +232,11 @@ section h4 {
 
 p {
   margin-bottom: .85rem;
-  max-width: var(--prose-width);
 }
 
 p:last-child { margin-bottom: 0; }
 
 ul, ol {
-  max-width: var(--prose-width);
   margin: 0 0 .85rem 1.25rem;
 }
 
@@ -342,7 +326,6 @@ kbd {
   padding: .85rem 1.1rem;
   margin: 1rem 0 1.25rem;
   font-size: .9rem;
-  max-width: var(--prose-width);
 }
 
 .callout.warn   { border-left-color: var(--accent); }
@@ -402,14 +385,12 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 .option-table,
 .data-table {
   width: 100%;
-  max-width: var(--prose-width);
   border-collapse: collapse;
   font-size: .875rem;
   margin: .75rem 0 1.25rem;
 }
 
-.data-table.wide,
-.option-table.wide { max-width: var(--content-width); }
+
 
 .option-table th,
 .data-table th {
@@ -466,7 +447,6 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 .env-list {
   list-style: none;
-  max-width: var(--prose-width);
   margin: .75rem 0 1.25rem;
 }
 
@@ -507,7 +487,6 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: .9rem;
   margin: 1.25rem 0;
-  max-width: var(--content-width);
 }
 
 .concept {
@@ -540,7 +519,6 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
   margin-top: 4rem;
   padding-top: 1.5rem;
   border-top: 1px solid var(--border);
-  max-width: var(--text-column);
   font-size: .875rem;
 }
 
@@ -565,15 +543,21 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 figure.diagram {
   margin: 1.25rem 0 1.5rem;
-  max-width: var(--content-width);
   overflow-x: auto;
 }
 
 figure.diagram svg {
   display: block;
-  width: 100%;
-  min-width: 560px;
+  /* Each diagram carries its own width/height, chosen so its internal type
+     renders at a consistent size next to the body copy. It shrinks to fit a
+     narrow column and never upscales past that natural size, which would
+     leave its labels looking blown up. */
+  max-width: 100%;
   height: auto;
+  /* A floor, so a phone scrolls the figure instead of shrinking its labels
+     into illegibility. Safe now that the grid track is minmax(0, 1fr) and
+     cannot be pushed wider by its contents. */
+  min-width: 520px;
 }
 
 /* Surfaces */
@@ -645,7 +629,6 @@ figure.diagram svg {
 
 figure {
   margin: 1.25rem 0;
-  max-width: var(--content-width);
 }
 
 figure img {
@@ -661,7 +644,6 @@ figcaption {
   margin-top: .45rem;
   line-height: 1.5;
   /* A caption is prose, even under a figure that is wider than the prose. */
-  max-width: var(--prose-width);
 }
 
 /* ── Responsive ─────────────────────────────────────────────── */

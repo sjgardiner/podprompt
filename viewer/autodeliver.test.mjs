@@ -188,6 +188,65 @@ const NATIVE = { kid: { childKind: "native-task" } };
   check("a route exists to change it", /path === "\/auto-deliver"/.test(src));
 }
 
+// ── MD10: one grace period, every way of looking away ─────────────────────
+//
+// There used to be two release paths that drifted apart by design: an
+// explicit "tab hidden" report released held mail after a 4s debounce, while
+// a tab that simply stopped reporting waited out a 45s TTL plus a 15s sweep.
+// So a glance at another window dumped mail you were deliberately holding,
+// and lengthening the obvious knob would have fixed only one path.
+{
+  const sandbox = `
+    const lastSeenWatching = new Map();
+    const VIEWING_GRACE_MS = 120000;
+    ${bodyOf("noteViewing")}
+    ${bodyOf("isWatched")}
+    return { noteViewing, isWatched, map: lastSeenWatching };
+  `;
+  const d = new Function(sandbox)();
+
+  check("an unseen session is not watched", d.isWatched("s") === false);
+  d.noteViewing("s", true);
+  check("a visible report marks it watched", d.isWatched("s") === true);
+
+  // The heart of it: going hidden must NOT end the hold. Only time does.
+  d.noteViewing("s", false);
+  check("a hidden report does not end the hold", d.isWatched("s") === true);
+  check("...and does not erase the timestamp", d.map.has("s") === true);
+
+  // Coming back refreshes it, so a quick switch away and back is free.
+  d.map.set("s", Date.now() - 119000);
+  check("just inside the window it is still watched", d.isWatched("s") === true);
+  d.noteViewing("s", true);
+  d.map.set("s", Date.now() - 119000);
+  check("...and a fresh visible report restarts the clock",
+    d.isWatched("s") === true);
+
+  d.map.set("s", Date.now() - 121000);
+  check("past the grace it lapses", d.isWatched("s") === false);
+  check("...and is forgotten rather than re-checked forever", d.map.has("s") === false);
+
+  check("a null session id is inert", d.isWatched(null) === false);
+  d.noteViewing(null, true);
+  check("...and cannot be recorded", d.map.has(null) === false);
+}
+
+// ── The eager release is gone from the route ──────────────────────────────
+{
+  const viewing = src.slice(src.indexOf('path === "/viewing"'));
+  const body = viewing.slice(0, viewing.indexOf("\n  }") + 4);
+  check("the /viewing route no longer releases held mail",
+    !/releaseWatchedFor/.test(body), body.slice(-200));
+  check("the old TTL constant is gone", !/VIEWING_TTL_MS/.test(src));
+  check("the grace is 120s", /VIEWING_GRACE_MS = 120 \* 1000/.test(src));
+  // The sweep is still what ends a hold — just on the single condition now.
+  check("the sweep still walks the watched map", /for \(const \[sessionId\] of lastSeenWatching\)/.test(src));
+
+  const vh = readFileSync(new URL("./viewer.html", import.meta.url), "utf8");
+  check("the browser no longer debounces a hidden report", !/hiddenTimer/.test(vh));
+  check("...and still reports while visible", /if \(viewingIsVisible\(\)\) reportViewing\(true\);/.test(vh));
+}
+
 console.log(`auto-delivery (MD9): ${pass} passed, ${fail} failed`);
 for (const f of failures) console.log(`  FAIL ${f}`);
 process.exit(fail ? 1 : 0);

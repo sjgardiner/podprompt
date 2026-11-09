@@ -1583,19 +1583,42 @@ function autonomySnapshot() {
 // the gate answers "has the user been steering anything at all". Letting a
 // visible tab reset the autonomy counter would gut the gate in exactly the
 // case it exists for — a browser left open on a second monitor.
-const VIEWING_TTL_MS = 45 * 1000;
-const viewingUntil = new Map(); // sessionId -> epoch ms
+// MD10: how long a session counts as watched after we last heard from a
+// visible tab looking at it. ONE rule, covering every way attention ends.
+//
+// It used to be two, which drifted apart by design rather than accident: an
+// explicit "tab hidden" report released held mail after a 4-second debounce,
+// while a tab that simply stopped reporting (closed, crashed, asleep) waited
+// out a 45s TTL plus a 15s sweep. So glancing at another window for a moment
+// dumped mail you had deliberately been holding, and lengthening the obvious
+// knob would have fixed only one of the two paths.
+//
+// Now: the hold lapses 120 seconds after the last moment we knew you were
+// watching, whatever ended it — hidden tab, session switch, closed browser,
+// crash. Come back inside the window and the hold simply continues, because
+// the heartbeat refreshes the timestamp. This is also what MD3 always
+// claimed to be ("the same condition evaluated continuously, not a separate
+// timer") and now actually is.
+//
+// 120s rather than the 90 first suggested: being wrong this way costs a
+// couple of minutes before an unattended session's mail flows, and the
+// session can opt out entirely with auto-deliver. Being wrong the other way
+// is the thing that prompted this.
+const VIEWING_GRACE_MS = 120 * 1000;
+const lastSeenWatching = new Map(); // sessionId -> epoch ms of the last visible report
 
 function noteViewing(sessionId, visible) {
   if (!sessionId) return;
-  if (visible) viewingUntil.set(sessionId, Date.now() + VIEWING_TTL_MS);
-  else viewingUntil.delete(sessionId);
+  // A hidden report deliberately does NOT clear the entry. It only stops
+  // refreshing it, so the grace period below is the single thing that ends
+  // a hold — rather than one path expiring instantly and another slowly.
+  if (visible) lastSeenWatching.set(sessionId, Date.now());
 }
 
 function isWatched(sessionId) {
-  const until = viewingUntil.get(sessionId);
-  if (!until) return false;
-  if (Date.now() > until) { viewingUntil.delete(sessionId); return false; }
+  const at = lastSeenWatching.get(sessionId);
+  if (!at) return false;
+  if (Date.now() - at > VIEWING_GRACE_MS) { lastSeenWatching.delete(sessionId); return false; }
   return true;
 }
 
@@ -1673,7 +1696,7 @@ function releaseWatchedFor(sessionId) {
 // asleep, network gone) releases its hold when the heartbeat lapses. Cheap
 // and only does work when something is actually held.
 setInterval(() => {
-  for (const [sessionId] of viewingUntil) {
+  for (const [sessionId] of lastSeenWatching) {
     if (!isWatched(sessionId)) releaseWatchedFor(sessionId);
   }
 }, 15 * 1000).unref?.();
@@ -4162,17 +4185,14 @@ const server = createServer(async (req, res) => {
       return;
     }
     const sessionId = body.sessionId;
-    const wasWatched = sessionId ? isWatched(sessionId) : false;
     noteViewing(sessionId, !!body.visible);
-    // Stopped watching => the hold lapses and whatever it was holding goes
-    // now. MD3: release is the same condition evaluated continuously, not a
-    // separate timer.
-    let released = 0;
-    if (wasWatched && !body.visible && sessionId) {
-      released = releaseWatchedFor(sessionId).length;
-    }
+    // MD10: deliberately does NOT release here. Going hidden for a moment —
+    // glancing at another window, switching sessions and switching back —
+    // used to dump held mail within seconds. The grace period in isWatched()
+    // is now the only thing that ends a hold, so every way of looking away
+    // behaves identically and a quick return keeps the hold intact.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, watching: isWatched(sessionId), released }));
+    res.end(JSON.stringify({ ok: true, watching: isWatched(sessionId) }));
     return;
   }
 

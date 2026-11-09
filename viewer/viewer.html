@@ -3952,11 +3952,15 @@ function reportViewing(force = false) {
 // Hidden is debounced; visible is not. Glancing at another tab for two
 // seconds should not fire off a delivery, but coming back must take effect
 // at once (MD3).
-let hiddenTimer = null;
+// MD10: only a VISIBLE tab reports. Going hidden says nothing, because the
+// driver no longer acts on a hidden report — a hold now lapses purely from
+// the absence of fresh reports, after a 120s grace. The old 4-second
+// debounce existed to tell the driver "released now", which dumped held mail
+// the moment you glanced at another window; the heartbeat already stops on
+// its own when the tab is hidden, so silence carries the same information
+// without the eager release.
 document.addEventListener('visibilitychange', () => {
-  clearTimeout(hiddenTimer);
   if (viewingIsVisible()) reportViewing(true);
-  else hiddenTimer = setTimeout(() => reportViewing(true), 4000);
 });
 
 function startViewingHeartbeat() {

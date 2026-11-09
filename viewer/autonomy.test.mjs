@@ -204,6 +204,72 @@ const fresh = (opts = {}) =>
 }
 
 rmSync(dir, { recursive: true, force: true });
+// ── AD6: the autonomy setting has a UI at all ────────────────────────────
+//
+// THE HOLE THIS CLOSES. The driver has always had setPauseAfter and a
+// liftCap that accepts `until: null`, both validated and routed. The browser
+// called NEITHER. pauseAfter appeared in viewer.html exactly twice: once as
+// a hard-coded default of 20 in local state, once to label a button. So the
+// cap was effectively a compile-time constant.
+//
+// Worse, renderAutonomyStrip() returns early unless the state is paused or
+// uncapped, so in normal operation it renders nothing — not even
+// "Don't pause". Unattended work was therefore impossible to ARRANGE: you
+// had to start, wait however many automatic turns it took to hit the wall,
+// lift the cap, and only then walk away.
+{
+  const html = readFileSync(new URL("./viewer.html", import.meta.url), "utf8");
+
+  check("the panel exposes an autonomy control", /id="autonomy-mode"/.test(html));
+  check("...with a supervised half", /<optgroup label="Supervised">/.test(html));
+  check("...and an unattended half", /<optgroup label="Unattended">/.test(html));
+
+  // ONE control, not two. A budget and a time window presented as separate
+  // settings read as contradictory and needed prose to explain that they
+  // are not; they are one choice with two modes, which is what the store
+  // already says (pauseAfter is not consulted while an override is live).
+  check("it is a single select, so the two modes cannot conflict",
+    (html.match(/id="autonomy-mode"/g) || []).length === 1);
+
+  // The previously unreachable states.
+  check("an arbitrary turn count is reachable", /id="autonomy-turns"/.test(html));
+  check("an arbitrary deadline is reachable", /id="autonomy-until"/.test(html));
+  check("indefinite is reachable", /value="t:never"/.test(html));
+
+  // Wiring to the routes the driver already had.
+  check("it sets pauseAfter", /autonomyPost\(\{ pauseAfter: n \}\)/.test(html));
+  check("it lifts with a deadline", /lift: true, until: ms/.test(html));
+  check("it lifts indefinitely", /lift: true, until: null/.test(html));
+  // Choosing supervision must also END an unattended window, or the control
+  // would show a budget while the override silently kept overriding it.
+  check("a supervised choice cancels an unattended window",
+    /autonomyPost\(\{ pauseAfter: n \}\)\.then\(\(\) => autonomyPost\(\{\}\)\)/.test(html));
+
+  // Reflects live state: a window can lapse by itself and other tabs can
+  // change it, so the control is rendered from /autonomy rather than from
+  // whatever was last clicked.
+  check("the control re-renders from live state",
+    /renderAutonomySetting\(\);/.test(html) && /function renderAutonomySetting/.test(html));
+  check("...without stomping a field being edited",
+    /document\.activeElement === autonomyTurns/.test(html));
+  // Committing per keystroke would post a budget of 2 en route to 200.
+  check("custom fields commit on change, not on input",
+    /autonomyTurns\.addEventListener\('change'/.test(html));
+
+  // AD5: the container is on UTC; a wall-clock time must be resolved by the
+  // BROWSER and sent as epoch ms.
+  check("the deadline is resolved browser-side to epoch ms",
+    /function toLocalInputValue/.test(html) && /new Date\(autonomyUntil\.value\)\.getTime\(\)/.test(html));
+  check("a deadline in the past is refused", /ms <= Date\.now\(\)\) return/.test(html));
+
+  // Three columns, right-anchored so the panel grows leftwards and its right
+  // edge stays flush with the chat area.
+  check("the panel has three columns", /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/.test(html));
+  check("...and stays right-anchored", /#settings-panel \{[\s\S]*?right: 20px;/.test(html));
+  check("...stepping down on narrow windows",
+    /max-width: 740px/.test(html) && /max-width: 520px/.test(html));
+}
+
 console.log(`autonomy.mjs: ${pass} passed, ${fail} failed`);
 for (const f of failures) console.log(`  FAIL ${f}`);
 process.exit(fail ? 1 : 0);

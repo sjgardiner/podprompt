@@ -243,8 +243,11 @@
     display: none;
     position: absolute;
     top: 48px;
+    /* Right-anchored, so widening for the third column grows the panel
+       LEFTWARDS and its right edge stays flush with the chat area exactly
+       as before. */
     right: 20px;
-    width: 460px;
+    width: 690px;
     max-width: calc(100vw - 40px);
     max-height: calc(100vh - 64px);
     overflow-y: auto;
@@ -258,13 +261,20 @@
   #settings-panel.open { display: block; }
   .settings-columns {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0 24px;
   }
   /* Narrow windows (or this panel's own max-width kicking in) collapse back
      to one column rather than squeezing two columns into too little space
      — the same reason max-width above exists: nothing here should ever be
      able to push content past the viewport's edge. */
+  /* Stepped down rather than straight to one: three columns need roughly
+     690px, two need roughly 460px, and squeezing three into a 600px window
+     would clip the selects rather than wrap them. Ordered widest-first so
+     the narrower rule wins where both match. */
+  @media (max-width: 740px) {
+    .settings-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   @media (max-width: 520px) {
     .settings-columns { grid-template-columns: 1fr; }
   }
@@ -1727,10 +1737,78 @@
 
         <div class="settings-group">
           <div class="settings-group-title">History</div>
+          <!-- The explanation moved to the label's tooltip. It was a
+               permanently-visible three-line note explaining a checkbox most
+               people set once, and it crowded out settings that change
+               behaviour rather than describing it. Kept rather than deleted:
+               "agents can always read the full history" is the part that
+               stops someone enabling this for the wrong reason. -->
           <div class="settings-row" id="deep-history-row">
-            <label><span>Load full history</span> <input type="checkbox" id="deep-history-toggle"></label>
+            <label id="deep-history-label"><span>Load full history</span> <input type="checkbox" id="deep-history-toggle"></label>
           </div>
-          <div class="settings-note show" id="deep-history-note"></div>
+        </div>
+      </div>
+
+      <!-- Third column: behaviour, not appearance.
+           Autonomy is the only setting in this panel that changes what the
+           system DOES, so it gets its own column rather than being filed
+           among font sizes and badge positions.
+
+           WHY IT IS IN SETTINGS AT ALL. renderAutonomyStrip() returns early
+           unless the state is paused or uncapped, so in normal operation
+           the strip renders nothing — not even "Don't pause". That made
+           unattended work impossible to ARRANGE: you had to start, wait
+           however many automatic turns it took to hit the wall, lift the
+           cap, and only then walk away. Policy has to be reachable before
+           anything has gone wrong; the strip stays purely reactive.
+
+           WHY ONE CONTROL AND NOT TWO. A budget and a time window read as
+           contradictory settings — "stop after 20" versus "keep going until
+           8am" — and needed a paragraph of prose to explain that they are
+           not. They are one choice with two modes, which is what the data
+           model already says: pauseAfter is not consulted at all while an
+           override is live. A single select cannot express a contradiction,
+           and the closed control reads as a sentence describing what the
+           system is doing right now. -->
+      <div class="settings-col">
+        <div class="settings-group">
+          <div class="settings-group-title" id="autonomy-group-title"
+               title="While running unattended the turn limit does not apply. When the window ends, automatic work stops until you are back — your next message starts a fresh budget.">Autonomy</div>
+          <div class="settings-row select-row">
+            <label><span>Mode</span>
+              <select id="autonomy-mode">
+                <optgroup label="Supervised">
+                  <option value="n:5">Pause after 5 automatic turns</option>
+                  <option value="n:10">Pause after 10 automatic turns</option>
+                  <option value="n:20">Pause after 20 automatic turns</option>
+                  <option value="n:50">Pause after 50 automatic turns</option>
+                  <option value="n:100">Pause after 100 automatic turns</option>
+                  <option value="n:custom">Pause after&hellip; (choose below)</option>
+                </optgroup>
+                <optgroup label="Unattended">
+                  <option value="t:1h">Run unattended for 1 hour</option>
+                  <option value="t:4h">Run unattended for 4 hours</option>
+                  <option value="t:8am">Run unattended until 8:00 AM</option>
+                  <option value="t:custom">Run unattended until&hellip; (choose below)</option>
+                  <option value="t:never">Run unattended indefinitely</option>
+                </optgroup>
+              </select>
+            </label>
+          </div>
+          <!-- Greyed rather than hidden, following this panel's own
+               convention (see deep-history): a control that vanishes reads
+               as a bug, and a fixed height stops the group jumping as you
+               move between modes. -->
+          <div class="settings-row" id="autonomy-turns-row">
+            <label><span>Turns</span>
+              <input type="number" id="autonomy-turns" min="1" max="100000" step="1" value="20">
+            </label>
+          </div>
+          <div class="settings-row" id="autonomy-until-row">
+            <label><span>Until</span>
+              <input type="datetime-local" id="autonomy-until">
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -3610,7 +3688,7 @@ if (jumpLatest) {
 // persists per-install.
 const deepHistoryRow = document.getElementById('deep-history-row');
 const deepHistoryToggle = document.getElementById('deep-history-toggle');
-const deepHistoryNote = document.getElementById('deep-history-note');
+const deepHistoryLabel = document.getElementById('deep-history-label');
 
 function refreshDeepHistoryUi() {
   if (!deepHistoryRow) return;
@@ -3619,11 +3697,15 @@ function refreshDeepHistoryUi() {
   const isOpencode = resolvedBackendForIndicator() === 'opencode';
   deepHistoryRow.classList.toggle('disabled', isOpencode);
   if (deepHistoryToggle) deepHistoryToggle.disabled = isOpencode;
-  deepHistoryNote.textContent = isOpencode
-    ? 'OpenCode already loads a session\u2019s full history, so this does nothing there.'
-    : 'Claude Code hides turns from before a conversation was compacted. Loading them is '
-      + 'slower and uses more memory on long sessions. This affects what you SEE \u2014 '
-      + 'agents can always read the full history. Turning it off takes effect on the next load.';
+  // Tooltip rather than a standing note: see the markup comment. Same text,
+  // same two cases, no permanent three lines of panel.
+  if (deepHistoryLabel) {
+    deepHistoryLabel.title = isOpencode
+      ? 'OpenCode already loads a session\u2019s full history, so this does nothing there.'
+      : 'Claude Code hides turns from before a conversation was compacted. Loading them is '
+        + 'slower and uses more memory on long sessions. This affects what you SEE \u2014 '
+        + 'agents can always read the full history. Turning it off takes effect on the next load.';
+  }
 }
 
 async function loadDeepHistorySetting() {
@@ -3702,6 +3784,91 @@ async function refreshAutonomy() {
     autonomyState = await (await fetch(`${driverBase}/autonomy`)).json();
   } catch { return; }
   renderAutonomyStrip();
+  renderAutonomySetting();
+}
+
+// ── The autonomy setting: one control, two modes ────────────────────────
+const autonomyMode = document.getElementById('autonomy-mode');
+const autonomyTurnsRow = document.getElementById('autonomy-turns-row');
+const autonomyTurns = document.getElementById('autonomy-turns');
+const autonomyUntilRow = document.getElementById('autonomy-until-row');
+const autonomyUntil = document.getElementById('autonomy-until');
+const TURN_PRESETS = [5, 10, 20, 50, 100];
+
+// <input type="datetime-local"> speaks LOCAL wall-clock with no zone, so it
+// has to be fed and read in local terms. The driver never interprets a
+// wall-clock time (AD5) — the browser resolves it to epoch ms and sends
+// that — which is why this conversion lives here and only here.
+function toLocalInputValue(ms) {
+  const d = new Date(ms);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+// Reflects the LIVE state rather than the last thing clicked: an unattended
+// window can lapse on its own, and another tab can change any of this.
+// Driven from refreshAutonomy so there is one source of truth.
+function renderAutonomySetting() {
+  if (!autonomyMode) return;
+  // Never rewrite a field being edited — a poll landing between keystrokes
+  // would yank the value out from under the user.
+  if (document.activeElement === autonomyTurns || document.activeElement === autonomyUntil) return;
+  const a = autonomyState;
+  if (a.state === 'uncapped') {
+    if (a.uncappedUntil) {
+      autonomyMode.value = 't:custom';
+      autonomyUntil.value = toLocalInputValue(a.uncappedUntil);
+    } else {
+      autonomyMode.value = 't:never';
+    }
+  } else {
+    const n = Number(a.pauseAfter);
+    autonomyMode.value = TURN_PRESETS.includes(n) ? `n:${n}` : 'n:custom';
+    autonomyTurns.value = String(n || 20);
+  }
+  syncAutonomyRows();
+}
+
+function syncAutonomyRows() {
+  const v = autonomyMode.value;
+  autonomyTurnsRow.classList.toggle('disabled', v !== 'n:custom');
+  autonomyUntilRow.classList.toggle('disabled', v !== 't:custom');
+  autonomyTurns.disabled = v !== 'n:custom';
+  autonomyUntil.disabled = v !== 't:custom';
+}
+
+function applyAutonomyMode() {
+  const v = autonomyMode.value;
+  syncAutonomyRows();
+  if (v.startsWith('n:')) {
+    // Picking ANY supervised option also ends an unattended window: it is
+    // the obvious thing to reach for when you want supervision back, and a
+    // separate "cancel" control would be a second way to say the same thing.
+    const n = v === 'n:custom' ? Number(autonomyTurns.value) : Number(v.slice(2));
+    if (!Number.isFinite(n) || n < 1) return;   // custom field mid-edit
+    autonomyPost({ pauseAfter: n }).then(() => autonomyPost({}));
+    return;
+  }
+  if (v === 't:never') { autonomyPost({ lift: true, until: null }); return; }
+  if (v === 't:1h')  { autonomyPost({ lift: true, until: Date.now() + 3600e3 }); return; }
+  if (v === 't:4h')  { autonomyPost({ lift: true, until: Date.now() + 4 * 3600e3 }); return; }
+  if (v === 't:8am') { autonomyPost({ lift: true, until: nextLocalHour(8) }); return; }
+  if (v === 't:custom') {
+    // Seed a sensible target rather than posting nothing: an empty picker
+    // with no default is a dead end.
+    if (!autonomyUntil.value) autonomyUntil.value = toLocalInputValue(nextLocalHour(8));
+    const ms = new Date(autonomyUntil.value).getTime();
+    if (!Number.isFinite(ms) || ms <= Date.now()) return;  // wait for a real time
+    autonomyPost({ lift: true, until: ms });
+  }
+}
+
+if (autonomyMode) {
+  autonomyMode.addEventListener('change', applyAutonomyMode);
+  // `change`, not `input`: committing per keystroke would post a budget of
+  // 2 on the way to typing 200.
+  autonomyTurns.addEventListener('change', applyAutonomyMode);
+  autonomyUntil.addEventListener('change', applyAutonomyMode);
 }
 
 // MD9: the strip now has two independent halves — held mail on the left,

@@ -86,6 +86,88 @@
         backend, and whether it is archived.
       </p>
 
+
+      <figure class="diagram">
+        <svg viewBox="0 0 830 380" role="img" aria-labelledby="sp-t sp-d">
+          <title id="sp-t">The sessions panel</title>
+          <desc id="sp-d">A panel headed Sessions with a New chat button, Active
+          and Archived tabs, and a list of session rows. Each row shows a title
+          and a meta line giving the date, the backend and the project. The
+          current row is marked with an accent bar. One row has a collapse
+          twisty and a green running dot; one is indented beneath its parent as a
+          delegated session; one is greyed out because its project is not
+          reachable.</desc>
+
+          <defs>
+            <marker id="s-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border)"/>
+            </marker>
+          </defs>
+
+          <rect class="dgm-box" x="10" y="10" width="280" height="330" rx="10"/>
+
+          <text class="dgm-ui-label" fill="var(--ui-muted)" x="26" y="36">SESSIONS</text>
+          <rect class="btn-accent" x="188" y="21" width="88" height="22" rx="6"/>
+          <text class="dgm-ui-name f-on-accent" x="232" y="36" text-anchor="middle">+ New chat</text>
+          <path class="dgm-line" d="M 10 52 H 290"/>
+
+          <text class="dgm-ui-label f-you" x="26" y="72">ACTIVE</text>
+          <text class="dgm-ui-label" fill="var(--ui-muted)" x="82" y="72">ARCHIVED</text>
+          <path class="dgm-line" d="M 10 84 H 290"/>
+
+          <!-- current row: a family, running -->
+          <rect x="11" y="85" width="278" height="47" fill="var(--user-bg)"/>
+          <rect x="11" y="85" width="2" height="47" fill="var(--accent)"/>
+          <text class="dgm-ui-meta" x="26" y="106">&#9656;</text>
+          <text class="dgm-text" x="40" y="106" font-size="12">PodPrompt documenta&#8230;</text>
+          <circle cx="266" cy="102" r="4" fill="var(--success)"/>
+          <text class="dgm-ui-meta" x="40" y="122">Nov 9, 09:13 PM &#183; podprompt</text>
+          <path class="dgm-line" d="M 10 132 H 290"/>
+
+          <!-- ordinary row, hover actions revealed -->
+          <text class="dgm-text" x="26" y="154" font-size="12">Fixing unreliable susp&#8230;</text>
+          <text class="dgm-ui-meta" x="26" y="170">Nov 8, 01:06 AM</text>
+          <g stroke="var(--ui-muted)" stroke-width="1" fill="none"><rect x="206" y="163" width="7" height="7" rx="1.5"/><rect x="209" y="160" width="7" height="7" rx="1.5"/></g>
+          <text class="dgm-ui-meta" x="222" y="170">Archive</text>
+          <path class="dgm-line" d="M 10 180 H 290"/>
+
+          <!-- nested: a delegated child -->
+          <path class="dgm-line" d="M 34 180 V 204" />
+          <text class="dgm-text" x="48" y="202" font-size="12">@research-viewer-ui</text>
+          <text class="dgm-ui-meta" x="48" y="218">opencode &#183; delegated</text>
+          <path class="dgm-line" d="M 10 228 H 290"/>
+
+          <text class="dgm-text" x="26" y="250" font-size="12">Yodel config plan</text>
+          <text class="dgm-ui-meta" x="26" y="266">Nov 7, 11:26 PM &#183; analysis</text>
+          <path class="dgm-line" d="M 10 276 H 290"/>
+
+          <!-- unreachable -->
+          <text x="26" y="298" font-size="12" fill="var(--ui-muted)">Geant4 NeutronHP&#8230;</text>
+          <text class="dgm-ui-meta" x="26" y="314">last used from /other/host</text>
+
+          <!-- annotations -->
+          <path class="dgm-line" d="M 294 32 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="36">picks a backend and a project</text>
+
+          <path class="dgm-line" d="M 294 68 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="72">Delete appears only on Archived</text>
+
+          <path class="dgm-line" d="M 294 104 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="100">green = running &#183; pulsing = waiting on you</text>
+          <text class="dgm-muted" x="338" y="116">the twisty hides children, collapsed by default</text>
+
+          <path class="dgm-line" d="M 294 166 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="170">row actions appear only on hover</text>
+
+          <path class="dgm-line" d="M 294 210 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="214">indented: a delegated session, not a sub-agent</text>
+
+          <path class="dgm-line" d="M 294 302 H 330" marker-end="url(#s-arrow)"/>
+          <text class="dgm-muted" x="338" y="306">greyed: project unreachable from here</text>
+        </svg>
+      </figure>
+
       <h3>What the dots mean</h3>
 
       <table class="option-table">
@@ -113,7 +195,7 @@
       <table class="option-table">
         <thead><tr><th>Action</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td>⧉</td><td>Opens that session in a new browser tab. A real link, so middle-click and copy-link work.</td></tr>
+          <tr><td><svg class="icon" viewBox="0 0 16 16" role="img" aria-label="open in a new tab"><rect x="1.5" y="4.5" width="9" height="9" rx="1.5"/><rect x="5.5" y="1.5" width="9" height="9" rx="1.5"/></svg></td><td>Opens that session in a new browser tab. A real link, so middle-click and copy-link work.</td></tr>
           <tr><td>double-click title</td><td>Renames it inline. <kbd>Enter</kbd> saves, <kbd>Escape</kbd> cancels, clicking away saves.</td></tr>
           <tr><td>Archive</td><td>Moves it to the Archived tab.</td></tr>
           <tr><td>Detach</td><td>Nested rows only. Promotes the session to a root. <a href="#keep">Below.</a></td></tr>

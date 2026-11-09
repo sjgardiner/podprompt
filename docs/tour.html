@@ -79,110 +79,107 @@
       </p>
 
       <figure class="diagram">
-        <svg viewBox="0 0 900 480" role="img" aria-labelledby="win-t win-d">
+        <svg viewBox="0 0 900 560" role="img" aria-labelledby="win-t win-d">
           <title id="win-t">The PodPrompt window</title>
-          <desc id="win-d">A header across the top carries the sessions button,
-          backend badge, context bar, plan usage, connection status, roster count,
-          a global count of items waiting for you, an export button and settings.
-          Below it sits a strip that appears only when work is paused or mail is
-          held. The middle is the conversation feed, a stack of full-width cards,
-          with a jump-to-latest item at the very top. Along the bottom are a
-          status row with the live turn indicator and the model, mode,
-          auto-approve and auto-deliver controls, and then the composer.</desc>
-
-          <defs>
-            <marker id="w-arrow" viewBox="0 0 10 10" refX="9" refY="5"
-                    markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border)"/>
-            </marker>
-          </defs>
+          <desc id="win-d">A 48-pixel header runs across the top with the
+          sessions button, the product name followed by the current backend, a
+          context bar, plan usage, a roster count, a count of items waiting for
+          you, the connection status, an export button and settings. Under it
+          sits a strip that appears only when work is paused or mail is held.
+          The middle is the conversation feed: a jump-to-latest pill, then a
+          stack of cards, each with its role label above it — You in blue, Model
+          in grey, Tool in green, Peer in blue. Along the bottom are a status row
+          carrying the live turn indicator with the model, auto-approve and
+          auto-deliver controls, and then the composer with a slash-command
+          button, the message field and a Send button.</desc>
 
           <!-- window -->
-          <rect class="dgm-box" x="10" y="10" width="780" height="460" rx="8"/>
+          <rect class="dgm-box" x="10" y="10" width="780" height="540" rx="8"/>
 
-          <!-- ── header ── -->
-          <text class="dgm-mono" x="30" y="38">☰</text>
-          <circle cx="56" cy="33" r="4" fill="var(--danger)"/>
-          <text class="dgm-title" x="68" y="38">PodPrompt</text>
-          <rect x="146" y="23" width="80" height="19" rx="3"
-                fill="none" stroke="var(--link)" stroke-opacity=".45"/>
-          <text class="dgm-muted dgm-claude" x="186" y="37" text-anchor="middle">Claude Code</text>
+          <!-- ── header: 48px tall, as in the app ── -->
+          <text class="dgm-mono dgm-muted" x="30" y="39">&#9776;</text>
+          <circle cx="56" cy="34" r="11" fill="var(--accent)"/>
+          <text class="dgm-title" x="74" y="39">PodPrompt</text>
+          <text class="dgm-ui-meta" x="150" y="39">&#183; Claude Code</text>
 
-          <rect x="242" y="30" width="56" height="6" rx="3" fill="var(--bg-code)"/>
-          <rect x="242" y="30" width="35" height="6" rx="3" fill="var(--success)"/>
-          <text class="dgm-muted" x="306" y="37">62%</text>
+          <rect x="300" y="31" width="56" height="6" rx="3" fill="var(--bg-code)"/>
+          <rect x="300" y="31" width="35" height="6" rx="3" fill="var(--success)"/>
+          <text class="dgm-ui-meta" x="364" y="39">62%</text>
+          <text class="dgm-ui-meta" x="406" y="39">plan 42%</text>
+          <text class="dgm-ui-meta" x="478" y="39">&#8627; 3</text>
+          <text class="dgm-ui-meta f-peer" x="516" y="39">2 waiting</text>
 
-          <text class="dgm-muted" x="348" y="37">plan 42%</text>
+          <circle cx="648" cy="34" r="4" fill="var(--success)"/>
+          <text class="dgm-ui-meta" x="658" y="39">live</text>
+          <text class="dgm-mono dgm-muted" x="722" y="39">&#11015;</text>
+          <text class="dgm-mono dgm-muted" x="752" y="39">&#9881;</text>
 
-          <circle cx="424" cy="33" r="4" fill="var(--success)"/>
-          <text class="dgm-muted" x="434" y="37">live</text>
+          <path class="dgm-line" d="M 10 58 H 790"/>
+          <text class="dgm-muted" x="802" y="39">header</text>
 
-          <text class="dgm-muted" x="486" y="37">↳ 3</text>
-
-          <rect x="528" y="23" width="68" height="19" rx="3"
-                fill="none" stroke="var(--accent)" stroke-opacity=".5"/>
-          <text class="dgm-muted dgm-key" x="562" y="37" text-anchor="middle">2 waiting</text>
-
-          <text class="dgm-mono" x="722" y="38">⬇</text>
-          <text class="dgm-mono" x="752" y="38">⚙</text>
-
-          <path class="dgm-line" d="M 10 56 H 790"/>
-          <text class="dgm-muted" x="802" y="37">header</text>
-
-          <!-- ── paused / mail strip ── -->
-          <rect class="dgm-boundary" x="22" y="62" width="756" height="22" rx="4"/>
-          <text class="dgm-muted" x="400" y="77" text-anchor="middle">paused / held-mail strip — appears only when there is something to act on</text>
-          <path class="dgm-line" d="M 10 90 H 790"/>
+          <!-- ── held-mail / paused strip ── -->
+          <rect class="dgm-boundary" x="24" y="64" width="752" height="24" rx="4"/>
+          <text class="dgm-muted" x="400" y="80" text-anchor="middle">paused / held-mail strip &#8212; only when there is something to act on</text>
+          <path class="dgm-line" d="M 10 92 H 790"/>
 
           <!-- ── feed ── -->
-          <text class="dgm-key" x="400" y="110" text-anchor="middle">↓ Jump to latest message</text>
-          <text class="dgm-muted" x="400" y="126" text-anchor="middle">always the first item in the feed</text>
+          <rect class="btn-ghost" x="310" y="102" width="180" height="26" rx="6"/>
+          <text class="dgm-muted" x="400" y="119" text-anchor="middle">&#8595; Jump to latest message</text>
 
-          <rect class="dgm-well" x="105" y="136" width="590" height="42" rx="5"/>
-          <text class="dgm-key" x="120" y="153">You</text>
-          <text class="dgm-muted" x="680" y="153" text-anchor="end">14:02</text>
+          <text class="dgm-ui-label f-you" x="112" y="152">YOU</text>
+          <rect class="card-user" x="112" y="158" width="576" height="42" rx="10"/>
+          <text class="dgm-muted" x="128" y="184">a prompt you typed</text>
 
-          <rect class="dgm-well" x="105" y="184" width="590" height="54" rx="5"/>
-          <text class="dgm-muted" x="120" y="201"><tspan class="dgm-text">Model</tspan> · claude-opus-5</text>
-          <text class="dgm-muted" x="680" y="201" text-anchor="end">14:02</text>
+          <text class="dgm-ui-label f-model" x="112" y="224">MODEL</text>
+          <text class="dgm-ui-meta" x="162" y="224">claude-opus-5</text>
+          <rect class="card-assistant" x="112" y="230" width="576" height="46" rx="10"/>
+          <text class="dgm-muted" x="128" y="258">the reply, streamed as it is written</text>
 
-          <rect class="dgm-well" x="105" y="244" width="590" height="34" rx="5"/>
-          <text class="dgm-muted" x="120" y="265">Thinking — collapsed by default</text>
+          <text class="dgm-ui-label f-tool" x="112" y="300">&#9660; TOOL</text>
+          <text class="dgm-ui-name f-tool" x="168" y="300">Read</text>
+          <rect class="card-tool" x="112" y="306" width="576" height="36" rx="10"/>
+          <text class="dgm-muted" x="128" y="328">the call and its result, shown literally</text>
 
-          <rect class="dgm-well" x="105" y="284" width="590" height="42" rx="5"/>
-          <text class="dgm-muted" x="120" y="301"><tspan class="dgm-text">Tool</tspan> · Bash</text>
+          <text class="dgm-ui-label f-peer" x="112" y="366">&#9656; PEER</text>
+          <text class="dgm-ui-name f-peer" x="166" y="366">@researcher</text>
+          <rect class="card-user" x="112" y="372" width="576" height="28" rx="10"/>
+          <text class="dgm-muted" x="128" y="391">mail from another session, collapsed</text>
 
-          <rect class="dgm-box-key" x="575" y="340" width="120" height="26" rx="13"/>
-          <text class="dgm-key" x="635" y="357" text-anchor="middle">↓ new messages</text>
+          <rect class="btn-ghost" x="556" y="408" width="132" height="26" rx="13"/>
+          <text class="dgm-muted" x="622" y="425" text-anchor="middle">&#8595; new messages</text>
 
-          <text class="dgm-muted" x="802" y="230">feed</text>
+          <text class="dgm-muted" x="802" y="270">feed</text>
 
           <!-- ── status row ── -->
-          <path class="dgm-line" d="M 10 380 H 790"/>
-          <text class="dgm-muted" x="30" y="400">Running `Bash`… (12s)</text>
+          <path class="dgm-line" d="M 10 448 H 790"/>
+          <text class="dgm-muted" x="30" y="468">Running `Bash`&#8230; (12s)</text>
 
-          <rect class="dgm-box" x="390" y="386" width="66" height="20" rx="3"/>
-          <text class="dgm-muted" x="423" y="400" text-anchor="middle">model ▾</text>
-          <rect class="dgm-box" x="464" y="386" width="58" height="20" rx="3"/>
-          <text class="dgm-muted" x="493" y="400" text-anchor="middle">mode ▾</text>
-          <rect class="dgm-box" x="530" y="386" width="98" height="20" rx="3"/>
-          <text class="dgm-muted" x="579" y="400" text-anchor="middle">Auto-approve</text>
-          <rect class="dgm-box" x="636" y="386" width="92" height="20" rx="3"/>
-          <text class="dgm-muted" x="682" y="400" text-anchor="middle">Auto-deliver</text>
+          <rect class="btn-ghost" x="372" y="454" width="138" height="22" rx="4"/>
+          <text class="dgm-ui-meta" x="441" y="469" text-anchor="middle">Opus (1M context) &#9662;</text>
+          <rect x="524" y="458" width="12" height="12" rx="2" fill="#fff"/>
+          <text class="dgm-ui-meta" x="542" y="469">Auto-approve</text>
+          <rect x="628" y="458" width="12" height="12" rx="2" fill="#fff"/>
+          <text class="dgm-ui-meta" x="646" y="469">Auto-deliver</text>
 
-          <text class="dgm-muted" x="802" y="400">status</text>
+          <text class="dgm-muted" x="802" y="468">status</text>
 
           <!-- ── composer ── -->
-          <path class="dgm-line" d="M 10 412 H 790"/>
-          <circle cx="36" cy="437" r="10" class="dgm-box"/>
-          <text class="dgm-muted" x="36" y="441" text-anchor="middle">/</text>
-          <text class="dgm-muted" x="58" y="441">Message Claude Code…</text>
-          <rect x="672" y="424" width="86" height="26" rx="4"
-                fill="var(--accent-dim)" stroke="var(--accent)"/>
-          <text class="dgm-key" x="715" y="441" text-anchor="middle">Send</text>
+          <path class="dgm-line" d="M 10 482 H 790"/>
+          <rect class="btn-ghost" x="28" y="498" width="30" height="30" rx="6"/>
+          <text class="dgm-mono dgm-muted" x="43" y="518" text-anchor="middle">/</text>
+          <rect class="card-field" x="66" y="497" width="596" height="32" rx="8"/>
+          <text class="dgm-muted" x="82" y="518">Message Claude Code&#8230;</text>
+          <rect class="btn-accent" x="676" y="497" width="86" height="32" rx="8"/>
+          <text class="dgm-text f-on-accent" x="719" y="518" text-anchor="middle">Send</text>
 
-          <text class="dgm-muted" x="802" y="441">composer</text>
+          <text class="dgm-muted" x="802" y="518">composer</text>
         </svg>
+        <figcaption>
+          Drawn with every header instrument present. In practice each one
+          appears only once it has something to report, so a freshly opened
+          window shows little more than the name, the status and the two
+          buttons on the right.
+        </figcaption>
       </figure>
 
       <p>Three panels slide in over this, and are closed by default:</p>

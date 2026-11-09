@@ -4,25 +4,42 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Palette taken from the application itself (viewer/viewer.html), so a
+   diagram of the interface and the page around it are the same product.
+   The one deliberate divergence is --text-muted: the app uses #5a617a for
+   short labels, which is too low-contrast for the long-form muted prose
+   these pages are full of, so it is lightened here. */
 :root {
-  --bg:         #0f1117;
-  --bg-raised:  #1e2330;
-  --bg-code:    #161b27;
-  --border:     #2a3045;
-  --text:       #e8eaf0;
-  --text-muted: #8892a4;
-  --accent:     #f0a500;
-  --accent-dim: #7a5200;
+  --bg:         #0f1117;   /* app --bg */
+  --bg-raised:  #181c27;   /* app --surface */
+  --bg-code:    #12151f;   /* app --code-bg */
+  --border:     #252a38;   /* app --border */
+  --text:       #d4d8e8;   /* app --text */
+  --heading:    #eef0f8;   /* app --heading */
+  --text-muted: #8b93ab;   /* lightened from the app's #5a617a, see above */
+  --ui-muted:   #5a617a;   /* app --muted, for depicting the interface */
+  --accent:     #5b8dee;   /* app --accent */
+  --accent-dim: #1d2c4d;
   --link:       #6ea8fe;
-  --danger:     #f87171;
-  --success:    #6ee7b7;
-  --violet:     #c4a7fe;
+  --danger:     #f87171;   /* app --danger */
+  --success:    #4ade80;   /* app --green */
+  --purple:     #a78bfa;   /* app --purple */
+  --teal:       #2dd4bf;   /* app --opencode-accent */
+  --user-bg:    #1a1f2e;   /* app --user-bg */
+  --user-border:#2a3050;   /* app --user-border */
 
   --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
+  /* Two measures, deliberately. Prose stays at a readable line length;
+     tables, diagrams and figures are allowed the full content width.
+     Before this split, main's own cap silently overrode every
+     `max-width: none` further down the file. */
   --prose-width: 68ch;
+  --content-width: 1120px;
   --sidebar-width: 220px;
+
+  --app-radius: 10px;      /* the app's corner radius, for diagrams */
 }
 
 html { scroll-behavior: smooth; }
@@ -45,7 +62,13 @@ body {
 
 main {
   padding: 3rem 3rem 6rem;
-  max-width: calc(var(--prose-width) + 6rem);
+  /* width:100% is load-bearing. An auto inline margin on a grid item
+     overrides justify-self:stretch, so without an explicit width this
+     centres at max-content and the column collapses to whatever the widest
+     element happens to be — which differs per page. */
+  width: 100%;
+  max-width: calc(var(--content-width) + 6rem);
+  margin: 0 auto;
 }
 
 /* ── Sidebar / site nav ─────────────────────────────────────── */
@@ -128,6 +151,7 @@ main {
 /* ── Page header ────────────────────────────────────────────── */
 
 .page-header {
+  max-width: var(--content-width);
   margin-bottom: 3rem;
   padding-bottom: 2rem;
   border-bottom: 1px solid var(--border);
@@ -144,6 +168,7 @@ main {
 }
 
 .page-header h1 {
+  color: var(--heading);
   font-size: 1.75rem;
   font-weight: 600;
   line-height: 1.25;
@@ -161,9 +186,10 @@ main {
 section { margin-bottom: 3rem; }
 
 section h2 {
+  max-width: var(--content-width);
   font-size: 1.1rem;
   font-weight: 600;
-  color: var(--text);
+  color: var(--heading);
   margin-bottom: 1rem;
   padding-bottom: .5rem;
   border-bottom: 1px solid var(--border);
@@ -347,7 +373,7 @@ kbd {
 }
 
 .badge--claude   { color: var(--link);   border-color: color-mix(in srgb, var(--link) 40%, transparent); }
-.badge--opencode { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+.badge--opencode { color: var(--teal);   border-color: color-mix(in srgb, var(--teal) 40%, transparent); }
 .badge--differs  { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
 /* A heading whose whole subject is backend-specific. */
@@ -368,7 +394,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 }
 
 .data-table.wide,
-.option-table.wide { max-width: none; }
+.option-table.wide { max-width: var(--content-width); }
 
 .option-table th,
 .data-table th {
@@ -466,7 +492,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: .9rem;
   margin: 1.25rem 0;
-  max-width: none;
+  max-width: var(--content-width);
 }
 
 .concept {
@@ -499,7 +525,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
   margin-top: 4rem;
   padding-top: 1.5rem;
   border-top: 1px solid var(--border);
-  max-width: var(--prose-width);
+  max-width: var(--content-width);
   font-size: .875rem;
 }
 
@@ -524,7 +550,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 
 figure.diagram {
   margin: 1.25rem 0 1.5rem;
-  max-width: none;
+  max-width: var(--content-width);
   overflow-x: auto;
 }
 
@@ -562,14 +588,49 @@ figure.diagram svg {
 .dgm-title { font-size: 13.5px; font-weight: 600; fill: var(--text); }
 
 /* Per-backend accents, matching the badges used in the prose. */
-.dgm-claude   { fill: var(--link); }
-.dgm-opencode { fill: var(--violet); }
+.dgm-claude   { fill: var(--accent); }
+.dgm-opencode { fill: var(--teal); }
+
+/* ── Depicting the interface ────────────────────────────────────
+   These reproduce the application's own values so a diagram of a
+   bubble and the real bubble agree: labels sit above their card,
+   uppercase and letter-spaced, coloured by role.
+   ─────────────────────────────────────────────────────────────── */
+
+.dgm-ui-label {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .09em;
+}
+
+.dgm-ui-meta {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  fill: var(--ui-muted);
+}
+
+/* Role colours, straight from the app. */
+.f-you      { fill: var(--accent); }        /* user label */
+.f-model    { fill: var(--ui-muted); }      /* assistant label */
+.f-tool     { fill: var(--success); }       /* tool label */
+.f-think    { fill: var(--purple); }        /* thinking label */
+.f-peer     { fill: var(--accent); }        /* incoming mail */
+.f-on-accent{ fill: #fff; }                 /* text on a filled accent button */
+
+/* Card surfaces, straight from the app. */
+.card-user      { fill: var(--user-bg);   stroke: var(--user-border); stroke-width: 1; }
+.card-assistant { fill: var(--bg-raised); stroke: var(--border);      stroke-width: 1; }
+.card-tool      { fill: var(--bg-code);   stroke: var(--border);      stroke-width: 1; }
+.card-field     { fill: var(--bg-code);   stroke: var(--border);      stroke-width: 1; }
+.btn-accent     { fill: var(--accent);    stroke: none; }
+.btn-ghost      { fill: var(--bg-raised); stroke: var(--border);      stroke-width: 1; }
 
 /* ── Figures / screenshots ──────────────────────────────────── */
 
 figure {
   margin: 1.25rem 0;
-  max-width: none;
+  max-width: var(--content-width);
 }
 
 figure img {
@@ -603,4 +664,26 @@ figcaption {
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+}
+
+/* A tool or peer name beside its label: same colour, lighter weight, as in
+   the app — the label is the category, the name is the instance. */
+.dgm-ui-name {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: .04em;
+}
+
+/* An interface icon rendered inline with the text, as vector rather than a
+   character. U+29C9 (the app's open-in-new-tab mark) has no coverage in Inter
+   or the usual fallbacks, so relying on the codepoint shows a tofu box on
+   many systems. */
+.icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: -.12em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
 }

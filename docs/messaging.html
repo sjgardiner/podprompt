@@ -238,6 +238,84 @@
         clear another.
       </p>
 
+      <figure class="diagram">
+        <svg viewBox="0 0 1000 210" role="img" aria-labelledby="mf-t mf-d">
+          <title id="mf-t">What a message passes through before it is delivered</title>
+          <desc id="mf-d">A message passes four independent gates in order: the
+          autonomy budget, the watching hold, the recipient being mid-turn, and
+          your approval. Each gate can hold the message, and each is released by
+          something different — more budget or any input from you; looking away
+          for 120 seconds or switching auto-deliver on; nothing at all, since a
+          busy recipient releases it when its turn ends; and approving that
+          specific message. Clearing one gate does not clear another.</desc>
+
+          <defs>
+            <marker id="m-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/>
+            </marker>
+          </defs>
+
+          <text class="dgm-text" x="8" y="58">sent</text>
+          <path class="dgm-flow" d="M 48 53 H 94" marker-end="url(#m-arrow)"/>
+
+          <rect class="dgm-box" x="100" y="30" width="150" height="46" rx="8"/>
+          <text class="dgm-text" x="175" y="52" text-anchor="middle">autonomy</text>
+          <text class="dgm-ui-meta" x="175" y="67" text-anchor="middle">is there budget?</text>
+          <path class="dgm-flow" d="M 254 53 H 294" marker-end="url(#m-arrow)"/>
+
+          <rect class="dgm-box" x="300" y="30" width="150" height="46" rx="8"/>
+          <text class="dgm-text" x="375" y="52" text-anchor="middle">watching</text>
+          <text class="dgm-ui-meta" x="375" y="67" text-anchor="middle">are you looking?</text>
+          <path class="dgm-flow" d="M 454 53 H 494" marker-end="url(#m-arrow)"/>
+
+          <rect class="dgm-box" x="500" y="30" width="150" height="46" rx="8"/>
+          <text class="dgm-text" x="575" y="52" text-anchor="middle">mid-turn</text>
+          <text class="dgm-ui-meta" x="575" y="67" text-anchor="middle">is it busy?</text>
+          <path class="dgm-flow" d="M 654 53 H 694" marker-end="url(#m-arrow)"/>
+
+          <rect class="dgm-box" x="700" y="30" width="150" height="46" rx="8"/>
+          <text class="dgm-text" x="775" y="52" text-anchor="middle">approval</text>
+          <text class="dgm-ui-meta" x="775" y="67" text-anchor="middle">did you allow it?</text>
+          <path class="dgm-flow" d="M 854 53 H 894" marker-end="url(#m-arrow)"/>
+
+          <text class="dgm-key" x="902" y="58">delivered</text>
+          <text class="dgm-ui-meta" x="902" y="73">as a turn</text>
+
+          <!-- the held branch under each gate -->
+          <path class="dgm-boundary" d="M 175 76 V 104"/>
+          <path class="dgm-boundary" d="M 375 76 V 104"/>
+          <path class="dgm-boundary" d="M 575 76 V 104"/>
+          <path class="dgm-boundary" d="M 775 76 V 104"/>
+
+          <rect class="card-tool" x="100" y="104" width="150" height="26" rx="6"/>
+          <text class="dgm-ui-meta" x="175" y="121" text-anchor="middle">parked</text>
+          <rect class="card-tool" x="300" y="104" width="150" height="26" rx="6"/>
+          <text class="dgm-ui-meta" x="375" y="121" text-anchor="middle">held for you</text>
+          <rect class="card-tool" x="500" y="104" width="150" height="26" rx="6"/>
+          <text class="dgm-ui-meta" x="575" y="121" text-anchor="middle">queued</text>
+          <rect class="card-tool" x="700" y="104" width="150" height="26" rx="6"/>
+          <text class="dgm-ui-meta" x="775" y="121" text-anchor="middle">held for you</text>
+
+          <text class="dgm-muted" x="175" y="152" text-anchor="middle">released by any input</text>
+          <text class="dgm-muted" x="175" y="167" text-anchor="middle">from you, or more budget</text>
+
+          <text class="dgm-muted" x="375" y="152" text-anchor="middle">released after 120s away,</text>
+          <text class="dgm-muted" x="375" y="167" text-anchor="middle">or by auto-deliver</text>
+
+          <text class="dgm-muted" x="575" y="152" text-anchor="middle">releases itself when</text>
+          <text class="dgm-muted" x="575" y="167" text-anchor="middle">the turn ends</text>
+
+          <text class="dgm-muted" x="775" y="152" text-anchor="middle">released by approving</text>
+          <text class="dgm-muted" x="775" y="167" text-anchor="middle">that one message</text>
+        </svg>
+        <figcaption>
+          The gates are independent and are checked in this order. Clearing one
+          does not clear another &#8212; which is why mail can appear to be stuck
+          after you have just dealt with something.
+        </figcaption>
+      </figure>
+
       <table class="data-table">
         <thead><tr><th>Reason</th><th>What releases it</th></tr></thead>
         <tbody>

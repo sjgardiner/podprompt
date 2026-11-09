@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Many sessions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html" aria-current="page">Many sessions</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#list">The session list</a>
+      <a class="nav-link sub" href="#new">Starting one</a>
+      <a class="nav-link sub" href="#families">Families</a>
+      <a class="nav-link sub" href="#subagents">Sub-agents &amp; the roster</a>
+      <a class="nav-link sub" href="#keep">Keep and Detach</a>
+      <a class="nav-link sub" href="#stopping">Stopping things</a>
+      <a class="nav-link sub" href="#lifecycle">Archive &amp; delete</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">&nbsp;</div>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Using it</div>
+      <h1>Many sessions</h1>
+      <p class="subtitle">
+        Sessions run side by side, in different projects, on either backend.
+        Some of them have children. This page covers the list, the two
+        different kinds of child, and what each Stop button actually stops.
+      </p>
+    </header>
+
+    <section id="list">
+      <h2>The session list</h2>
+
+      <p>
+        The <code>☰</code> panel lists every session across both backends in one
+        place, split into <strong>Active</strong> and <strong>Archived</strong>
+        tabs. You can show them flat or grouped by project. The session you are
+        in has an accent left border.
+      </p>
+
+      <p>
+        A session's title is whatever you renamed it to; failing that, the
+        backend's own summary of it; failing that, your first prompt. Both
+        backends title their own sessions, so a title you did not write is
+        normal. The meta line under it shows the project path, the time, the
+        backend, and whether it is archived.
+      </p>
+
+      <h3>What the dots mean</h3>
+
+      <table class="option-table">
+        <thead><tr><th>Dot</th><th>State</th></tr></thead>
+        <tbody>
+          <tr><td>solid green</td><td>A turn is running.</td></tr>
+          <tr><td>pulsing accent</td><td>Waiting for you to approve a tool call.</td></tr>
+          <tr><td>pulsing purple</td><td>Waiting for you to answer a question.</td></tr>
+          <tr><td>none</td><td>Idle.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        If a session is waiting on both, the question wins the dot. You can move
+        the badge to the other side of the title in settings.
+      </p>
+
+      <h3>Row actions</h3>
+
+      <p>
+        <strong>Hover a row and its actions appear</strong> — they are invisible
+        otherwise, which is the single most common thing people miss here.
+      </p>
+
+      <table class="option-table">
+        <thead><tr><th>Action</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>⧉</td><td>Opens that session in a new browser tab. A real link, so middle-click and copy-link work.</td></tr>
+          <tr><td>double-click title</td><td>Renames it inline. <kbd>Enter</kbd> saves, <kbd>Escape</kbd> cancels, clicking away saves.</td></tr>
+          <tr><td>Archive</td><td>Moves it to the Archived tab.</td></tr>
+          <tr><td>Detach</td><td>Nested rows only. Promotes the session to a root. <a href="#keep">Below.</a></td></tr>
+          <tr><td>Unarchive</td><td>Archived rows only. Returns it to Active.</td></tr>
+          <tr><td>Delete</td><td>Archived rows only. <a href="#lifecycle">Below.</a></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Sessions you cannot reach</h3>
+
+      <p>
+        A session lives in a directory. If that directory is not reachable from
+        the current container, the session cannot be driven — it still exists,
+        but it has no actions. By default these are summarised as a count; you
+        can hide them, or show them greyed out with a tooltip saying where they
+        were last used.
+      </p>
+    </section>
+
+    <section id="new">
+      <h2>Starting one</h2>
+
+      <p>
+        <strong>+ New chat</strong> opens a picker rather than immediately
+        creating anything. You choose a backend — Claude Code or OpenCode — and
+        a project, with the current one listed first. You can type a custom
+        subdirectory path instead and confirm it with <kbd>Enter</kbd>.
+      </p>
+
+      <p>
+        Nothing exists on the backend until you send the first prompt; the
+        browser holds your choices until then. Closing the picker without
+        choosing simply abandons the idea.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · The backend choice is permanent</div>
+        <p>
+          A session is bound to its backend when it is created, and there is no
+          way to move it afterwards. If you want the same task on the other
+          backend, start a new session — or have an agent
+          <a href="delegation.html">delegate</a> it, which is exactly the case
+          delegation handles well.
+        </p>
+      </div>
+    </section>
+
+    <section id="families">
+      <h2>Families</h2>
+
+      <p>
+        When a session spawns another, the child is nested under it in the list,
+        indented, behind a twisty. The subtree is shown depth-first, and the
+        family sorts by its most recently active member rather than by the
+        parent alone — so a family stays near the top while any of its members
+        is working.
+      </p>
+
+      <p>
+        A collapsed parent shows an aggregate badge counting everything in its
+        subtree that wants your attention, so a child blocked on a permission
+        cannot hide inside a folded family.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Families start collapsed</div>
+        <p>
+          A session that has spawned children looks childless until you open the
+          twisty. If you delegated work and cannot find the child, this is
+          almost always why.
+        </p>
+      </div>
+    </section>
+
+    <section id="subagents">
+      <h2>Sub-agents &amp; the roster</h2>
+
+      <p>
+        There are two different things that an agent can create, and telling
+        them apart saves a lot of confusion:
+      </p>
+
+      <table class="data-table">
+        <thead>
+          <tr><th></th><th>Sub-agent</th><th>Delegated session</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Where you find it</td>
+            <td>The <strong>roster</strong> (<code>↳ N</code> in the header)</td>
+            <td>A <strong>nested row</strong> in the session list</td>
+          </tr>
+          <tr>
+            <td>Is it a session?</td>
+            <td>No — a task running inside its parent's turn</td>
+            <td>Yes — real, with its own handle and transcript</td>
+          </tr>
+          <tr>
+            <td>Can you talk to it?</td>
+            <td>No. Read-only transcript, no composer</td>
+            <td>Yes, like any session</td>
+          </tr>
+          <tr>
+            <td>Outlives its parent?</td>
+            <td>No</td>
+            <td>Yes</td>
+          </tr>
+          <tr>
+            <td>Make it independent</td>
+            <td><strong>Keep</strong></td>
+            <td><strong>Detach</strong></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The roster button reads <code>↳</code> followed by how many are running,
+        or the total. Each row gives you the sub-agent's type and description,
+        plus a meta line with its status, a short written summary of what it is
+        doing, its last tool, tokens used, how long it has been going, and its
+        backend. A row's dot shows <em>waiting</em> ahead of <em>running</em>,
+        because waiting is the state that needs you.
+      </p>
+
+      <p>
+        Running rows offer <strong>Stop</strong>. Stopped rows offer
+        <strong>Forget</strong>, which removes the row but keeps the transcript.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">Worth knowing · Opening a blocked sub-agent lands on the blocker</div>
+        <p>
+          Clicking a row that is waiting takes you into that sub-agent's
+          transcript and scrolls straight to the permission or question card it
+          is stuck on, rather than dropping you at the end and making you hunt.
+        </p>
+      </div>
+    </section>
+
+    <section id="keep">
+      <h2>Keep and Detach</h2>
+
+      <p>
+        Both cut a child loose from its parent. Which one you get depends on
+        which kind of child it is.
+      </p>
+
+      <h3>Keep — promoting a sub-agent</h3>
+
+      <p>
+        A sub-agent's own transcript carries a banner instead of a composer,
+        with a link up to the parent and a <strong>Keep</strong> button. Keeping
+        it severs the parent link and turns it into an ordinary session: the
+        composer, model picker, mode picker and auto-approve all come back, it
+        is listed on its own, and archiving or deleting its former parent no
+        longer sweeps it away.
+      </p>
+
+      <p>
+        Keep is unavailable while the sub-agent is still running —
+        <strong>including while it sits parked on a permission request</strong>,
+        which looks idle but is not.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · A kept sub-agent starts with an empty context</div>
+        <p>
+          The transcript is preserved and you can read all of it, but the model
+          has not. A sub-agent ran inside its parent's process, so promoting it
+          gives you a fresh session that happens to have a transcript attached —
+          the new session knows nothing of what is written there. Treat the
+          transcript as reference material, and re-state anything the agent
+          needs to act on.
+        </p>
+      </div>
+
+      <h3>Detach — un-nesting a delegated session</h3>
+
+      <p>
+        Offered on nested rows, beside Archive and Delete. The row visibly
+        un-indents and becomes a root session, no longer swept up by its former
+        parent's lifecycle. The session itself is unaffected — it was always
+        real; only its place in the tree changes.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Detach does not reset how deep it is</div>
+        <p>
+          Sessions can only be spawned six levels deep along the chain that
+          actually created them. Detaching changes the display and the
+          lifecycle, not that lineage — a detached session still counts as
+          however deep it was born. See
+          <a href="unattended.html#limits">Running unattended</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="stopping">
+      <h2>Stopping things</h2>
+
+      <p>
+        Three different stops with three different blast radii. The distinction
+        is worth learning, because the obvious guess — that Stop halts
+        everything beneath the session — is not what happens.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Control</th><th>Stops</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Stop</strong><br>(the red button)</td>
+            <td>This turn. It cascades along <strong>what the turn is waiting on</strong>: its own running sub-agents, and any delegated child it is blocked waiting for. It does <em>not</em> touch delegated children from earlier turns that are off running on their own.</td>
+          </tr>
+          <tr>
+            <td><strong>Stop subtree</strong></td>
+            <td>This session and every descendant under it in the tree. Also <strong>discards mail addressed into that subtree</strong>, so it cannot immediately wake itself back up.</td>
+          </tr>
+          <tr>
+            <td><strong>Stop everything</strong></td>
+            <td>Every session with a turn in flight. Asks for confirmation.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <div class="callout-label">Why Stop spares older delegated children</div>
+        <p>
+          A delegated session you started yesterday is doing its own work, not
+          this turn's. Stopping an unrelated turn today should not kill it. If
+          you do want it stopped, stop it from its own session, or use Stop
+          subtree.
+        </p>
+      </div>
+
+      <p>
+        Only sub-agents that are genuinely running get stopped, so finishing
+        work is never retroactively relabelled as killed. If a backend cannot
+        stop a particular sub-agent the row says <code>can't stop</code> rather
+        than pretending. <span class="badge badge--claude">Claude Code only</span>
+        — stopping an individual sub-agent is a Claude Code capability.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Stop does not release held mail</div>
+        <p>
+          Stop means "do less", so it deliberately leaves parked mail parked.
+          Continue, approving a message, and lifting the autonomy cap all mean
+          "do more" and release it. See
+          <a href="messaging.html">Sessions talking</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <h2>Archive &amp; delete</h2>
+
+      <p>
+        <strong>Archive</strong> is one click with no confirmation. If you
+        archive the session you are looking at, the viewer moves you to the most
+        recent other active session, or to a fresh one if there isn't another.
+      </p>
+
+      <p>
+        <strong>Delete</strong> is only offered on archived rows, and is
+        disabled for the session you are currently viewing — it says
+        <em>switch away first</em>. The normal path is therefore archive, then
+        delete.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Looking for Delete on an active session</div>
+        <p>
+          It isn't there and it isn't broken. Archive it first; Delete appears
+          on the Archived tab.
+        </p>
+      </div>
+
+      <h3>Deleting a session with a family</h3>
+
+      <p>
+        A childless session gets a plain confirmation. One with children gets a
+        dialog that spells out the consequences:
+      </p>
+
+      <ul>
+        <li><strong>Delegated children are listed individually</strong>, each with an <em>also delete?</em> checkbox. They are pre-ticked only for children you never messaged — on the assumption that a child you have talked to is one you may still want. Unticking keeps that child; it becomes a root session.</li>
+        <li><strong>Sub-agent transcripts go with the parent</strong>, and there is no option to keep them. If you want one, use <a href="#keep">Keep</a> before deleting the parent.</li>
+      </ul>
+
+      <p><kbd>Escape</kbd> or clicking the backdrop cancels.</p>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="tour.html">
+        <span class="dir">Previous</span>
+        ← The interface
+      </a>
+      <a class="to-next" href="messaging.html">
+        <span class="dir">Next</span>
+        Sessions talking →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

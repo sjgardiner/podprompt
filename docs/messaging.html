@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Sessions talking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html" aria-current="page">Sessions talking</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#model">How it works</a>
+      <a class="nav-link sub" href="#handles">Handles</a>
+      <a class="nav-link sub" href="#tools">What agents can do</a>
+      <a class="nav-link sub" href="#waiting">Why mail waits</a>
+      <a class="nav-link sub" href="#batch">How a batch arrives</a>
+      <a class="nav-link sub" href="#control">Your controls</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">&nbsp;</div>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Using it</div>
+      <h1>Sessions talking</h1>
+      <p class="subtitle">
+        Any session can find the others, message one, and read its transcript.
+        This page covers how they address each other, what they can actually do,
+        and the several reasons a message might be sitting still.
+      </p>
+    </header>
+
+    <section id="model">
+      <h2>How it works</h2>
+
+      <p>
+        A message from one session to another is <strong>mail</strong>. It is
+        durable — written down, not held in memory — and delivering it
+        <strong>starts a turn</strong> in the recipient. The sender does not
+        wait for a reply; it gets a receipt saying what happened to the message,
+        and if the recipient has something to say it messages back later.
+      </p>
+
+      <p>
+        That asynchrony is the whole design. Two agents are not in a
+        conversation with each other; they are leaving each other notes, each
+        acting on its own schedule.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Mail arrives as a Peer bubble</div>
+        <p>
+          In the recipient's transcript, incoming mail shows up as a collapsed
+          bubble with the sender's handle linked to their session, so you can
+          always trace who prompted what. See
+          <a href="tour.html#feed">The interface</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="handles">
+      <h2>Handles</h2>
+
+      <p>
+        A session's address is a <code>@handle</code> derived from its title:
+        lowercased, punctuation turned to hyphens, trimmed to 32 characters.
+        <code>Refactor the auth layer</code> becomes
+        <code>@refactor-the-auth-layer</code>. Clashes get a numeric suffix.
+      </p>
+
+      <p>
+        Handles are made as needed rather than claimed — there is no step where
+        you register one. A brand-new session has no title yet, so it gets a
+        placeholder like <code>@session-2</code>, which is upgraded once it has
+        a real title.
+      </p>
+
+      <h3>What happens when a title changes</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Change</th><th>Effect on the handle</th></tr></thead>
+        <tbody>
+          <tr><td>You rename the session</td><td>The handle follows the new title.</td></tr>
+          <tr><td>The backend re-titles it itself</td><td>Nothing. Handles do not follow automatic summaries.</td></tr>
+          <tr><td>You set a handle explicitly</td><td>It is pinned and never moves again, whatever the title does.</td></tr>
+          <tr><td>The new name is already taken</td><td>The title changes, the handle stays put. No silent <code>-2</code> suffix.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout good">
+        <div class="callout-label">Old handles keep working</div>
+        <p>
+          Every name a session has ever answered to keeps resolving for as long
+          as that session exists, and <strong>can never be taken by a different
+          session</strong>. So renaming something mid-task strands nothing, and
+          a genuinely stale handle fails loudly with "unknown handle" rather
+          than quietly delivering to the wrong agent. Deleting a session frees
+          its names.
+        </p>
+      </div>
+    </section>
+
+    <section id="tools">
+      <h2>What agents can do</h2>
+
+      <p>
+        Four tools, identical on both backends. You will see them in Tool
+        bubbles, and knowing their options is useful because you can ask an
+        agent to use them better.
+      </p>
+
+      <h3>Find the others</h3>
+
+      <p>
+        <code>list_sessions</code> returns the peers it can reach, most recently
+        active first, with each one's handle, backend, title, whether it is idle
+        or mid-turn, how it relates to the caller, and whether it has stalled.
+        Optional <code>search</code>, <code>limit</code> and <code>all</code>.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · It hides things by default</div>
+        <p>
+          It excludes the caller, archived sessions and unreachable ones, and
+          stops at <span class="default">20</span>. It always says how many it
+          held back — if an agent says it cannot find a session, that count is
+          usually why. Ask it to search by name or pass <code>all</code>.
+        </p>
+      </div>
+
+      <h3>Send a message</h3>
+
+      <p>
+        <code>message_session</code> takes a handle and some text. It returns a
+        receipt immediately — delivered, queued, or a refusal with a reason —
+        never the recipient's answer.
+      </p>
+
+      <p>
+        It also takes <code>resume</code>, for reviving a session that
+        <code>list_sessions</code> reported as stalled. That prepends the right
+        continuation wording for however the turn died, with your text appended
+        after it. If the target is not actually stalled, the receipt says so and
+        nothing is sent.
+      </p>
+
+      <h3>Spawn a new session</h3>
+
+      <p>
+        <code>delegate_session</code> creates a session and gives it work. It
+        always creates — it never addresses something existing. Covered in
+        <a href="delegation.html">Delegating work</a>.
+      </p>
+
+      <h3>Read a transcript</h3>
+
+      <p>
+        <code>read_session</code> reads any reachable session's transcript,
+        <strong>including the caller's own</strong> — pass <code>me</code>. It
+        takes <code>search</code>, <code>role</code> to filter to assistant, user
+        or tool entries, <code>from</code> to start at a given entry, and
+        <code>last</code> for the final few. Entry numbers are positions in the
+        full transcript, and the header tells you how many there are.
+      </p>
+
+      <p>
+        It always reads the complete history regardless of what the interface is
+        displaying — the point of the tool is to recover what rendering may have
+        hidden.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · It reads the end, not the beginning</div>
+        <p>
+          With no <code>from</code> or <code>last</code>, it returns the
+          <strong>most recent</strong> <span class="default">10</span> entries,
+          capped at <span class="default">25</span>, each truncated at
+          <span class="default">1,500</span> characters. To read from the
+          start, <code>from=1</code> is required and is not something an agent
+          will necessarily think of. If you want early context recovered, say so.
+        </p>
+      </div>
+
+      <div class="callout info">
+        <div class="callout-label">Tool names differ by backend</div>
+        <p>
+          <span class="badge badge--claude">Claude Code</span> exposes them
+          prefixed, as <code>mcp__podprompt__list_sessions</code> and so on.
+          <span class="badge badge--opencode">OpenCode</span> registers them
+          under bare names. Same tools, same behaviour.
+        </p>
+      </div>
+    </section>
+
+    <section id="waiting">
+      <h2>Why mail waits</h2>
+
+      <p>
+        A message is not always delivered the moment it is sent. There are four
+        reasons it might sit, and they are independent — clearing one does not
+        clear another.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Reason</th><th>What releases it</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>You are watching</strong><br>The recipient is the session on your screen, and auto-delivery is off for it. Mail is held so an agent does not start typing over you.</td>
+            <td>You deliver it, or you look away for <span class="default">120 s</span>.</td>
+          </tr>
+          <tr>
+            <td><strong>Autonomy is paused</strong><br>The global budget of automatic turns is spent.</td>
+            <td>You give it more budget, or any input from you. See <a href="unattended.html">Running unattended</a>.</td>
+          </tr>
+          <tr>
+            <td><strong>The recipient is mid-turn</strong><br>It cannot start a new turn while finishing one.</td>
+            <td>Nothing — it delivers itself when the turn ends.</td>
+          </tr>
+          <tr>
+            <td><strong>You have not approved it</strong><br>Held mail waits for a per-message decision.</td>
+            <td>You approve that message.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>The watching rule</h3>
+
+      <p>
+        Your browser tells the driver which session you are looking at. A
+        session counts as watched for <strong>120 seconds</strong> after the last
+        time it reported you there. Glancing at another tab does not instantly
+        dump held mail — that one grace period covers every way your attention
+        can end, including closing the browser.
+      </p>
+
+      <p>
+        <strong>Auto-deliver</strong>, next to the composer, switches this off
+        for a session: mail arrives even while you watch. It is
+        <strong>on by default for delegated sessions</strong> and off for
+        everything else, on the reasoning that a session you spawned to do a job
+        should get on with it.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Auto-deliver does not bypass the autonomy budget</div>
+        <p>
+          It only overrides the watching hold. A delegated session with
+          auto-delivery on still spends automatic turns and still stops dead
+          when the global budget runs out. And watching a session never refills
+          that budget.
+        </p>
+      </div>
+
+      <h3>Approving mail</h3>
+
+      <p>
+        Held mail appears in the strip under the header, with a count and a
+        list. <strong>Approval is per message.</strong> Approving two waiting
+        messages does not approve a third that arrives a minute later — that one
+        gets its own decision and shows up as a fresh arrival. Approvals also
+        survive the turn that was running when you clicked.
+      </p>
+
+      <p>
+        The strip counts only mail genuinely waiting on <em>you</em>. Mail that
+        is merely queued behind a busy session is not counted, so the badge does
+        not flicker for things that resolve themselves.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · A sender cannot tell "held for the user" from "busy"</div>
+        <p>
+          Both come back as a queued receipt. An agent that reports its message
+          was "queued because the recipient is busy" may actually be waiting on
+          your approval. Check the strip rather than taking the receipt at face
+          value. Mail held by the autonomy pause is reported as not delivered,
+          but it <em>is</em> stored and will flow when you resume — that one is
+          not worth retrying.
+        </p>
+      </div>
+    </section>
+
+    <section id="batch">
+      <h2>How a batch arrives</h2>
+
+      <p>
+        When several messages are waiting for one session, they are delivered
+        <strong>together, as a single turn</strong> — not one turn each. Three
+        messages cost one automatic turn.
+      </p>
+
+      <p>
+        For display they are taken apart again, so each sender gets its own Peer
+        bubble with its own link. The same sender appearing twice in a batch
+        stays two bubbles in the original order; nothing is merged. If the split
+        does not look right, the whole batch is shown as one bubble rather than
+        risk attributing text to the wrong sender.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">This is worth exploiting</div>
+        <p>
+          Because coalescing is per recipient, batching requests to one agent is
+          cheaper than drip-feeding them. See the
+          <a href="playbook.html">Playbook</a>.
+        </p>
+      </div>
+
+      <h3>After you stop a session</h3>
+
+      <p>
+        If a session's last turn was ended by you pressing Stop, the next message
+        delivered to it is prefixed with a note saying so — telling the agent to
+        address the new message and reconsider, rather than assuming it should
+        pick up where it was halted. Crashes and restarts do not get this; they
+        get their own resume wording.
+      </p>
+    </section>
+
+    <section id="control">
+      <h2>Your controls</h2>
+
+      <table class="option-table">
+        <thead><tr><th>Control</th><th>What it governs</th></tr></thead>
+        <tbody>
+          <tr><td>Auto-deliver</td><td>Per session, beside the composer. Whether mail arrives while you are watching that session.</td></tr>
+          <tr><td>Deliver / approve</td><td>In the strip. Releases specific held messages.</td></tr>
+          <tr><td>Messaging off</td><td>Per session. Makes it unaddressable — other agents see it listed as not messageable.</td></tr>
+          <tr><td>Handle</td><td>Per session. Pin a handle so it never follows a rename.</td></tr>
+          <tr><td>Autonomy</td><td>Global. How many automatic turns may happen at all. <a href="unattended.html">See more.</a></td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Turning off messaging also turns off reading</div>
+        <p>
+          Reading a transcript counts as interacting with it. A session with
+          messaging disabled cannot be read by other agents either. Its handle
+          still resolves — the refusal comes at the point of access, so the
+          caller gets a clear denial rather than a confusing "no such session".
+        </p>
+      </div>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="sessions.html">
+        <span class="dir">Previous</span>
+        ← Many sessions
+      </a>
+      <a class="to-next" href="delegation.html">
+        <span class="dir">Next</span>
+        Delegating work →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

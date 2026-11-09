@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Delegating work</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html" aria-current="page">Delegating work</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#what">What delegation is</a>
+      <a class="nav-link sub" href="#async">Async and awaited</a>
+      <a class="nav-link sub" href="#sees">What the child sees</a>
+      <a class="nav-link sub" href="#choosing">Backend and model</a>
+      <a class="nav-link sub" href="#tracing">Tracing it back</a>
+      <a class="nav-link sub" href="#watching">Watching it work</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">&nbsp;</div>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Using it</div>
+      <h1>Delegating work</h1>
+      <p class="subtitle">
+        An agent can create a whole new session — on either backend, on any
+        model that backend offers — hand it a job, and carry on. This is the
+        most useful thing in PodPrompt and the easiest to use badly.
+      </p>
+    </header>
+
+    <section id="what">
+      <h2>What delegation is</h2>
+
+      <p>
+        <code>delegate_session</code> always creates something new. It takes a
+        backend, a prompt, and optionally a title, a model, and whether to wait.
+        What comes back is a <code>@handle</code> for a real session you can open,
+        prompt, and read like any other.
+      </p>
+
+      <p>
+        That is the key difference from a sub-agent. A delegated session is not
+        a task inside somebody's turn — it is a peer. It appears in the session
+        list nested under its parent, it survives its parent, and you can talk
+        to it yourself.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Delegate, or message?</div>
+        <p>
+          <code>delegate_session</code> makes a new session.
+          <code>message_session</code> talks to one that already exists. An agent
+          that wants an answer from a colleague should message; an agent that
+          wants a job done in parallel should delegate.
+        </p>
+      </div>
+    </section>
+
+    <section id="async">
+      <h2>Async and awaited</h2>
+
+      <p>
+        By default delegation does <strong>not</strong> wait. The call returns
+        the moment the child exists, the parent's turn can end, and when the
+        child finishes, its final reply is delivered to the parent as ordinary
+        mail — reported as delegated work finishing, with a pointer to read the
+        transcript for detail.
+      </p>
+
+      <p>
+        Asking it to wait holds the parent's turn open until the child's turn
+        ends, and returns the outcome and the child's final text directly.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th></th><th>Async <span class="default">default</span></th><th>Awaited</th></tr></thead>
+        <tbody>
+          <tr><td>Parent's turn</td><td>Ends immediately</td><td>Held open</td></tr>
+          <tr><td>Result arrives as</td><td>Mail, later</td><td>The tool's return value</td></tr>
+          <tr><td>Survives a driver restart</td><td><strong>Yes</strong></td><td><strong>No</strong></td></tr>
+          <tr><td>Good for</td><td>Anything substantial</td><td>Quick work the parent needs inside this turn</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · An awaited result is not durable</div>
+        <p>
+          Async results travel through the stored mail system, so they survive a
+          restart. An awaited result is held in memory — if the driver restarts
+          while the child is running, <strong>the result is lost even though the
+          child keeps working</strong>. That is why async is the default, and why
+          long jobs should not be awaited. If it happens, the child's transcript
+          is still there; read it.
+        </p>
+      </div>
+
+      <p>
+        Async also means the user is not left staring at a spinner. A parent that
+        delegates three jobs and ends its turn lets you keep working while they
+        run.
+      </p>
+    </section>
+
+    <section id="sees">
+      <h2>What the child sees</h2>
+
+      <p>
+        <strong>A delegated session starts a completely fresh conversation.</strong>
+        This is the single most important thing to understand, because a prompt
+        written as though the child shares the parent's context will fail in ways
+        that look like the model being stupid.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Does it inherit…</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>The parent's conversation</td><td><strong>No</strong></td></tr>
+          <tr><td>Anything the parent read</td><td><strong>No</strong></td></tr>
+          <tr><td>The parent's instructions or system prompt</td><td><strong>No</strong></td></tr>
+          <tr><td>The working directory</td><td>Yes</td></tr>
+          <tr><td>The same workspace files</td><td>Yes</td></tr>
+          <tr><td>Auto-approve</td><td>Yes, and it tracks the parent's setting live</td></tr>
+          <tr><td>The model</td><td>Only if no model was specified and the backends match</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        Because the workspace <em>is</em> shared, the right move is to refer to
+        files by path rather than pasting their contents into the prompt. The
+        prompt needs to carry the <em>intent</em> and the background; the files
+        can speak for themselves.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">Auto-approve reaches through to children</div>
+        <p>
+          It is resolved through the parent relationship rather than copied, so
+          changing it on a parent affects children that already exist. Useful,
+          and worth remembering before you switch it on.
+        </p>
+      </div>
+    </section>
+
+    <section id="choosing">
+      <h2>Backend and model</h2>
+
+      <p>
+        The backend is required — <code>claude-code</code> or
+        <code>opencode</code>. This is how you get work onto the other backend
+        without starting a session by hand, and it is one of the better reasons
+        to delegate at all.
+      </p>
+
+      <p>
+        The model is optional and is checked against the <strong>target</strong>
+        backend's own list, so a valid id for the other backend is still
+        rejected. Omit it and the child takes the parent's model when the
+        backends match, or that backend's default when they do not.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">A wrong model id is cheap and self-correcting</div>
+        <p>
+          An unrecognised id is rejected <em>with the full list of ids that
+          backend accepts</em>, and nothing else happens — no session is created
+          and it does not count against the per-turn limit. An agent that does
+          not know the right id can simply guess, read the list from the
+          rejection, and immediately try again.
+        </p>
+      </div>
+    </section>
+
+    <section id="tracing">
+      <h2>Tracing it back</h2>
+
+      <p>
+        Delegation chains stay legible in both directions:
+      </p>
+
+      <ul>
+        <li>In the <strong>parent</strong>, a delegation bubble lists the children it created, with live status. <span class="badge badge--differs">OpenCode differs</span> — no live status there; read the nested session row instead.</li>
+        <li>In the <strong>child</strong>, the opening prompt is labelled <strong>Delegated</strong> rather than as something you typed, and the parent's handle is a link that jumps to the exact bubble that created it.</li>
+        <li>In the <strong>session list</strong>, the child is nested under its parent — remembering that <a href="sessions.html#families">families start collapsed</a>.</li>
+      </ul>
+
+      <p>
+        The status wording in a parent's delegation bubble distinguishes states
+        that would otherwise all look like "done":
+      </p>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>running</td><td>Working.</td></tr>
+          <tr><td>waiting for your answer</td><td>Blocked on a question — go and answer it.</td></tr>
+          <tr><td>waiting for your approval</td><td>Blocked on a permission card.</td></tr>
+          <tr><td>waiting out a usage limit</td><td>Will resume on its own, with an estimate.</td></tr>
+          <tr><td>stopped by you</td><td>Deliberate, and not coloured as a failure.</td></tr>
+          <tr><td>failed — retries exhausted</td><td>Needs you.</td></tr>
+          <tr><td>out of credit</td><td>Will not retry.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="watching">
+      <h2>Watching it work</h2>
+
+      <p>
+        A delegated session is an ordinary session, so you can open it at any
+        point and read along, prompt it directly, stop it, rename it, or
+        <a href="sessions.html#keep">detach</a> it from its parent.
+      </p>
+
+      <p>
+        An agent can follow its own child too, with <code>read_session</code> —
+        which is often better than waiting, since it can check progress without
+        blocking.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Delegation is bounded three separate ways</div>
+        <p>
+          A single turn may perform at most <span class="default">8</span>
+          messages and delegations combined. Sessions may only spawn sessions
+          <span class="default">6</span> levels deep. And the global autonomy
+          budget caps automatic turns across everything at
+          <span class="default">20</span> by default — when it runs out,
+          delegation is refused before a child is created rather than creating
+          one that cannot start. See <a href="unattended.html">Running unattended</a>.
+        </p>
+      </div>
+
+      <p>
+        Auto-delivery is <strong>on by default for delegated sessions</strong>,
+        so mail reaches them even while you are reading them. That is usually
+        what you want from something you spawned to do a job, and it is a
+        per-session switch beside the composer if it is not.
+      </p>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="messaging.html">
+        <span class="dir">Previous</span>
+        ← Sessions talking
+      </a>
+      <a class="to-next" href="unattended.html">
+        <span class="dir">Next</span>
+        Running unattended →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

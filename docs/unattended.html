@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Running unattended</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html" aria-current="page">Running unattended</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#control">The autonomy control</a>
+      <a class="nav-link sub" href="#budget">Spending and refilling</a>
+      <a class="nav-link sub" href="#limits">The three limits</a>
+      <a class="nav-link sub" href="#paused">When it pauses</a>
+      <a class="nav-link sub" href="#failures">When something breaks</a>
+      <a class="nav-link sub" href="#resume">Automatic recovery</a>
+      <a class="nav-link sub" href="#overnight">Arranging a run</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Using it</div>
+      <h1>Running unattended</h1>
+      <p class="subtitle">
+        How much work agents may do without you, what happens when that runs
+        out, and what the system does on its own when a provider limit or a
+        stall interrupts things.
+      </p>
+    </header>
+
+    <section id="control">
+      <h2>The autonomy control</h2>
+
+      <p>
+        One button, in the third column of settings. Its label is a sentence
+        describing what the system is currently doing —
+        <em>Pause after 20 automatic turns</em>, or
+        <em>Run unattended until 08:00</em>. Clicking it opens a menu of
+        choices; nothing commits until you pick one.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Mode</th><th>Options</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Supervised</strong></td>
+            <td>Pause after <span class="default">5 / 10 / 20 / 50 / 100</span> automatic turns, or a number you type. <span class="default">20</span> is the default.</td>
+          </tr>
+          <tr>
+            <td><strong>Unattended</strong></td>
+            <td>Run for 1 hour, for 4 hours, until 8:00 AM, until a time you pick, or indefinitely.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        These are two modes of one choice, not two settings that could
+        contradict each other. Picking a supervised option while a window is
+        running also ends that window — which is the obvious thing to reach for
+        when you want supervision back.
+      </p>
+
+      <p>
+        Times are worked out by your browser and sent as an absolute moment, so
+        "until 8:00 AM" means 8am where <em>you</em> are, regardless of what the
+        container thinks the time is.
+      </p>
+    </section>
+
+    <section id="budget">
+      <h2>Spending and refilling</h2>
+
+      <p>
+        <strong>There is one counter for the whole system.</strong> Not one per
+        session, not one per delegation chain. Every automatic turn anywhere —
+        mail being delivered, a delegated session starting, a parked message
+        being released — spends from the same budget.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Refills the budget</th><th>Does not</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>
+              <ul>
+                <li>Sending a prompt</li>
+                <li>Clicking Continue</li>
+                <li>Answering an approval or question</li>
+                <li>Any autonomy menu action</li>
+                <li>Pressing Stop</li>
+              </ul>
+            </td>
+            <td>
+              <ul>
+                <li>Scrolling or expanding a bubble</li>
+                <li>Switching session</li>
+                <li>Returning to the tab</li>
+                <li>Watching a session work</li>
+              </ul>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The distinction is deliberate: only acts that mean <em>you are directing
+        this</em> count. Merely being present does not, because a stray trackpad
+        brush should not silently hand out another twenty turns.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Budgets do not compose down a tree</div>
+        <p>
+          A delegated session does not get its own allowance. Because the
+          counter is shared, <strong>one session failing in a loop can consume
+          the budget for everything else.</strong> If work stops unexpectedly
+          across several unrelated sessions, look for the one that is churning.
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · The counter keeps climbing while unattended</div>
+        <p>
+          An unattended window does not pause the counter, it ignores it. So
+          when the window lapses the counter is already far past its limit and
+          <strong>everything parks at once</strong>. This is why you can come
+          back to a morning where nothing is running and nothing looks broken.
+        </p>
+        <p>
+          Choosing <strong>Cap it now</strong> ends a window <em>and</em> resets
+          the counter, so asking for supervision back does not immediately park
+          everything.
+        </p>
+      </div>
+    </section>
+
+    <section id="limits">
+      <h2>The three limits</h2>
+
+      <p>
+        Autonomy is bounded in three independent ways. They answer different
+        questions, and hitting one tells you nothing about the others.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Limit</th><th>Default</th><th>Bounds</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Automatic turns</td>
+            <td><span class="default">20</span></td>
+            <td><strong>How long</strong> a cascade can run before you are consulted. Global.</td>
+          </tr>
+          <tr>
+            <td>Fan-out per turn</td>
+            <td><span class="default">8</span></td>
+            <td><strong>How wide</strong> one turn can go — messages and delegations combined.</td>
+          </tr>
+          <tr>
+            <td>Creation depth</td>
+            <td><span class="default">6</span></td>
+            <td><strong>How deep</strong> sessions may spawn sessions.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        Depth is counted along the chain of who originally created whom, so
+        <a href="sessions.html#keep">detaching</a> a session does not reset it.
+        A model that guesses a bad model id is refused before any of this is
+        charged, so guessing costs nothing.
+      </p>
+    </section>
+
+    <section id="paused">
+      <h2>When it pauses</h2>
+
+      <p>
+        Reaching the limit does not stop <em>you</em>. Human work always runs —
+        you can type, Continue, or answer a card at any time. What stops is
+        automatic work:
+      </p>
+
+      <ul>
+        <li>New automatic turns are refused.</li>
+        <li>Incoming mail is <strong>parked, not dropped</strong>, and flows when you resume.</li>
+        <li>Delegation is refused up front, so no child is created that cannot start.</li>
+      </ul>
+
+      <p>
+        A strip appears under the header — outside the scrolling conversation,
+        because the condition is global — offering <strong>Allow 20 more</strong>,
+        <strong>Don't pause</strong>, <strong>Cap it now</strong>, and
+        <strong>Stop everything</strong>, plus the list of held mail.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">The strip is reactive; settings is where you arrange things</div>
+        <p>
+          The strip only exists when there is something to act on, so it cannot
+          tell you the policy during normal operation. To set up a run
+          <em>before</em> walking away, use the autonomy control in settings.
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Stop does not release parked mail</div>
+        <p>
+          Stop means "do less". It resets the counter, but deliberately leaves
+          held mail held — otherwise stopping something would immediately start
+          everything else. Continue, approving, and the autonomy actions all
+          release it.
+        </p>
+      </div>
+    </section>
+
+    <section id="failures">
+      <h2>When something breaks</h2>
+
+      <p>
+        Failures are sorted into four kinds, because they need different
+        responses:
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Kind</th><th>Meaning</th><th>Retried?</th></tr></thead>
+        <tbody>
+          <tr><td>transient</td><td>A connection or process died.</td><td>Yes — after 1, 5, then 15 minutes.</td></tr>
+          <tr><td>overloaded</td><td>The provider is busy.</td><td>Yes — after 5, 15, then 60 minutes.</td></tr>
+          <tr><td>rate limited</td><td>An allowance is temporarily spent. Clears on its own.</td><td>Yes — same slower ladder.</td></tr>
+          <tr><td>out of credit</td><td>A hard billing block.</td><td><strong>Never.</strong> Only you can fix it.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        When a provider states when an allowance resets, that time is used
+        instead of the ladder, plus a <span class="default">45-second</span>
+        margin — being a second early costs a whole extra wait. Each session also
+        gets up to <span class="default">20 seconds</span> of its own spread,
+        because a usage limit belongs to your account rather than to one session;
+        without it, every waiting session would wake at the same instant and
+        trigger the limit again.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">A dead turn never looks finished</div>
+        <p>
+          A turn that was killed, stalled or errored is recorded as such, and is
+          never displayed as merely idle. In a parent's delegation bubble that is
+          the difference between <em>waiting out a usage limit — resuming in
+          ~41m</em> and <em>failed — retries exhausted, needs you</em>. A stop you
+          performed yourself reads as <em>stopped by you</em> and is not coloured
+          as a fault.
+        </p>
+      </div>
+    </section>
+
+    <section id="resume">
+      <h2>Automatic recovery</h2>
+
+      <p>
+        A supervisor checks every <span class="default">60 seconds</span> for
+        turns that died and should not have. It restarts turns that crashed,
+        stalled, or errored — up to <span class="default">three</span> attempts,
+        after which it stops and waits for you.
+      </p>
+
+      <p>Two things it deliberately will not do:</p>
+
+      <ul>
+        <li><strong>It never resumes something you stopped.</strong> Resuming work a human halted on purpose would be the worst thing it could do.</li>
+        <li><strong>It never retries a billing block</strong>, because no amount of waiting will clear one.</li>
+      </ul>
+
+      <p>
+        Every resume prompt tells the agent <strong>not to start over</strong> —
+        restarting from scratch is the expensive failure — and warns that the
+        result of whatever tool was in flight is unknown, so it should check the
+        state of things before assuming anything succeeded. An automatic resume
+        also tells the agent plainly that no human has reviewed what happened, so
+        it does not assume its work was approved.
+      </p>
+
+      <p>
+        Turns that go silent are noticed too.
+        <span class="badge badge--opencode">OpenCode</span> turns are probed after
+        <span class="default">5 minutes</span> of silence; a session that is
+        waiting on <em>you</em> is exempt, since that is not a stall.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Automatic retries spend the shared budget</div>
+        <p>
+          Each one counts as an automatic turn, exactly as a delivered message
+          would. This is intentional — if retries refilled the budget instead,
+          one crash-looping session would hand every other session a fresh
+          twenty turns, forever. The practical consequence is that a flapping
+          session quietly eats the allowance you were saving for real work.
+        </p>
+      </div>
+
+      <p>
+        While a session is waiting to be retried, the Continue strip says so —
+        including which attempt it is on and roughly when the next one is due —
+        rather than offering you a Continue that would fail the same way.
+      </p>
+    </section>
+
+    <section id="overnight">
+      <h2>Arranging a run</h2>
+
+      <p>Before you walk away, in this order:</p>
+
+      <ol>
+        <li><strong>Set the window first.</strong> Pick an unattended duration that covers the work, from the autonomy control. Doing this afterwards means hitting the wall, then lifting the cap, then waiting again.</li>
+        <li><strong>Deal with permissions.</strong> Use <strong>Always allow</strong> on the cards for things the work needs — it persists. Auto-approve does not survive a driver restart, so it is the weaker choice here.</li>
+        <li><strong>Turn on auto-delivery</strong> for any session that should receive mail while you are not watching. Delegated sessions already have it.</li>
+        <li><strong>Enable notifications</strong> if you want to be told about a question that blocks everything.</li>
+        <li><strong>Check nothing is already flapping</strong>, since retries share the budget with the work you are setting up.</li>
+      </ol>
+
+      <div class="callout good">
+        <div class="callout-label">Size the window to the work, not the night</div>
+        <p>
+          The window does not extend itself, and when it lapses everything parks
+          immediately. A window that is comfortably longer than the job is
+          cheaper than discovering at 7am that it ended at 2am.
+        </p>
+      </div>
+
+      <p>
+        More patterns in the <a href="playbook.html">Playbook</a>.
+      </p>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="delegation.html">
+        <span class="dir">Previous</span>
+        ← Delegating work
+      </a>
+      <a class="to-next" href="playbook.html">
+        <span class="dir">Next</span>
+        Playbook →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

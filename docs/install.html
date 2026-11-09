@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Install &amp; launch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html" aria-current="page">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#prerequisites">Prerequisites</a>
+      <a class="nav-link sub" href="#path">1 · Put it on your PATH</a>
+      <a class="nav-link sub" href="#build">2 · Build the image</a>
+      <a class="nav-link sub" href="#deploy">3 · Deploy the viewer</a>
+      <a class="nav-link sub" href="#credentials">4 · Sign in</a>
+      <a class="nav-link sub" href="#launch">5 · Launch</a>
+      <a class="nav-link sub" href="#terminal">Terminal instead</a>
+      <a class="nav-link sub" href="#litellm">Using a LiteLLM proxy</a>
+      <a class="nav-link sub" href="#network">Reaching host services</a>
+      <a class="nav-link sub" href="#trouble">When it won't start</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Getting started</div>
+      <h1>Install &amp; launch</h1>
+      <p class="subtitle">
+        Five steps to a working browser window. You set it up once, then run
+        <code>podprompt</code> from whichever project you want to work on —
+        the directory you are standing in becomes the workspace.
+      </p>
+    </header>
+
+    <section id="prerequisites">
+      <h2>Prerequisites</h2>
+
+      <p>
+        You need <strong>Docker</strong> (Engine or Desktop), a
+        <strong>browser</strong>, and a full checkout of this repository — not
+        a few files copied out of it, because both the build and the viewer
+        deployment read from the <code>viewer/</code> tree.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Put the checkout somewhere permanent</div>
+        <p>
+          The <code>podprompt</code> command finds the checkout from its own
+          location every time it runs — that is what lets it work from any
+          directory. So the checkout is <strong>permanent infrastructure, not
+          scratch space</strong>. Move it or delete it and the command stops
+          working until you update your <code>PATH</code>.
+        </p>
+      </div>
+
+      <p>
+        The launcher is a shell script and uses a handful of standard tools:
+      </p>
+
+      <table class="option-table">
+        <thead><tr><th>Tool</th><th>Used for</th></tr></thead>
+        <tbody>
+          <tr><td>bash 3.2+</td><td>The launcher deliberately avoids newer bash features so macOS's built-in bash works.</td></tr>
+          <tr><td>curl</td><td>Checking the viewer is up, and talking to a LiteLLM proxy.</td></tr>
+          <tr><td>jq</td><td>Listing LiteLLM models, and tidying stale settings entries.</td></tr>
+          <tr><td>lsof</td><td>Clearing a stale process off the viewer port. Without it that cleanup silently does nothing.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        <strong>No host Node.js or Python is needed.</strong> Both live in the
+        image. No CPU architecture is pinned, so Linux x86-64, Intel Macs and
+        Apple Silicon all build natively.
+      </p>
+    </section>
+
+    <section id="path">
+      <h2><span class="step-num">1</span> Put it on your PATH</h2>
+
+      <p>
+        The command lives at <code>bin/podprompt</code> in the checkout. Add
+        that directory to your <code>PATH</code> and you can invoke
+        <code>podprompt</code> from anywhere.
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">permanent — add to ~/.bashrc or ~/.zshrc</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>export PATH="/path/to/podprompt/bin:$PATH"</pre>
+      </div>
+
+      <p>
+        Or, to try it in the current shell without editing anything, source the
+        activation script. It works out where it lives, so there is nothing to
+        edit:
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">this shell only</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>source /path/to/podprompt/activate.sh</pre>
+      </div>
+
+      <p>
+        It prints the exact line to add to your shell profile when you want to
+        keep it. Symlinking <code>bin/podprompt</code> into a directory already
+        on your <code>PATH</code> works too — the command follows symlinks back
+        to the real checkout.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Shells other than bash and zsh</div>
+        <p>
+          The activation script needs bash or zsh. On fish, use
+          <code>fish_add_path /path/to/podprompt/bin</code> instead.
+        </p>
+      </div>
+    </section>
+
+    <section id="build">
+      <h2><span class="step-num">2</span> Build the image</h2>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">builds from the checkout, runnable from anywhere</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --build</pre>
+      </div>
+
+      <p>
+        This installs <strong>both</strong> agent backends — Claude Code and
+        OpenCode — plus git, curl, ripgrep and Python 3, and bakes the viewer's
+        Node dependencies into the image for its own platform.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">When to rebuild</div>
+        <p>
+          Whenever the <code>Dockerfile</code> changes, and also whenever
+          <code>viewer/package.json</code> or
+          <code>viewer/package-lock.json</code> changes — they are build inputs,
+          so a dependency change needs a rebuild, not just a redeploy.
+        </p>
+      </div>
+    </section>
+
+    <section id="deploy">
+      <h2><span class="step-num">3</span> Deploy the viewer</h2>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">copies the app to ~/.local/share/podprompt/viewer/</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --deploy-viewer</pre>
+      </div>
+
+      <p>
+        The browser interface is the <strong>default</strong> way to use
+        PodPrompt, so unless you only ever intend to use a terminal, this step
+        is required rather than optional. It is a plain file copy — it installs
+        no dependencies, since those are already in the image — and it will
+        refuse to report success if the copy looks wrong.
+      </p>
+
+      <p>
+        Run it again whenever the app code in <code>viewer/</code> changes.
+      </p>
+    </section>
+
+    <section id="credentials">
+      <h2><span class="step-num">4</span> Sign in</h2>
+
+      <p>
+        There are four ways to authenticate. The first three configure
+        <strong>Claude Code</strong>; OpenCode always manages its own
+        credentials separately.
+      </p>
+
+      <h3>A Claude subscription <span class="default">default</span></h3>
+
+      <p>
+        Nothing to configure, but there is an ordering requirement: the
+        browser interface has no terminal for the one-time login prompt, so you
+        must log in through a terminal session first.
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">once, to complete the browser sign-in</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --claude</pre>
+      </div>
+
+      <p>
+        After that the credentials live in <code>~/.claude</code> on your
+        machine and every later launch reuses them.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Do this before your first viewer launch</div>
+        <p>
+          Skip it and the viewer starts, but Claude Code sessions inside it have
+          no credentials and nothing explains why. This is the single most
+          common first-run problem.
+        </p>
+      </div>
+
+      <h3>An Anthropic API key</h3>
+
+      <p>
+        Billed per token, and needs no interactive login. Put your key in an
+        environment file — <code>podprompt.env.template</code> shows the format,
+        and real credentials belong outside the repository, conventionally at
+        <code>~/.podprompt.env</code>.
+      </p>
+
+      <ul class="env-list">
+        <li>
+          <span class="env-name">ANTHROPIC_API_KEY<span class="env-required req">required</span></span>
+          <span class="env-desc">Your API key. Launch with <code>--direct-api</code>.</span>
+        </li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · The template's placeholder counts as set</div>
+        <p>
+          <code>podprompt.env.template</code> contains a literal
+          <code>sk-ant-…</code> placeholder. Copying it without editing leaves
+          the variable non-empty, so the launcher will not warn you — the
+          request simply fails later. Replace the placeholder, don't just copy
+          the file.
+        </p>
+      </div>
+
+      <h3>A LiteLLM proxy</h3>
+
+      <p>See <a href="#litellm">Using a LiteLLM proxy</a> below.</p>
+
+      <h3>OpenCode</h3>
+
+      <p>
+        OpenCode signs in on its own, and the Claude Code provider flags do not
+        affect it. Log in through a terminal session once:
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">OpenCode's own login</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --opencode</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-label">Not a valid combination</div>
+        <p>
+          <code>--opencode --direct-api</code> is rejected outright. The API-key
+          provider configures Claude Code, and OpenCode has nothing to do with
+          it.
+        </p>
+      </div>
+    </section>
+
+    <section id="launch">
+      <h2><span class="step-num">5</span> Launch</h2>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">from whichever project directory you want to work in</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>cd ~/some/project
+podprompt</pre>
+      </div>
+
+      <p>
+        The launcher waits for the viewer to come up and then opens
+        <code>http://localhost:7843</code> in your browser. If it cannot open a
+        browser for you, visit that address yourself.
+      </p>
+
+      <p>
+        <strong>The directory you launch from is the workspace.</strong> It is
+        mounted at <code>/workspace</code> inside the container and is where
+        agents do their work. Your <code>~/.claude</code> directory is always
+        mounted too, so sessions and credentials persist across launches.
+      </p>
+
+      <p>
+        Because the current directory is effectively an argument, every launch
+        prints what it resolved to:
+      </p>
+
+      <div class="code-block">
+<pre>Workspace: /home/you/some/project → /workspace</pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Launching from your home directory asks first</div>
+        <p>
+          If the working directory is your home directory — or anything
+          containing it, such as <code>/</code> — you get a warning and a
+          confirmation prompt, because that would hand agents write access to
+          everything you own. Answering yes proceeds; it is your machine.
+        </p>
+        <p>
+          With no terminal to prompt on, it warns and continues rather than
+          breaking a script. Set <code>PODPROMPT_YES=1</code> to skip the
+          prompt deliberately.
+        </p>
+      </div>
+
+      <p>
+        The container itself is disposable — it is removed and recreated on
+        every launch. Everything worth keeping lives on your machine through
+        bind mounts, listed in the <a href="reference.html#state">Reference</a>.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">Nothing is exposed to your network</div>
+        <p>
+          The page and the driver are published to <code>127.0.0.1</code> only.
+          The OpenCode server is never published outside the container at all.
+        </p>
+      </div>
+    </section>
+
+    <section id="terminal">
+      <h2>Terminal instead</h2>
+
+      <p>
+        If you would rather have a plain terminal agent with no browser, pick a
+        backend explicitly:
+      </p>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>--claude</td><td class="plain">A Claude Code terminal session. <code>--claude-code</code> is the same thing.</td></tr>
+          <tr><td>--opencode</td><td class="plain">An OpenCode terminal session.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        These are mutually exclusive with each other and with an explicit
+        <code>--viewer</code>; asking for two interfaces is an error rather than
+        a guess. Unrecognised arguments are passed straight through to the
+        underlying agent, so things like
+        <code>podprompt --opencode --continue</code> work as you would
+        expect.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Pass-through arguments and the viewer</div>
+        <p>
+          In the default browser mode there is no terminal agent to pass
+          arguments to, so they are reported and ignored. The viewer is
+          unaffected and fully usable — pick your session in the browser
+          instead.
+        </p>
+      </div>
+    </section>
+
+    <section id="litellm">
+      <h2>Using a LiteLLM proxy</h2>
+
+      <p>Set two variables and launch with <code>--litellm</code>:</p>
+
+      <ul class="env-list">
+        <li>
+          <span class="env-name">LITELLM_URL<span class="env-required req">required</span></span>
+          <span class="env-desc">Base URL of the proxy. The shipped default is the literal placeholder <code>&lt;MY-LITELLM-URL&gt;</code>, so it must be set.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_API_KEY<span class="env-required req">required</span></span>
+          <span class="env-desc">Key for the proxy. Also required by <code>--list-models</code>.</span>
+        </li>
+      </ul>
+
+      <p>
+        The launcher checks the proxy is reachable, then runs an interactive
+        model picker so you can choose a primary model and optionally a small,
+        fast one. To see what is available without launching:
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">list model ids and exit</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --list-models</pre>
+      </div>
+
+      <table class="data-table">
+        <thead><tr><th>Launch mode</th><th>Model picker</th><th>Route used</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>default viewer</td>
+            <td>Runs</td>
+            <td>Anthropic-format <code>/v1/messages</code>, for Claude Code sessions</td>
+          </tr>
+          <tr>
+            <td><code>--claude</code></td>
+            <td>Runs</td>
+            <td>Anthropic-format <code>/v1/messages</code></td>
+          </tr>
+          <tr>
+            <td><code>--opencode</code></td>
+            <td>Skipped</td>
+            <td>OpenAI-compatible route, via OpenCode's own config</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        Your picks apply to the whole launch rather than to one browser session,
+        and they are not remembered — choose again next time, or pass the model
+        explicitly.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Claude Code only, with one exception</div>
+        <p>
+          The provider flags configure Claude Code. OpenCode reads its own
+          configuration instead — but <code>--opencode --litellm</code> does
+          work: the proxy details are passed through for OpenCode to use via the
+          OpenAI-compatible route.
+        </p>
+      </div>
+    </section>
+
+    <section id="network">
+      <h2>Reaching host services</h2>
+
+      <p>
+        By default the container is on a bridge network, which means it cannot
+        reach something on your machine that listens only on loopback — a local
+        model server on <code>127.0.0.1:8080</code>, for instance. For that,
+        use host networking:
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">share the host network namespace</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --host-network</pre>
+      </div>
+
+      <p>
+        This stops publishing ports and instead binds the viewer and driver
+        directly to <code>127.0.0.1</code>, so sharing the host's network does
+        not put the driver's control plane on every interface of your machine.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">macOS caveat</div>
+        <p>
+          Needs Docker Desktop 4.34 or newer with
+          <em>Settings → Resources → Network → Enable host networking</em>. Even
+          then, reaching the viewer from the host browser can be unreliable on
+          macOS. On Linux it works normally.
+        </p>
+      </div>
+    </section>
+
+    <section id="trouble">
+      <h2>When it won't start</h2>
+
+      <table class="data-table">
+        <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>podprompt: command not found</code></td>
+            <td>The checkout's <code>bin/</code> is not on your <code>PATH</code> in this shell. If you sourced <code>activate.sh</code>, that only applied to the shell you ran it in — add the line to your shell profile to keep it. See <a href="#path">step 1</a>.</td>
+          </tr>
+          <tr>
+            <td>Told the image does not exist</td>
+            <td>Run <code>podprompt --build</code>. This is checked before anything else happens, so it is safe to hit.</td>
+          </tr>
+          <tr>
+            <td>No <code>viewer/</code> in this checkout</td>
+            <td>The checkout has been moved, renamed or partly deleted. The command resolves it from its own location, so point your <code>PATH</code> at wherever it is now.</td>
+          </tr>
+          <tr>
+            <td>Told to run <code>--deploy-viewer</code></td>
+            <td>The viewer app isn't on your machine yet, or its files are incomplete. Run <a href="#deploy">step 2</a> again from the repository root.</td>
+          </tr>
+          <tr>
+            <td>Claude Code sessions have no credentials</td>
+            <td>The one-time sign-in hasn't happened. Run <code>podprompt --claude</code> once, complete the login, then relaunch.</td>
+          </tr>
+          <tr>
+            <td>Launch aborts over a busy port</td>
+            <td>Something unrelated to PodPrompt is on the viewer port, and the launcher will not kill a process it does not recognise. Move with <code>--viewer-port</code>, and pick a value that isn't <code>7844</code> — that is the driver's port.</td>
+          </tr>
+          <tr>
+            <td>OpenCode sessions have no messaging tools</td>
+            <td>The deployed viewer is missing <code>opencode-plugin.ts</code>. Redeploy with <a href="#deploy">step 2</a> rather than copying files by hand.</td>
+          </tr>
+          <tr>
+            <td>Arguments seem to be ignored</td>
+            <td>They are, in browser mode — see <a href="#terminal">above</a>. Use <code>--claude</code> or <code>--opencode</code> if you need to pass agent arguments.</td>
+          </tr>
+          <tr>
+            <td>A dependency change had no effect</td>
+            <td><code>--deploy-viewer</code> copies app code only. Dependencies are baked into the image, so rebuild it.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="index.html">
+        <span class="dir">Previous</span>
+        ← Start here
+      </a>
+      <a class="to-next" href="tour.html">
+        <span class="dir">Next</span>
+        The interface →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

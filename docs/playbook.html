@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Playbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html" aria-current="page">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#fanout">Fan out the reading</a>
+      <a class="nav-link sub" href="#models">Right model for the job</a>
+      <a class="nav-link sub" href="#batching">Batch, don't drip</a>
+      <a class="nav-link sub" href="#choosing">Delegate or sub-agent?</a>
+      <a class="nav-link sub" href="#secondopinion">Ask the other backend</a>
+      <a class="nav-link sub" href="#context">Recover your own context</a>
+      <a class="nav-link sub" href="#naming">Name things early</a>
+      <a class="nav-link sub" href="#triage">Nothing is happening</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Going further</div>
+      <h1>Playbook</h1>
+      <p class="subtitle">
+        Patterns that get real leverage out of the machinery, and a triage list
+        for the times it looks like nothing is happening. Each one explains
+        <em>why</em> it works, so you can adapt it rather than follow it.
+      </p>
+    </header>
+
+    <section id="fanout">
+      <h2>Fan out the reading</h2>
+
+      <p>
+        When answering a question means sweeping a lot of material — several
+        subsystems, several possible naming conventions, a big dependency — ask
+        an agent to delegate one session per strand rather than reading it all
+        itself.
+      </p>
+
+      <p>
+        <strong>Why it works.</strong> Delegation is asynchronous by default, so
+        all the strands run at once and each reports back as mail when it is
+        done. The parent's context stays clean: it receives conclusions rather
+        than filling up with file dumps.
+      </p>
+
+      <p>
+        <strong>Watch for:</strong> one turn may only start
+        <span class="default">8</span> messages and delegations combined. Beyond
+        that, have the parent delegate in waves, or delegate a coordinator that
+        fans out again — remembering the <span class="default">6</span>-level
+        depth limit.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">Ask for the shape of the answer</div>
+        <p>
+          A delegated session's report is <em>its final reply only</em>. Tell it
+          what the answer should look like and ask for it last, or you will get
+          a sign-off sentence instead of findings. Having each one also write
+          full detail to a file turns the mail into a summary and keeps the
+          evidence.
+        </p>
+      </div>
+    </section>
+
+    <section id="models">
+      <h2>Right model for the job</h2>
+
+      <p>
+        Delegation takes an explicit model. Use it: put mechanical work —
+        inventorying, collating, reformatting, first-pass searching — on
+        something cheap and fast, and keep your expensive model for the
+        synthesis that actually needs judgement.
+      </p>
+
+      <p>
+        <strong>Why it works.</strong> The model is validated against the target
+        backend's own list, and a wrong guess is rejected <em>with the full list
+        of valid ids</em> while costing nothing — not a session, not a turn, not
+        fan-out. An agent that does not know the id can guess, read the
+        rejection, and retry immediately.
+      </p>
+
+      <p>
+        <strong>Watch for:</strong> model ids are backend-scoped. A valid
+        OpenCode id is still rejected for a Claude Code child.
+      </p>
+    </section>
+
+    <section id="batching">
+      <h2>Batch, don't drip</h2>
+
+      <p>
+        If you have three things to tell one agent, send them together or in
+        quick succession rather than waiting for each to be acted on.
+      </p>
+
+      <p>
+        <strong>Why it works.</strong> All mail waiting for one session is
+        delivered as a <em>single turn</em>. Three messages that arrive together
+        cost one automatic turn instead of three — and the shared autonomy
+        budget is the scarce resource. They are still shown as separate bubbles
+        per sender, so nothing is lost in readability.
+      </p>
+
+      <p>
+        <strong>Watch for:</strong> coalescing is per recipient. Sending to three
+        different agents is three turns no matter how you time it.
+      </p>
+    </section>
+
+    <section id="choosing">
+      <h2>Delegate or sub-agent?</h2>
+
+      <p>
+        Both run work elsewhere. They are not interchangeable, and picking wrong
+        is a common source of frustration.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Use a sub-agent when…</th><th>Delegate when…</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>
+              <ul>
+                <li>The work is a self-contained lookup</li>
+                <li>You want the answer inside this turn</li>
+                <li>Nobody needs to talk to it afterwards</li>
+                <li>It is fine for it to vanish with its parent</li>
+              </ul>
+            </td>
+            <td>
+              <ul>
+                <li>The work is substantial or slow</li>
+                <li>You might want to prompt it yourself</li>
+                <li>It should outlive the turn that started it</li>
+                <li>You want it on a different backend or model</li>
+              </ul>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The deciding question is usually <em>"will anyone need to talk to this
+        later?"</em> A sub-agent cannot be talked to at all, and promoting one
+        afterwards gives you a session with an
+        <a href="sessions.html#keep">empty context</a> — the transcript is
+        readable, but the model has not read it.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-label">Never await long work</div>
+        <p>
+          An awaited delegation's result lives only in memory. If the driver
+          restarts while the child runs, the result is lost — though the child
+          keeps going and its transcript survives. Await quick things; let
+          anything substantial come back as mail.
+        </p>
+      </div>
+    </section>
+
+    <section id="secondopinion">
+      <h2>Ask the other backend</h2>
+
+      <p>
+        Both backends are always available, and a session is permanently bound
+        to the one it was created with. Delegation is the way across.
+      </p>
+
+      <p>
+        For a decision you are unsure about — a design call, a diagnosis, a
+        review — have one session delegate the same question to the other
+        backend and compare. You get an independent read from a fresh context
+        rather than a model agreeing with the conversation it is already in.
+      </p>
+
+      <p>
+        <strong>Watch for:</strong> the child shares the workspace but
+        <em>nothing</em> of the conversation. Point it at files by path and
+        state the question so it stands alone, or you will get an answer to a
+        question it had to guess.
+      </p>
+    </section>
+
+    <section id="context">
+      <h2>Recover your own context</h2>
+
+      <p>
+        An agent can read its <em>own</em> transcript. This is the fix for a long
+        session that has compacted, or one that has lost the thread of something
+        decided hours ago: ask it to search its own history rather than
+        re-explaining.
+      </p>
+
+      <p>
+        <strong>Why it works.</strong> Transcript reading always uses the full
+        history, regardless of what the interface is displaying — the tool exists
+        precisely to recover what rendering may have hidden.
+      </p>
+
+      <p>
+        <strong>Watch for:</strong> it returns the <em>most recent</em> entries by
+        default. If you want the beginning of a conversation, say so explicitly —
+        reading from the first entry is not what it will reach for on its own.
+        Searching for a distinctive phrase usually beats paging.
+      </p>
+
+      <div class="callout good">
+        <div class="callout-label">Also useful for watching a child</div>
+        <p>
+          A parent can read a delegated session's transcript while it works,
+          which is better than awaiting it: progress without blocking.
+        </p>
+      </div>
+    </section>
+
+    <section id="naming">
+      <h2>Name things early</h2>
+
+      <p>
+        A session's <code>@handle</code> comes from its title, and the title
+        starts as whatever the backend guessed. Renaming a session you intend to
+        keep gives it an address other agents can actually use — and your own
+        instructions can name.
+      </p>
+
+      <p>
+        <strong>Why it is safe to rename later.</strong> Every name a session has
+        answered to keeps resolving for as long as it exists, and can never be
+        taken by a different session. So a rename mid-task strands nothing, and a
+        genuinely dead handle fails loudly rather than delivering to the wrong
+        agent.
+      </p>
+
+      <p>
+        For a long-lived coordinator session, set the handle explicitly. A
+        pinned handle never moves again whatever the title does, which is what
+        you want for something referenced in standing instructions.
+      </p>
+    </section>
+
+    <section id="triage">
+      <h2>Nothing is happening</h2>
+
+      <p>
+        The most common confusing state, and almost always one of these. In
+        rough order of likelihood:
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Check</th><th>What you would see</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Is autonomy paused?</strong></td>
+            <td>The strip under the header is visible. The shared budget is spent — or an unattended window lapsed, which parks everything at once. Allow more, or lift it.</td>
+          </tr>
+          <tr>
+            <td><strong>Is mail waiting on you?</strong></td>
+            <td>A count and a Deliver button in the strip. An agent reporting its message was "queued because the recipient is busy" may actually be waiting on your approval — the receipt cannot tell the two apart.</td>
+          </tr>
+          <tr>
+            <td><strong>Is something blocked in another session?</strong></td>
+            <td>The <em>N waiting</em> counter in the header covers <em>all</em> sessions. Click it to jump to the oldest one. A whole family can be stalled behind one unanswered question.</td>
+          </tr>
+          <tr>
+            <td><strong>Is the child actually there?</strong></td>
+            <td>Families are collapsed by default. A parent that delegated work looks childless until you open the twisty.</td>
+          </tr>
+          <tr>
+            <td><strong>Is a session flapping?</strong></td>
+            <td>Automatic retries spend the same shared budget as real work. One session failing in a loop can quietly consume the allowance for everything else. Look for a session on attempt 2 or 3.</td>
+          </tr>
+          <tr>
+            <td><strong>Is it waiting out a limit?</strong></td>
+            <td>A parent's delegation bubble says so, with an estimate. This resolves itself — except for a billing block, which never retries and needs you.</td>
+          </tr>
+          <tr>
+            <td><strong>Did it give up?</strong></td>
+            <td><em>Failed — retries exhausted</em> after three attempts. Continue it yourself, or message it asking it to resume.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <div class="callout-label">Two things that are never the cause</div>
+        <p>
+          <strong>Watching a session does not refill the budget</strong> —
+          spectating is not directing, and no amount of looking at it will start
+          work. And <strong>Stop does not release held mail</strong>, so stopping
+          something to "clear" a jam will not unblock the queue; approving or
+          continuing will.
+        </p>
+      </div>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="unattended.html">
+        <span class="dir">Previous</span>
+        ← Running unattended
+      </a>
+      <a class="to-next" href="reference.html">
+        <span class="dir">Next</span>
+        Reference →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Start here</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html" aria-current="page">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#what">What it is</a>
+      <a class="nav-link sub" href="#concepts">The five ideas</a>
+      <a class="nav-link sub" href="#quickstart">Quickstart</a>
+      <a class="nav-link sub" href="#next">Where to go next</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Start here</div>
+      <h1>PodPrompt</h1>
+      <p class="subtitle">
+        Run AI coding agents in a container and work with them in your browser —
+        several at once, on two different backends, in different projects. The
+        agents can message each other, hand each other work, and keep going
+        while you are away.
+      </p>
+    </header>
+
+    <section id="what">
+      <h2>What it is</h2>
+
+      <p>
+        PodPrompt gives you a browser window instead of a terminal. Inside a
+        Docker container it runs coding agents — <strong>Claude Code</strong> or
+        <strong>OpenCode</strong>, your choice, and both at the same time if you
+        like — and streams everything they do to a web interface: their text,
+        their thinking, every tool call, every file diff, every permission
+        request.
+      </p>
+
+      <p>
+        The part that makes it unusual is that a session is not a dead end. Any
+        session can list the others, send one a message, spawn a brand-new
+        session to go do something, and read another session's transcript. You
+        get a workspace of cooperating agents rather than one chat window.
+      </p>
+
+      <p>
+        Because that could obviously run away from you, the amount of work
+        agents may do without your input is capped, and messages between them
+        can be held for your approval. You decide how much rope to give.
+      </p>
+
+      <div class="code-block">
+<pre>                    your browser
+                         │
+               ┌─────────┴─────────┐
+               │   PodPrompt UI    │   one window, every session
+               └─────────┬─────────┘
+                         │
+   ╔═════════════════════╪═════════════════════╗
+   ║   container         │                     ║
+   ║            ┌────────┴────────┐            ║
+   ║            │     driver      │            ║
+   ║            └───┬─────────┬───┘            ║
+   ║                │         │                ║
+   ║        ┌───────┴──┐   ┌──┴───────┐        ║
+   ║        │  Claude  │   │ OpenCode │        ║
+   ║        │   Code   │   │          │        ║
+   ║        └───┬──────┘   └──────┬───┘        ║
+   ║            │                 │            ║
+   ║      @session-a ◀── mail ──▶ @session-b   ║
+   ║            │                 │            ║
+   ║       sub-agents        delegated         ║
+   ║                          sessions         ║
+   ╚═══════════════════════════════════════════╝</pre>
+      </div>
+    </section>
+
+    <section id="concepts">
+      <h2>The five ideas</h2>
+
+      <p>
+        Everything else in these docs is a detail of one of these. Read them
+        once and the rest of the interface explains itself.
+      </p>
+
+      <div class="concept-grid">
+        <div class="concept">
+          <div class="concept-name">session</div>
+          <p>
+            The unit of everything. A conversation with one agent, running on
+            one backend with one model, in one directory. Sessions run
+            concurrently and independently.
+          </p>
+        </div>
+        <div class="concept">
+          <div class="concept-name">backend</div>
+          <p>
+            Claude Code or OpenCode. Both appear in the same interface and are
+            driven the same way, but they are not at feature parity — the docs
+            flag each difference where you would hit it.
+          </p>
+        </div>
+        <div class="concept">
+          <div class="concept-name">@handle</div>
+          <p>
+            A session's address. How agents refer to each other. Follows a
+            rename you make, and an old handle keeps resolving forever so
+            nothing breaks mid-task.
+          </p>
+        </div>
+        <div class="concept">
+          <div class="concept-name">mail</div>
+          <p>
+            A message from one session to another. Delivered as a turn in the
+            recipient. Sometimes held — for you to approve, or because the
+            system is paused.
+          </p>
+        </div>
+        <div class="concept">
+          <div class="concept-name">autonomy</div>
+          <p>
+            One global budget of automatic turns, shared by every session.
+            Spend it and everything parks until you say otherwise. Your input
+            refills it.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout info">
+        <div class="callout-label">Two kinds of child, and the difference matters</div>
+        <p>
+          An agent can produce two different things that both look like
+          "another session". A <strong>delegated session</strong> is a real
+          session: it has a handle, you can open it, prompt it, and it outlives
+          its parent. A <strong>sub-agent</strong> is the backend's own
+          mechanism, lives inside its parent's turn, and appears in a roster
+          rather than the session list — you can read it, but not talk to it.
+        </p>
+        <p>
+          <a href="sessions.html#subagents">Many sessions</a> covers both.
+        </p>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <h2>Quickstart</h2>
+
+      <p>
+        Set up once, then run it from whichever project you want to work on.
+        Assumes Docker and a Claude subscription or API key.
+        <a href="install.html">Install &amp; launch</a> has the prerequisites,
+        the credential options, and what each flag does.
+      </p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">once — put the command on your PATH</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>export PATH="/path/to/podprompt/bin:$PATH"</pre>
+      </div>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">once — build the image and install the viewer app</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --build
+podprompt --deploy-viewer</pre>
+      </div>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">whenever you want to work on something</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>cd ~/some/project
+podprompt</pre>
+      </div>
+
+      <p>
+        That opens <code>http://localhost:7843</code> in your browser. The
+        viewer is the default interface — there is no terminal UI unless you
+        ask for one. Both ports bind to <code>127.0.0.1</code> only, so nothing
+        is exposed to your network.
+      </p>
+
+      <p>
+        <strong>The directory you run it from becomes the workspace</strong>,
+        mounted at <code>/workspace</code> for the agents to work in. That is
+        how you choose a project — there is no project flag.
+      </p>
+    </section>
+
+    <section id="next">
+      <h2>Where to go next</h2>
+
+      <table class="option-table">
+        <tbody>
+          <tr>
+            <td class="plain"><a href="install.html">Install &amp; launch</a></td>
+            <td>Prerequisites, building, credentials, and getting to a working window.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="tour.html">The interface</a></td>
+            <td>What everything on screen is: the header instruments, every kind of bubble, every setting and its default.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="sessions.html">Many sessions</a></td>
+            <td>Running several at once, across projects. Sub-agents, the roster, and what each Stop actually stops.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="messaging.html">Sessions talking</a></td>
+            <td>Handles, the tools your agents have, and why a message sometimes waits.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="delegation.html">Delegating work</a></td>
+            <td>Handing a job to a fresh session on any backend and model, and collecting the result.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="unattended.html">Running unattended</a></td>
+            <td>Setting a budget or a time window, and what happens when a provider limit or a stall interrupts things.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="playbook.html">Playbook</a></td>
+            <td>Patterns that get real leverage out of all of the above.</td>
+          </tr>
+          <tr>
+            <td class="plain"><a href="reference.html">Reference</a></td>
+            <td>Every flag, every environment variable, state paths, ports, and the backend parity table.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <span></span>
+      <a class="to-next" href="install.html">
+        <span class="dir">Next</span>
+        Install &amp; launch →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

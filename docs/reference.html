@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html">The interface</a>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html" aria-current="page">Reference</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#options">Command-line options</a>
+      <a class="nav-link sub" href="#env">Environment variables</a>
+      <a class="nav-link sub" href="#ports">Ports &amp; binding</a>
+      <a class="nav-link sub" href="#state">Where state lives</a>
+      <a class="nav-link sub" href="#backend">How a backend is chosen</a>
+      <a class="nav-link sub" href="#parity">Backend parity</a>
+      <a class="nav-link sub" href="#numbers">Every default</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Going further</div>
+      <h1>Reference</h1>
+      <p class="subtitle">
+        Every flag, every variable, every path, and a single table of every
+        numeric default in the system.
+      </p>
+    </header>
+
+    <section id="options">
+      <h2>Command-line options</h2>
+
+      <h3>Interface</h3>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>--viewer</td><td>Browser interface with the bidirectional driver. <strong>The default</strong> — you do not need to pass it. Both backends are available per session.</td></tr>
+          <tr><td>--claude<br>--claude-code</td><td>A Claude Code terminal session instead, with no browser.</td></tr>
+          <tr><td>--opencode</td><td>An OpenCode terminal session instead.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        These are mutually exclusive. Combining two, or combining an explicit
+        <code>--viewer</code> with a terminal backend, is a hard error.
+      </p>
+
+      <h3>Provider <span class="badge badge--claude">configures Claude Code</span></h3>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>--direct</td><td>Claude subscription via OAuth, reading credentials from the mounted <code>~/.claude</code>. <strong>The default.</strong> Needs a one-time terminal sign-in first.</td></tr>
+          <tr><td>--direct-api</td><td>Anthropic API key from <code>ANTHROPIC_API_KEY</code>, billed per token. No interactive login. <strong>Rejected with <code>--opencode</code>.</strong></td></tr>
+          <tr><td>--litellm</td><td>Route through a LiteLLM proxy. Requires <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. Runs a model picker unless the interface is <code>--opencode</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · These are not actually enforced as exclusive</div>
+        <p>
+          The usage text calls them mutually exclusive, but passing several does
+          not error — <strong>the last one silently wins</strong>. Pass exactly
+          one.
+        </p>
+      </div>
+
+      <h3>Networking</h3>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>--viewer-port PORT</td><td>Port for the page and its event stream. Default <span class="default">7843</span>.</td></tr>
+          <tr><td>--viewer-driver-port PORT</td><td>Port for the driver's control plane, which the page posts to. Default <span class="default">7844</span>.</td></tr>
+          <tr><td>--opencode-port PORT</td><td>Port the OpenCode server listens on inside the container. Default <span class="default">7845</span>. Never published outside.</td></tr>
+          <tr><td>--host-network</td><td>Share the host's network namespace; stop publishing ports and bind to loopback instead. For reaching host services that listen only on <code>127.0.0.1</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout danger">
+        <div class="callout-label">Do not set the viewer port to 7844</div>
+        <p>
+          That is the driver's default port. Setting both to the same value
+          makes the launcher publish it twice and the two services collide.
+        </p>
+      </div>
+
+      <h3>Utility</h3>
+
+      <table class="option-table">
+        <tbody>
+          <tr><td>--build</td><td>Build the <code>podprompt</code> Docker image from the checkout and exit. Works from any directory. Re-run after a <code>Dockerfile</code> or dependency change.</td></tr>
+          <tr><td>--deploy-viewer</td><td>Copy the viewer app to <code>~/.local/share/podprompt/viewer/</code> and exit. Required before first use of the default interface. Works from any directory.</td></tr>
+          <tr><td>--list-models</td><td>Print the model ids your LiteLLM proxy offers, and exit. Needs <code>LITELLM_API_KEY</code>.</td></tr>
+          <tr><td>--help, -h</td><td>Print usage and exit.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <div class="callout-label">These three find the checkout themselves</div>
+        <p>
+          <code>--build</code> and <code>--deploy-viewer</code> resolve the
+          checkout from the command's own location, following symlinks. You
+          never need to <code>cd</code> back to it.
+        </p>
+      </div>
+
+      <h3>Pass-through</h3>
+
+      <p>
+        Anything the launcher does not recognise is appended to the underlying
+        agent command — so <code>--dangerously-skip-permissions</code>,
+        <code>--print</code> or <code>--agent</code> reach Claude Code, and
+        <code>--continue</code> or <code>--model PROVIDER/MODEL</code> reach
+        OpenCode. In the default browser mode there is no terminal agent to
+        receive them, so they are reported and ignored.
+      </p>
+    </section>
+
+    <section id="env">
+      <h2>Environment variables</h2>
+
+      <h3>Ones you set</h3>
+
+      <p>
+        Three, all optional depending on provider. The default subscription mode
+        needs none of them. Put real values outside the repository —
+        conventionally <code>~/.podprompt.env</code>;
+        <code>podprompt.env.template</code> shows the shape.
+      </p>
+
+      <ul class="env-list">
+        <li>
+          <span class="env-name">ANTHROPIC_API_KEY</span>
+          <span class="env-desc">Required by <code>--direct-api</code>. Note that the template ships a literal placeholder, which counts as "set".</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_URL</span>
+          <span class="env-desc">Required by <code>--litellm</code> and <code>--list-models</code>. Defaults to the literal placeholder <code>&lt;MY-LITELLM-URL&gt;</code>.</span>
+        </li>
+        <li>
+          <span class="env-name">LITELLM_API_KEY</span>
+          <span class="env-desc">Required by <code>--litellm</code> and <code>--list-models</code>.</span>
+        </li>
+      </ul>
+
+      <div class="callout info">
+        <div class="callout-label">Ports are flags, not variables</div>
+        <p>
+          Setting <code>VIEWER_PORT</code> and friends in your shell has no
+          effect — the launcher assigns them itself. Use the flags.
+        </p>
+      </div>
+
+      <h3>Ones that affect behaviour inside the container</h3>
+
+      <ul class="env-list">
+        <li>
+          <span class="env-name">PODPROMPT_YES</span>
+          <span class="env-desc">Unset by default. Set to <code>1</code> to skip the confirmation prompt shown when the working directory is your home directory or an ancestor of it.</span>
+        </li>
+        <li>
+          <span class="env-name">PODPROMPT_PERM_HOOK</span>
+          <span class="env-desc">Defaults to <code>on</code>. Set to <code>off</code> to disable the hook that attributes a permission request to the sub-agent that raised it.</span>
+        </li>
+        <li>
+          <span class="env-name">OPENCODE_DEBUG</span>
+          <span class="env-desc">Unset by default. Turns on extra OpenCode backend logging.</span>
+        </li>
+      </ul>
+
+      <p>
+        The launcher also injects a set of variables the container needs —
+        <code>HOME</code>, <code>CLAUDE_CONFIG_DIR</code>, the three ports, the
+        bind address, the host workspace path, and the relevant
+        <code>ANTHROPIC_*</code> values for your chosen provider. You do not set
+        these; they are derived.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">One LiteLLM side effect worth knowing</div>
+        <p>
+          In LiteLLM mode, non-essential model calls are switched off
+          unconditionally — including when you have picked a small, fast model
+          for them. Telemetry and experimental betas are switched off too.
+        </p>
+      </div>
+    </section>
+
+    <section id="ports">
+      <h2>Ports &amp; binding</h2>
+
+      <table class="data-table">
+        <thead><tr><th>Service</th><th>Port</th><th>Reachable from the host?</th></tr></thead>
+        <tbody>
+          <tr><td>Page &amp; event stream</td><td><span class="default">7843</span></td><td>Yes, on <code>127.0.0.1</code> only</td></tr>
+          <tr><td>Driver control plane</td><td><span class="default">7844</span></td><td>Yes, on <code>127.0.0.1</code> only</td></tr>
+          <tr><td>OpenCode server</td><td><span class="default">7845</span></td><td><strong>Never</strong> — loopback inside the container</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        Your browser loads the page from the first port, asks it where the
+        driver is, and then talks to the driver directly. Nothing is bound to a
+        routable interface in either networking mode.
+      </p>
+
+      <p>
+        Before launching, the launcher will clear a stale PodPrompt process off
+        the viewer port — but only one it recognises as its own. An unrelated
+        process is left alone and the launch aborts instead, telling you to pick
+        a different port.
+      </p>
+    </section>
+
+    <section id="state">
+      <h2>Where state lives</h2>
+
+      <p>
+        <strong>The container is recreated on every launch.</strong> Everything
+        that persists does so because it is mounted from your machine.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>On your machine</th><th>Holds</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>~/.claude/</code></td>
+            <td>Claude Code credentials, settings, session history, per-project trust. Shared with a native <code>claude</code> install. Always mounted.</td>
+          </tr>
+          <tr>
+            <td>the directory you launch from</td>
+            <td>Mounted at <code>/workspace</code> and used as the working directory. This is the project the agents act on.</td>
+          </tr>
+          <tr>
+            <td><code>~/.config/opencode/</code><br><code>~/.local/share/opencode/</code><br><code>~/.local/state/opencode/</code><br><code>~/.cache/opencode/</code></td>
+            <td>OpenCode's own config, credentials, sessions, state and cache — plus the plugin that gives OpenCode sessions their messaging tools.</td>
+          </tr>
+          <tr>
+            <td><code>~/.local/share/podprompt/viewer/</code></td>
+            <td>The deployed viewer app. Replaced by <code>--deploy-viewer</code>. Its dependencies are <em>not</em> here — they are baked into the image.</td>
+          </tr>
+          <tr>
+            <td><code>~/.local/state/podprompt/</code></td>
+            <td>PodPrompt's own bookkeeping: the session tree, per-session preferences and model picks, pending approvals, autonomy policy, turn state, peers and the mail inbox.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        Anything outside those paths is ephemeral. Rebuilding the image replaces
+        the baked dependencies but touches none of your state.
+      </p>
+    </section>
+
+    <section id="backend">
+      <h2>How a backend is chosen</h2>
+
+      <p>
+        A session's backend is fixed for its lifetime. It is resolved in this
+        order, first match winning:
+      </p>
+
+      <ol>
+        <li>Whatever the driver already knows, for a session it has handled this run.</li>
+        <li>An explicit choice from the caller — which is what <strong>+ New chat</strong> always provides.</li>
+        <li>The stored relationship record, for a child or delegated session.</li>
+        <li>What the backends themselves report when their sessions are listed.</li>
+        <li>Failing all of that, the last backend you deliberately chose for a new chat, and failing even that, Claude Code.</li>
+      </ol>
+
+      <div class="callout info">
+        <div class="callout-label">--claude and --opencode do not set a viewer default</div>
+        <p>
+          They are terminal launch modes. They do not influence which backend a
+          browser session uses — that comes from the picker.
+        </p>
+      </div>
+    </section>
+
+    <section id="parity">
+      <h2>Backend parity</h2>
+
+      <p>
+        Both backends appear in the same interface and are driven the same way,
+        but they are not identical. Everything that differs:
+      </p>
+
+      <table class="data-table wide">
+        <thead><tr><th>Capability</th><th>Claude Code</th><th>OpenCode</th></tr></thead>
+        <tbody>
+          <tr><td>Model selection</td><td>Yes</td><td>Yes, switchable live</td></tr>
+          <tr><td>Agent / mode selection</td><td>—</td><td>Yes, switchable live</td></tr>
+          <tr><td>Load full history setting</td><td>Yes</td><td>Not needed — always loads everything</td></tr>
+          <tr><td>“Always allow” on a permission card</td><td>Yes</td><td>—</td></tr>
+          <tr><td>Sub-agents in the roster</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Stop one sub-agent</td><td>Yes</td><td>—</td></tr>
+          <tr><td>Live status in a delegation bubble</td><td>Yes</td><td>— use the nested session row</td></tr>
+          <tr><td>Messaging tool names</td><td><code>mcp__podprompt__*</code></td><td>bare names, via a plugin</td></tr>
+          <tr><td>Permission prompts</td><td>Raised by the runtime</td><td>Raised by the tools themselves</td></tr>
+          <tr><td>Provider flags apply</td><td>Yes</td><td>— manages its own credentials</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · OpenCode's tools depend on the plugin being deployed</div>
+        <p>
+          OpenCode sessions get their messaging tools from a plugin that
+          PodPrompt installs and points at the driver. A plain <code>opencode</code>
+          run elsewhere on your machine is unaffected — the plugin is inert
+          without the driver — and a hand-copied viewer that omits it leaves
+          OpenCode sessions unable to message anyone.
+        </p>
+      </div>
+    </section>
+
+    <section id="numbers">
+      <h2>Every default</h2>
+
+      <p>Every number in the system, in one place.</p>
+
+      <h3>Messaging &amp; delegation</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Thing</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Sessions listed by default / maximum</td><td><span class="default">20 / 200</span></td></tr>
+          <tr><td>Transcript entries read by default / maximum</td><td><span class="default">10 / 25</span></td></tr>
+          <tr><td>Each entry truncated at</td><td><span class="default">1,500 chars</span></td></tr>
+          <tr><td>Held-mail grace period while you are watching</td><td><span class="default">120 s</span></td></tr>
+          <tr><td>How often held mail is re-checked</td><td><span class="default">every 15 s</span></td></tr>
+          <tr><td>Auto-delivery default</td><td><span class="default">on for delegated sessions, off otherwise</span></td></tr>
+          <tr><td>Delegation waits for its result</td><td><span class="default">no — async by default</span></td></tr>
+          <tr><td>Closed mail kept</td><td><span class="default">2,000 entries</span></td></tr>
+          <tr><td>Longest handle</td><td><span class="default">32 chars</span></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Autonomy &amp; limits</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Thing</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Automatic turns before everything pauses</td><td><span class="default">20</span></td></tr>
+          <tr><td>Messages plus delegations allowed in one turn</td><td><span class="default">8</span></td></tr>
+          <tr><td>How deep sessions may spawn sessions</td><td><span class="default">6 levels</span></td></tr>
+          <tr><td>Automatic resume attempts before giving up</td><td><span class="default">3</span></td></tr>
+          <tr><td>How often stalled turns are swept for</td><td><span class="default">every 60 s</span></td></tr>
+          <tr><td>Silence before an OpenCode turn is probed</td><td><span class="default">5 min</span>, polled every <span class="default">30 s</span></td></tr>
+          <tr><td>Retry waits, quick failures</td><td><span class="default">1, 5, 15 min</span></td></tr>
+          <tr><td>Retry waits, rate limits</td><td><span class="default">5, 15, 60 min</span></td></tr>
+          <tr><td>Padding added past a stated reset time</td><td><span class="default">45 s</span>, plus up to <span class="default">20 s</span> of spread</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Interface</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Thing</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Body text / labels / status text</td><td><span class="default">15px / 11px / 12px</span></td></tr>
+          <tr><td>Conversation column width</td><td><span class="default">860px</span></td></tr>
+          <tr><td>Theme</td><td><span class="default">dark</span></td></tr>
+          <tr><td>Thinking blocks / tool calls</td><td><span class="default">collapsed / shown</span></td></tr>
+          <tr><td>Timestamps</td><td><span class="default">time only, 12-hour, no zone</span></td></tr>
+          <tr><td>Notifications / sound</td><td><span class="default">off / off</span></td></tr>
+          <tr><td>Load full history</td><td><span class="default">off</span></td></tr>
+          <tr><td>Context bar turns amber / red</td><td><span class="default">70% / 90%</span></td></tr>
+          <tr><td>Plan usage turns red</td><td><span class="default">70%</span></td></tr>
+          <tr><td>Tool output before it scrolls</td><td><span class="default">400px</span></td></tr>
+          <tr><td>Counts as "scrolled to the bottom" within</td><td><span class="default">40px</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="playbook.html">
+        <span class="dir">Previous</span>
+        ← Playbook
+      </a>
+      <span></span>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

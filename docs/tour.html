@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PodPrompt — The interface</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="sidebar-brand">
+      <div class="product"><a href="index.html">podprompt</a></div>
+      <div class="tagline">Documentation</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Getting started</div>
+      <a class="nav-link" href="index.html">Start here</a>
+      <a class="nav-link" href="install.html">Install &amp; launch</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Using it</div>
+      <a class="nav-link" href="tour.html" aria-current="page">The interface</a>
+    </div>
+
+    <div class="nav-group toc">
+      <div class="nav-group-label">On this page</div>
+      <a class="nav-link sub" href="#layout">The window</a>
+      <a class="nav-link sub" href="#header">Header instruments</a>
+      <a class="nav-link sub" href="#feed">Bubbles</a>
+      <a class="nav-link sub" href="#composer">The composer</a>
+      <a class="nav-link sub" href="#approvals">Approvals &amp; questions</a>
+      <a class="nav-link sub" href="#settings">Every setting</a>
+      <a class="nav-link sub" href="#attention">Getting your attention</a>
+      <a class="nav-link sub" href="#hidden">Easy to miss</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">&nbsp;</div>
+      <a class="nav-link" href="sessions.html">Many sessions</a>
+      <a class="nav-link" href="messaging.html">Sessions talking</a>
+      <a class="nav-link" href="delegation.html">Delegating work</a>
+      <a class="nav-link" href="unattended.html">Running unattended</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Going further</div>
+      <a class="nav-link" href="playbook.html">Playbook</a>
+      <a class="nav-link" href="reference.html">Reference</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <header class="page-header">
+      <div class="eyebrow">Using it</div>
+      <h1>The interface</h1>
+      <p class="subtitle">
+        A guided read of everything on screen: the instruments in the header,
+        the nine kinds of bubble, the controls above the composer, and every
+        setting with the value it ships with.
+      </p>
+    </header>
+
+    <section id="layout">
+      <h2>The window</h2>
+
+      <p>
+        One scrolling column of full-width cards, with fixed furniture above
+        and below it. Three panels slide in over the top when you open them,
+        and a strip appears under the header only when something needs saying.
+      </p>
+
+      <div class="code-block">
+<pre>┌──────────────────────────────────────────────────────────────┐
+│ ☰  ● PodPrompt [backend]   ▆▆▆░ 62%   plan 42%   ● live      │
+│                            ↳3   2 waiting   ⬇   ⚙            │  header
+├──────────────────────────────────────────────────────────────┤
+│ paused / parked-mail strip — hidden in normal operation       │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ↓ Jump to latest message        ← always the first item     │
+│                                                              │
+│   ┌────────────────────────────────────────────────┐         │
+│   │ You                                     14:02  │         │
+│   ├────────────────────────────────────────────────┤         │
+│   │ Model · claude-opus-5                   14:02  │   feed  │
+│   ├────────────────────────────────────────────────┤         │
+│   │ Thinking                           (collapsed) │         │
+│   ├────────────────────────────────────────────────┤         │
+│   │ Tool · Bash                                    │         │
+│   └────────────────────────────────────────────────┘         │
+│                                                              │
+│                                      ┌─────────────────┐     │
+│                                      │ ↓ new messages  │     │
+├──────────────────────────────────────┴─────────────────┴─────┤
+│ Running `Bash`… (12s)     [model ▾] [mode ▾] ☐Auto-approve   │  status
+├──────────────────────────────────────────────────────────────┤
+│ /  Message Claude Code…                            [ Send ]  │  composer
+└──────────────────────────────────────────────────────────────┘
+
+   ☰ → sessions panel (left, 280px)
+   ⚙ → settings panel (right, 690px, three columns)
+   ↳ → roster panel  (right, 340px)</pre>
+      </div>
+
+      <p>
+        The content column is 860px wide by default and the body text is 15px;
+        both are sliders in settings, along with the theme. Everything in the
+        feed is full width — <strong>speakers are not left/right aligned.</strong>
+        Who is talking is carried by the label, its colour, and a faint tint on
+        the body.
+      </p>
+    </section>
+
+    <section id="header">
+      <h2>Header instruments</h2>
+
+      <p>Left to right. Several are hidden until they have something to report.</p>
+
+      <table class="option-table">
+        <thead>
+          <tr><th>Control</th><th>What it tells you</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>☰</td>
+            <td>Opens the sessions panel. See <a href="sessions.html">Many sessions</a>.</td>
+          </tr>
+          <tr>
+            <td>logo dot</td>
+            <td>Coloured per backend — one accent for Claude Code, another for OpenCode — and generic until the backend is known.</td>
+          </tr>
+          <tr>
+            <td>backend badge</td>
+            <td>Reads <code>Claude Code</code> or <code>OpenCode</code>. Hidden until resolved.</td>
+          </tr>
+          <tr>
+            <td>context bar</td>
+            <td>How full this session's context window is. Green under 70%, amber 70–89%, red at 90% and over, and it pulses while the session is compacting. Hover for exact tokens, the maximum, and the model. Appears once the first reading arrives and resets when you switch sessions.</td>
+          </tr>
+          <tr>
+            <td>plan usage</td>
+            <td>Subscription allowance, e.g. <code>42% · resets 2:20 PM</code>. Turns red at 70% and over. Only appears on a subscription that reports a five-hour or seven-day window.</td>
+          </tr>
+          <tr>
+            <td>status</td>
+            <td>Dot and label for the connection: <code>connecting…</code>, live, or an error.</td>
+          </tr>
+          <tr>
+            <td>↳ <em>N</em></td>
+            <td>How many sub-agents this session has. Opens the roster.</td>
+          </tr>
+          <tr>
+            <td><em>N</em> waiting</td>
+            <td>Outstanding approvals and questions <strong>across every session</strong>, not just this one — the tooltip says how many are elsewhere. Clicking jumps to the oldest one, switching session first if it lives somewhere else.</td>
+          </tr>
+          <tr>
+            <td>⬇</td>
+            <td>Downloads the conversation as <code>conversation.md</code>.</td>
+          </tr>
+          <tr>
+            <td>⚙</td>
+            <td>Opens settings.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <div class="callout-label">Two bars, two colour schemes</div>
+        <p>
+          The context bar has a green/amber/red progression. Plan usage has no
+          middle tier — it is normal, then red at 70%. If you are reading them
+          at a glance, they do not mean the same thing by the same colour.
+        </p>
+      </div>
+    </section>
+
+    <section id="feed">
+      <h2>Bubbles</h2>
+
+      <p>
+        Nine kinds. Each is a card with a coloured label; the label tells you
+        who or what produced it.
+      </p>
+
+      <table class="option-table">
+        <thead>
+          <tr><th>Bubble</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="plain"><strong>You</strong></td>
+            <td>Something you typed. Rendered as Markdown.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Model</strong></td>
+            <td>The agent's reply, streamed token by token. Full Markdown: tables, blockquotes, syntax-highlighted code with a copy button per block, and maths. Hovering reveals a copy button for the whole message.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Thinking</strong></td>
+            <td>The model's reasoning, in subdued italics, streamed in place. <span class="default">Collapsed</span> by default; can be shown or hidden entirely.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Tool</strong></td>
+            <td>A tool call and its result, with the tool's name in the label. Never rendered as Markdown — it is shown literally — though diffs and code inside it are highlighted. <span class="default">Shown</span> by default, capped at 400px and scrollable.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Agent</strong></td>
+            <td>A sub-agent this session started. Carries the task title, a live status line, and a link into that sub-agent's own transcript.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Peer</strong></td>
+            <td>Mail that arrived from another session. Collapsed to a single line with a <code>▸</code> toggle, and the label links to the sender. A batch of mail is split so each sender gets its own bubble.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Delegation</strong></td>
+            <td>A session this one spawned, with live status. <span class="badge badge--differs">OpenCode differs</span> — no live status there; read the nested session row instead.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Resume</strong></td>
+            <td>A dimmed, bodyless marker showing this turn was started automatically rather than by you. See <a href="unattended.html">Running unattended</a>.</td>
+          </tr>
+          <tr>
+            <td class="plain"><strong>Approval</strong></td>
+            <td>An interactive permission or question card. <a href="#approvals">Below.</a></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        Model names appear on Model bubbles only, unless you switch that to
+        every bubble. Timestamps show the time only by default, and changing
+        the format updates timestamps already on screen rather than only new
+        ones.
+      </p>
+    </section>
+
+    <section id="composer">
+      <h2>The composer</h2>
+
+      <p>
+        <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a
+        newline. The <code>/</code> button opens the slash-command palette. While
+        a turn is running, Send becomes a red Stop and the box is disabled; the
+        placeholder tells you what it is waiting for — your answer, your
+        approval, an unavailable model, or a backend reconnecting.
+      </p>
+
+      <p>The row above it carries the live turn indicator on the left, and four controls on the right:</p>
+
+      <table class="option-table">
+        <thead>
+          <tr><th>Control</th><th>What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>model</td>
+            <td>Which model this session uses. Hidden until the list loads, or entirely if the backend has no such concept.</td>
+          </tr>
+          <tr>
+            <td>mode</td>
+            <td>The agent or mode. <span class="badge badge--opencode">OpenCode</span> can switch these live.</td>
+          </tr>
+          <tr>
+            <td>Auto-approve</td>
+            <td>Stops asking permission for tool calls in this session. Asks for confirmation when you switch it on, and goes bold amber while active.</td>
+          </tr>
+          <tr>
+            <td>Auto-deliver</td>
+            <td>Lets mail arrive without waiting for your approval while you are watching. On by default for delegated sessions, off for everything else. See <a href="messaging.html">Sessions talking</a>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Auto-approve does not survive a restart</div>
+        <p>
+          It is deliberately held in memory only. If the driver restarts, every
+          session reverts to asking. Do not rely on it as the thing that keeps
+          an overnight run unattended — use <strong>Always allow</strong> on the
+          cards themselves, which the backend remembers.
+        </p>
+      </div>
+
+      <p>
+        The turn indicator reads <code>Thinking…</code>, then
+        <code>Thinking… (1,204 tokens)</code>, then
+        <code>Running `Bash`… (12s)</code> with a ticking elapsed time once a
+        tool is in flight.
+      </p>
+    </section>
+
+    <section id="approvals">
+      <h2>Approvals &amp; questions</h2>
+
+      <p>
+        These appear as cards inline in the conversation, where the request
+        happened — not as a modal that interrupts you. The counter in the
+        header tracks them across all sessions so one waiting in a session you
+        are not looking at cannot go unnoticed.
+      </p>
+
+      <h3>Permission cards</h3>
+
+      <table class="option-table">
+        <thead><tr><th>Button</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Allow</td><td>Permits this one call.</td></tr>
+          <tr><td>Always allow</td><td>Widens the backend's own rules so calls like this stop asking in this session. <span class="badge badge--differs">Backend-dependent</span> — the button only exists if the backend can do it.</td></tr>
+          <tr><td>Deny</td><td>Refuses the call. The agent is told and carries on.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        <strong>Always allow</strong> is the middle ground worth knowing about:
+        narrower than Auto-approve, and unlike Auto-approve it persists. If a
+        sub-agent raised the request but its card could not be filed in its own
+        session, the card says so.
+      </p>
+
+      <h3>Question cards</h3>
+
+      <p>
+        When an agent asks you something directly, you get one block per
+        question with fixed options as buttons, and option descriptions on
+        hover. Some questions accept several answers; others replace your
+        previous pick. <strong>Other…</strong> is always available and opens a
+        free-text box — replacing the fixed choices on a single-answer question,
+        adding to them on a multi-answer one. Submit stays disabled until every
+        question has an answer.
+      </p>
+
+      <p>
+        Once answered, a card is replaced by what you chose:
+        <code>Allowed</code>, <code>Always allowed</code>, <code>Denied</code>,
+        or <code>Answered: …</code>. That resolution is stored by the driver, so
+        it survives a reload and shows the same thing in a second tab.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">If the driver restarts mid-request</div>
+        <p>
+          Anything still waiting is reported in the transcript as abandoned,
+          rather than quietly reappearing as though it were still live. A card
+          whose request has since died is retracted on its own.
+        </p>
+      </div>
+    </section>
+
+    <section id="settings">
+      <h2>Every setting</h2>
+
+      <p>
+        Three columns: <strong>Display</strong>, then a middle column of
+        session, timestamp, usage, notification and history options, then
+        <strong>Autonomy</strong>. Everything except autonomy and history is
+        stored in your browser and applies the moment you change it.
+      </p>
+
+      <h3>Display</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Font size</td><td><span class="default">15px</span></td><td>Body text. Range 8–40.</td></tr>
+          <tr><td>Content width</td><td><span class="default">860px</span></td><td>Width of the conversation column. Range 360–2600.</td></tr>
+          <tr><td>Label size</td><td><span class="default">11px</span></td><td>The <code>You</code> / <code>Model</code> / <code>Tool</code> labels.</td></tr>
+          <tr><td>Status text size</td><td><span class="default">12px</span></td><td>Turn indicator and the controls beside it.</td></tr>
+          <tr><td>Light theme</td><td><span class="default">off</span></td><td>Swaps to the light palette.</td></tr>
+          <tr><td>Auto-scroll animation</td><td><span class="default">Smooth</span></td><td>Smooth or instant scrolling to new content.</td></tr>
+          <tr><td>Sessions sort order</td><td><span class="default">Created time</span></td><td>Or last modified.</td></tr>
+          <tr><td>Show model name on</td><td><span class="default">Model bubbles only</span></td><td>Or every bubble.</td></tr>
+          <tr><td>Thinking blocks</td><td><span class="default">Collapsed</span></td><td>Collapsed, shown, or hidden.</td></tr>
+          <tr><td>Tool calls</td><td><span class="default">Show</span></td><td>Shown, collapsed, or hidden.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Sessions, timestamps, usage</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Layout</td><td><span class="default">Flat</span></td><td>Or grouped by project.</td></tr>
+          <tr><td>Unreachable sessions</td><td><span class="default">Show count</span></td><td>Sessions in projects this container cannot reach. Hide them, count them, or show them greyed out with a “last used from” tooltip.</td></tr>
+          <tr><td>Status badge position</td><td><span class="default">After title</span></td><td>Which side of the title the running/waiting dot sits on.</td></tr>
+          <tr><td>Timestamp format</td><td><span class="default">Time only</span></td><td>Hidden, time, or date and time.</td></tr>
+          <tr><td>24-hour time</td><td><span class="default">off</span></td><td>—</td></tr>
+          <tr><td>Show time zone</td><td><span class="default">off</span></td><td>—</td></tr>
+          <tr><td>Reset time format</td><td><span class="default">Absolute</span></td><td>Plan-usage reset as <code>2:20 PM</code> or <code>in 3 hr 31 min</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>History</h3>
+
+      <table class="data-table">
+        <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Load full history <span class="badge badge--claude">Claude Code only</span></td>
+            <td><span class="default">off</span></td>
+            <td>Loads the complete transcript rather than a recent window. The OpenCode row is disabled, because it always loads everything anyway.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · This one is not a browser setting, and it is asymmetric</div>
+        <p>
+          It is stored by the driver, once per install, so it follows you
+          between browsers rather than per tab. Switching it <em>on</em> reloads
+          the page immediately. Switching it <em>off</em> only takes effect on
+          the next load — the current feed is deliberately left alone rather
+          than being emptied under you.
+        </p>
+      </div>
+
+      <h3>Autonomy</h3>
+
+      <p>
+        The third column holds one button that reads as a sentence describing
+        what the system is currently doing. Clicking it opens a menu of
+        choices rather than a set of fields. Fully covered in
+        <a href="unattended.html">Running unattended</a>.
+      </p>
+    </section>
+
+    <section id="attention">
+      <h2>Getting your attention</h2>
+
+      <p>
+        Off by default. Switching on <strong>Notify when a turn ends</strong>
+        enables three channels at once, and asks the browser for notification
+        permission. A sound can be layered on top.
+      </p>
+
+      <ul>
+        <li><strong>The tab title</strong> always works, with no permission needed: <code>●</code> for a finished turn, <code>✗</code> for a failed one, <code>?</code> for a waiting approval or question. It clears when you come back.</li>
+        <li><strong>An OS notification</strong>, when the browser allows it. Clicking it focuses the tab and switches to the session concerned.</li>
+        <li><strong>A short beep</strong>, if you enable it.</li>
+      </ul>
+
+      <p>
+        Notifications only fire while you are away — the tab hidden, or the
+        window unfocused. Approval and question notifications are sticky,
+        because a blocked turn should not expire quietly. A finished turn may
+        add that sub-agents are still running. If you have several tabs open,
+        they agree among themselves so a turn is announced once.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Two deliberate silences</div>
+        <p>
+          <strong>Your own Stop never notifies you</strong> — you know, you did
+          it. And a turn is only announced by a tab that watched it
+          <em>start</em>, so reconnecting or switching session mid-turn stays
+          quiet rather than announcing a "finished" turn from replayed history.
+        </p>
+      </div>
+    </section>
+
+    <section id="hidden">
+      <h2>Easy to miss</h2>
+
+      <ul>
+        <li><strong>Jump to latest is at the top, not the bottom.</strong> It is the first item in the feed, so you reach it by scrolling <em>up</em> through a long transcript. The floating pill at the bottom is the other half of the pair, and appears when new content arrives while you are reading older material.</li>
+        <li><strong>Session row actions are invisible until you hover</strong>, and a title is renamed by double-clicking it.</li>
+        <li><strong>There is no global search</strong>, and no app-wide keyboard shortcuts. The <code>/</code> button is a slash-command palette for the composer, not a search box.</li>
+        <li><strong>Auto-scroll only follows you when you are already at the bottom.</strong> Read something further up and new content will not yank you away.</li>
+        <li><strong>Session families are collapsed by default</strong>, so a session that spawned others looks childless until you open the twisty.</li>
+        <li><strong>A session's backend is fixed when it is created</strong> and cannot be changed afterwards from the interface.</li>
+        <li><strong>Renaming to an empty title does nothing.</strong> A title cannot be cleared, only replaced.</li>
+      </ul>
+    </section>
+
+    <nav class="page-nav" aria-label="Page navigation">
+      <a class="to-prev" href="install.html">
+        <span class="dir">Previous</span>
+        ← Install &amp; launch
+      </a>
+      <a class="to-next" href="sessions.html">
+        <span class="dir">Next</span>
+        Many sessions →
+      </a>
+    </nav>
+
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

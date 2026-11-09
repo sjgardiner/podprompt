@@ -1279,6 +1279,10 @@ const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
 // what the strike cap is for. Three attempts, then it waits for a human.
 const AUTO_RESUME_MAX_STRIKES = 3;
 const AUTO_RESUME_SWEEP_MS = 60 * 1000;
+// Log-once set: the deferral below is expected for the first sweep or two
+// after a restart, and a line per session per minute would bury the real
+// events in a log that is read exactly when something has gone wrong.
+const unresolvedBackendWarned = new Set();
 
 // When may this session next be tried? Pure given its inputs, and exported
 // through the sweep AND the session list — the browser needs the same answer
@@ -1345,6 +1349,24 @@ function autoResumeSweep() {
     // lifts a block: every attempt is waste, and retrying merely decides how
     // much. Left for a human, exactly like a spent strike count.
     if (NO_RETRY.has(resumable.category)) continue;
+
+    // Never GUESS a backend for an unattended resume. defaultBackendId() is
+    // a reasonable fallback for a human starting a brand-new chat — they can
+    // see what happened and pick again — but here nobody is watching, and
+    // guessing wrong means sending a session to a runtime that has never
+    // heard of it. Live, that cost two sessions a strike each with
+    // "Invalid session ID. Must be a valid UUID."
+    //
+    // Deferring costs at most one sweep: both sources fill in as soon as the
+    // backend answers a poll, and the relation index is already on disk.
+    if (!resolvedBackendId(sessionId) && !sessions.get(sessionId)?.backend) {
+      if (!unresolvedBackendWarned.has(sessionId)) {
+        unresolvedBackendWarned.add(sessionId);
+        console.log(`[driver] auto-resume deferred for ${sessionId}: backend not yet known`);
+      }
+      continue;
+    }
+    unresolvedBackendWarned.delete(sessionId);
 
     const prior = rec.autoResume || null;
     const strikes = prior?.strikes || 0;
@@ -2156,7 +2178,30 @@ function messagingSystemPrompt({ prefix = "" } = {}) {
 }
 
 function parentBackendId(sessionId) {
-  return sessionIdToBackend.get(sessionId) || null;
+  return resolvedBackendId(sessionId);
+}
+
+// The one place that answers "which backend owns this session?".
+//
+// THE BUG THIS FIXES, seen live: sessionIdToBackend is populated ONLY as a
+// side effect of gatherAllSessions(). When opencode's /sessions poll is
+// failing — which it reliably is for the first seconds after a restart,
+// while the child `opencode serve` is still coming up — no opencode session
+// is in that map, and every resolver fell through to defaultBackendId().
+// So the keep-alive sweep handed two `oc-…` sessions to the CLAUDE-CODE
+// backend, which rejected them with "Invalid session ID. Must be a valid
+// UUID." and burned a strike each.
+//
+// The relation index is consulted FIRST because it is the only source that
+// is DURABLE: it is written when the child is created and survives both a
+// restart and a backend that is temporarily unreachable. The live map is a
+// cache of what happened to answer a poll; it should never outrank a fact
+// recorded at creation time.
+function resolvedBackendId(sessionId) {
+  if (!sessionId) return null;
+  return sessionRelations[sessionId]?.backend
+    || sessionIdToBackend.get(sessionId)
+    || null;
 }
 
 // Resolve a requested model id against a backend's real list, for
@@ -3049,7 +3094,7 @@ function getSessionState(sessionId, explicitCwd, explicitBackendId) {
     // defaultBackendId(). That last case should only ever be reached for a
     // session this driver has never listed AND that arrived with no
     // explicit backend, which the new-chat picker never does.
-    const backendId = explicitBackendId || sessionIdToBackend.get(sessionId) || defaultBackendId();
+    const backendId = explicitBackendId || resolvedBackendId(sessionId) || defaultBackendId();
     const backend = getBackend(backendId);
     const cwd = explicitCwd || backend.cwdForSession(sessionId, null);
     // turnOutcome/abortRequested are the turn_end classification scratchpad
@@ -3184,7 +3229,7 @@ function effectiveAutoApprove(sessionId, state) {
 function backendFor(sessionId, explicitBackendId) {
   const state = sessionId ? sessions.get(sessionId) : null;
   if (state) return state.backend;
-  const backendId = explicitBackendId || (sessionId && sessionIdToBackend.get(sessionId)) || defaultBackendId();
+  const backendId = explicitBackendId || resolvedBackendId(sessionId) || defaultBackendId();
   return getBackend(backendId);
 }
 

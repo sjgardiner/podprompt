@@ -164,6 +164,11 @@ export function resetFromHeaders(headers, now = Date.now()) {
   return best;
 }
 
+// Horizon sources that came from THIS failure rather than from ambient
+// account telemetry. Only these may be used as evidence that a failure WAS
+// a limit; the others may only say WHEN an already-identified limit lifts.
+const FAILURE_SCOPED_HORIZONS = new Set(["retry-after", "session.status.next"]);
+
 // Text matching is the LAST resort, used only when no structured field
 // answered. Providers behind opencode are not uniform and several report a
 // quota wall as a bare 400 with prose, which no status code would reveal.
@@ -205,11 +210,24 @@ export function classifyFailure(s = {}) {
     if (ms) { retryAt = ms; horizonSource = source; }
   };
 
+  // ONLY when the limit info says we are actually blocked.
+  //
+  // THIS GUARD IS THE WHOLE POINT, and leaving it out shipped a real bug:
+  // rate_limit_event is ambient telemetry that fires whenever limit info
+  // CHANGES, including status:"allowed", and it always carries the next
+  // window boundary. Taking resetsAt unconditionally meant a perfectly
+  // healthy snapshot handed every unrelated failure a horizon — and the
+  // "a horizon implies a limit" fallback at the bottom then relabelled it
+  // rate_limited. Live, a plain "Invalid session ID. Must be a valid UUID."
+  // became a rate limit with a four-hour wait. Since a subscription account
+  // essentially always has a resetsAt, that silently disabled auto-resume
+  // for EVERY transient failure on claude-code.
+  const blocked = info?.status === "rejected";
   // Overage first: when an account is RUNNING ON overage, the base window's
   // resetsAt is the wrong answer — it may be hours away while the thing
   // actually blocking us is the overage balance.
   if (info?.overageStatus === "rejected") take(info.overageResetsAt, "overageResetsAt");
-  take(info?.resetsAt, "resetsAt");
+  if (blocked) take(info.resetsAt, "resetsAt");
   take(s.nextRetryAt, "session.status.next");
   if (retryAt === null && s.headers) {
     const h = resetFromHeaders(s.headers, now);
@@ -254,10 +272,15 @@ export function classifyFailure(s = {}) {
   if (LIMIT_TEXT.test(text)) return done(CATEGORY.RATE_LIMITED, "message text");
   if (OVERLOAD_TEXT.test(text)) return done(CATEGORY.OVERLOADED, "message text");
 
-  // A horizon with no category still means SOMETHING told us to wait, and
-  // the only things that do are limits. Better than calling it transient and
-  // ignoring the reset time we were handed.
-  if (retryAt !== null) return done(CATEGORY.RATE_LIMITED, horizonSource);
+  // A horizon with no category still means something told us to wait, and
+  // the only things that do are limits — but ONLY from a source tied to
+  // THIS failure. The allow-list is explicit rather than "retryAt is set"
+  // so that adding a future horizon source cannot silently re-open the bug
+  // described above: ambient account telemetry must never be able to
+  // relabel an unrelated crash as a rate limit.
+  if (retryAt !== null && FAILURE_SCOPED_HORIZONS.has(horizonSource)) {
+    return done(CATEGORY.RATE_LIMITED, horizonSource);
+  }
 
   return done(CATEGORY.TRANSIENT, null);
 

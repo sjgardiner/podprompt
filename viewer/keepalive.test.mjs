@@ -56,7 +56,7 @@ const HOUR = 3600000;
 // implementations are injected rather than stubbed. Stubbing them would let
 // the two halves drift: the sweep's whole job is now "ask limits.mjs when,
 // then act", and a fake clock-oracle would assert only the acting.
-function fresh(state, { startOk = true, idle = true, backend = "claude-code", limitInfo = null } = {}) {
+function fresh(state, { startOk = true, idle = true, backend = "claude-code", limitInfo = null, relations = null, knownBackends = true } = {}) {
   const sandbox = `
     // Silenced: the sweep logs each resume, which would bury the results.
     const console = { log() {}, error() {} };
@@ -73,6 +73,10 @@ function fresh(state, { startOk = true, idle = true, backend = "claude-code", li
     const { CATEGORY, NO_RETRY, nextAttemptAt } = arguments[3];
     const sessionIdToBackend = arguments[4];
     const limitRegistry = arguments[5];
+    const sessionRelations = arguments[6];
+    const sessions = new Map();
+    const unresolvedBackendWarned = new Set();
+    ${bodyOf("resolvedBackendId")}
     const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
     const AUTO_RESUME_MAX_STRIKES = 3;
     ${bodyOf("plannedWakeFor")}
@@ -82,11 +86,13 @@ function fresh(state, { startOk = true, idle = true, backend = "claude-code", li
   `;
   const registry = createLimitRegistry();
   if (limitInfo) registry.note(backend, limitInfo);
-  const backendMap = new Map(Object.keys(state).map((id) => [id, backend]));
+  const backendMap = knownBackends
+    ? new Map(Object.keys(state).map((id) => [id, backend]))
+    : new Map();
   return new Function(sandbox)(
     state, startOk, idle,
     { CATEGORY, NO_RETRY, nextAttemptAt },
-    backendMap, registry,
+    backendMap, registry, relations || {},
   );
 }
 
@@ -358,6 +364,68 @@ const resumable = (reason, atMsAgo = HOUR, extra = {}) =>
     aborted.describeWake("a").resumeAt === undefined, aborted.describeWake("a"));
   check("...and is not flagged as blocked either",
     aborted.describeWake("a").resumeBlocked === undefined, aborted.describeWake("a"));
+}
+
+// ── REGRESSION: never guess a backend for an unattended resume ───────────
+//
+// SHIPPED AND CAUGHT LIVE. sessionIdToBackend is populated only as a side
+// effect of gatherAllSessions(), and opencode's /sessions poll reliably
+// fails for the first seconds after a restart while its server comes up. So
+// at the exact moment the first sweep ran, no opencode session was in the
+// map and the resolver fell through to defaultBackendId() — handing two
+// `oc-...` sessions to the CLAUDE-CODE backend, which rejected them with
+// "Invalid session ID. Must be a valid UUID." and burned a strike each.
+//
+// A human starting a new chat can survive a wrong default; they see it and
+// pick again. Nobody is watching here.
+{
+  const unknown = fresh(
+    { "oc-x": { inFlight: false, resumable: resumable("error") } },
+    { knownBackends: false },
+  );
+  unknown.autoResumeSweep();
+  check("a session with no known backend is not resumed",
+    unknown.calls.started.length === 0, unknown.calls.started);
+  // Deferring must not cost an attempt: the backend map fills in within a
+  // poll or two, and burning strikes while waiting would exhaust the cap
+  // before the system was even ready to try.
+  check("...and deferring does not spend a strike",
+    unknown.turnState["oc-x"].autoResume === undefined, unknown.turnState["oc-x"]);
+
+  // The durable relation index is the fix: it is written when the child is
+  // created and survives both a restart and an unreachable backend.
+  const viaRelation = fresh(
+    { "oc-x": { inFlight: false, resumable: resumable("error") } },
+    { knownBackends: false, relations: { "oc-x": { backend: "opencode", childKind: "delegated" } } },
+  );
+  viaRelation.autoResumeSweep();
+  check("a relation-index backend is enough to resume",
+    viaRelation.calls.started.length === 1, viaRelation.calls.started);
+
+  // And once the poll succeeds, the live map alone is enough.
+  const viaMap = fresh({ "oc-x": { inFlight: false, resumable: resumable("error") } });
+  viaMap.autoResumeSweep();
+  check("a listed backend is enough to resume", viaMap.calls.started.length === 1);
+}
+
+// ── The relation index outranks the live map ──────────────────────────────
+//
+// The map is a cache of whatever answered a poll; the relation row is a fact
+// recorded when the child was created. A stale or wrong cache entry must not
+// beat it.
+{
+  const src2 = readFileSync(new URL("./driver.mjs", import.meta.url), "utf8");
+  const fn = bodyOf("resolvedBackendId");
+  check("the durable relation is consulted first",
+    fn.indexOf("sessionRelations") < fn.indexOf("sessionIdToBackend"),
+    [fn.indexOf("sessionRelations"), fn.indexOf("sessionIdToBackend")]);
+  // Both turn-path resolvers must route through it, or the fix only covers
+  // whichever one happened to be tested.
+  check("getSessionState resolves through it",
+    /explicitBackendId \|\| resolvedBackendId\(sessionId\) \|\| defaultBackendId\(\)/.test(src2));
+  check("backendFor resolves through it",
+    (src2.match(/resolvedBackendId\(sessionId\) \|\| defaultBackendId\(\)/g) || []).length >= 2,
+    (src2.match(/resolvedBackendId\(sessionId\) \|\| defaultBackendId\(\)/g) || []).length);
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────

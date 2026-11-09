@@ -216,6 +216,61 @@ const MIN = 60 * 1000;
     classifyFailure({ text: "Overloaded", now: NOW }).category === CATEGORY.OVERLOADED);
 }
 
+// ── REGRESSION: ambient telemetry must not invent a rate limit ───────────
+//
+// SHIPPED AND CAUGHT LIVE. rate_limit_event is telemetry that fires whenever
+// limit info CHANGES — including status:"allowed" — and it always carries
+// the next window boundary. Taking resetsAt unconditionally gave every
+// unrelated failure a horizon, and the "a horizon implies a limit" fallback
+// then relabelled it rate_limited.
+//
+// The observed case: a session was handed to the wrong backend and died with
+// "Invalid session ID. Must be a valid UUID."; it was recorded as
+// rate_limited with a four-hour wait. Because a subscription account
+// essentially always has a resetsAt, this silently disabled auto-resume for
+// EVERY transient failure on claude-code.
+{
+  const healthy = { status: "allowed", resetsAt: NOW + 4 * 3600 * 1000, rateLimitType: "five_hour", utilization: 0.3 };
+
+  const v = classifyFailure({
+    text: "Invalid session ID. Must be a valid UUID.",
+    rateLimitInfo: healthy,
+    now: NOW,
+  });
+  check("a healthy snapshot does not make a crash a rate limit",
+    v.category === CATEGORY.TRANSIENT, v);
+  check("...and hands it no horizon at all", v.retryAt === null, v);
+
+  // The warning state is still not a block: it means "getting close", and
+  // parking a crashed session for hours on a warning would be the same bug
+  // wearing a different status string.
+  const warned = classifyFailure({
+    text: "socket hang up",
+    rateLimitInfo: { ...healthy, status: "allowed_warning", utilization: 0.95 },
+    now: NOW,
+  });
+  check("an allowed_warning snapshot does not either",
+    warned.category === CATEGORY.TRANSIENT, warned);
+  check("...and still no horizon", warned.retryAt === null, warned);
+
+  // The reset IS used once the snapshot actually says we are blocked.
+  const real = classifyFailure({
+    text: "something failed",
+    rateLimitInfo: { ...healthy, status: "rejected" },
+    now: NOW,
+  });
+  check("a rejected snapshot still supplies the horizon",
+    real.category === CATEGORY.RATE_LIMITED && real.retryAt === healthy.resetsAt, real);
+
+  // ...and a genuine limit is still caught even alongside healthy ambient
+  // info, because the terminal reason is failure-scoped evidence.
+  const genuine = classifyFailure({
+    terminalReason: "blocking_limit", rateLimitInfo: healthy, now: NOW,
+  });
+  check("a real limit is still caught with healthy ambient info",
+    genuine.category === CATEGORY.RATE_LIMITED, genuine);
+}
+
 // ── The default must be the cautious one ─────────────────────────────────
 //
 // An unrecognised failure has to retry, or a real crash is silently

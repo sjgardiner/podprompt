@@ -1052,7 +1052,14 @@ function noteTurnTool(sessionId, toolName) {
 
 function markTurnEnded(sessionId, outcome) {
   const rec = turnState[sessionId] || {};
-  const bad = outcome?.reason === "error" || outcome?.reason === "aborted";
+  // "stalled" joins these as its own reason rather than being folded into
+  // "error": a stalled turn is the one failure that is almost always worth
+  // retrying unchanged (an upstream provider stopped answering, nothing
+  // about the request was wrong), whereas a genuine error usually is not.
+  // Keeping them apart is what lets a supervisor — or the user — decide
+  // differently about each instead of guessing from message text.
+  const bad = outcome?.reason === "error" || outcome?.reason === "aborted"
+    || outcome?.reason === "stalled";
   turnState[sessionId] = {
     inFlight: false,
     // Carried across so a reader of turnState can still say WHICH turn this
@@ -1104,6 +1111,16 @@ function resumePromptFor(resumable) {
     return "Your previous turn was interrupted before it finished. Resume from where you"
       + " left off, keeping what was already completed. Do not restart from the beginning."
       + tool;
+  }
+  // Says plainly that nothing was wrong with the work, because the agent
+  // cannot tell from its own transcript: from the inside, a stalled turn
+  // looks exactly like being cut off mid-thought, and an agent that assumes
+  // it did something wrong will often redo work that actually succeeded.
+  if (resumable.reason === "stalled") {
+    return "Your previous turn stopped because the model provider stopped responding"
+      + " mid-generation. This was an infrastructure fault, not a problem with your work"
+      + " or your approach. Resume from where you left off, keeping everything already"
+      + " completed, and do not restart from the beginning." + tool;
   }
   return "Your previous turn was cut short by a system error"
     + (resumable.error ? `: ${resumable.error}` : "")
@@ -4302,6 +4319,7 @@ const server = createServer(async (req, res) => {
       restart: "Continued after a restart",
       aborted: "Continued after being stopped",
       error: "Continued after an error",
+      stalled: "Continued after the provider stalled",
     })[resumable.reason] || "Continued";
     const started = startTurn(sessionId, resumePromptFor(resumable), {
       source: "resume",

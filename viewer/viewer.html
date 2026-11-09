@@ -2235,6 +2235,7 @@ function applyOrigin(m, origin) {
     if (m.titleEl) {
       m.titleEl.textContent = ({
         restart: 'after a restart', aborted: 'after being stopped', error: 'after an error',
+        stalled: 'after the provider stalled',
       })[who] || '';
     }
     return;
@@ -3977,6 +3978,9 @@ const RESUME_WORDING = {
   restart: 'The previous turn was interrupted when the environment restarted.',
   aborted: 'You stopped the previous turn before it finished.',
   error: 'The previous turn ended with an error.',
+  // Worded as infrastructure, not failure: the turn's work was fine, the
+  // model provider simply stopped responding mid-generation.
+  stalled: 'The model provider stopped responding mid-generation.',
 };
 
 

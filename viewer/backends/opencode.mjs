@@ -44,47 +44,46 @@ import nodePath from "node:path";
 // scope (rather than inside the factory, where it used to) only so the
 // session-selection logic below can be unit-tested without standing up a
 // whole backend — see opencode-sessions.test.mjs.
-// How long runTurn will wait for a conclusive completion signal before it
-// stops waiting and finalizes what it has. Deliberately generous: it is NOT
-// a cap on how long an agent may work (opencode is unaffected by it, and
-// everything streamed has already been broadcast), only a backstop against a
-// lost session.idle event leaving this function awaiting forever. The old
-// effective ceiling was 300s, imposed accidentally by Node's HTTP client.
-const TURN_IDLE_CEILING_MS = 60 * 60 * 1000;
+// How long a session may show NO sign of life before we stop waiting and ask
+// opencode what is actually going on. Inactivity, not duration: an agent
+// working for an hour resets this on every event, so long work is never
+// touched. Only a session that has gone genuinely quiet is questioned.
+//
+// Five minutes is calibrated from measurement, not taste. Observed provider
+// stalls ran 738s, 1530s and 4585s, so this catches all of them; one stall
+// recovered on its own at 112s, so a shorter window would have aborted a
+// session that was about to come back.
+const TURN_INACTIVITY_MS = 5 * 60 * 1000;
+const TURN_INACTIVITY_POLL_MS = 30 * 1000;
 
-// The watchdog's two knobs. The silence window is deliberately far larger
-// than any gap a healthy turn produces — opencode emits events continuously
-// while working, and the pause between tool rounds is milliseconds — but far
-// smaller than the ceiling above, so a lost session.idle costs minutes
-// instead of an hour. The poll is what checks whether the window has
-// elapsed; it issues no request until it has.
-const TURN_SILENCE_BEFORE_PROBE_MS = 10 * 60 * 1000;
-const TURN_WATCHDOG_POLL_MS = 60 * 1000;
-
-// The watchdog's entire decision, isolated so it can be tested without
-// standing up a turn. Returns true only for "this turn finished and we
-// missed the announcement".
+// What a silent session turns out to be. Returns null while it is too early
+// to judge, otherwise "finished" or "stalled".
 //
-// BOTH conditions are required, and each exists to veto a specific wrong
-// answer the other would give:
+// The distinction rests on one fact about opencode's data model: a tool call
+// lives INSIDE an assistant message, so a message cannot be marked completed
+// while its tool is still running. Therefore, after a long silence:
 //
-//   silence alone    — an agent inside a twenty-minute bash call is exactly
-//                      as silent as a finished one. Acting on silence would
-//                      cut live work off mid-task.
-//   completed alone  — a single turn emits one COMPLETED assistant message
-//                      per tool round (seven in a measured case), so this is
-//                      briefly true between EVERY round and would truncate
-//                      the turn after its first tool call.
+//   completed   — the model finished its last step and said nothing since.
+//                 The turn is over and we missed session.idle.
+//   incomplete  — generation stopped part-way through. This is the shape of
+//                 an upstream provider stall (opencode#54888): the provider
+//                 accepts the request, streams nothing further, and opencode
+//                 waits forever because v1 has no stream timeout at all.
 //
-// They separate cleanly because a tool call lives INSIDE a message: while
-// bash runs, that message cannot be marked completed. So `completed` rules
-// out mid-tool, and the silence window rules out between-rounds — a gap of
-// milliseconds against a threshold of minutes.
-export function watchdogSaysFinished(silentMs, lastMessage,
-  silenceThresholdMs = TURN_SILENCE_BEFORE_PROBE_MS) {
-  if (!(silentMs >= silenceThresholdMs)) return false;
+// A trailing USER message counts as incomplete, and correctly so: that is
+// the "accepted but never sent a first token" case.
+//
+// Note what this deliberately does NOT try to do: distinguish a stalled
+// stream from a genuinely long-running tool. It cannot — in a measured
+// stall, the model had streamed a partial tool call, so a tool part sat in
+// "running" exactly as it would for a real twenty-minute command. The
+// threshold is doing that work, which is why recovery is abort-and-resume
+// (cheap, repeatable) rather than ending the turn outright.
+export function classifyIdleTurn(silentMs, lastMessage, thresholdMs = TURN_INACTIVITY_MS) {
+  if (!(silentMs >= thresholdMs)) return null;
   const info = lastMessage?.info || lastMessage;
-  return info?.role === "assistant" && !!info?.time?.completed;
+  if (info?.role === "assistant" && info?.time?.completed) return "finished";
+  return "stalled";
 }
 
 export function isUnderRoot(candidate, root) {
@@ -1138,8 +1137,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       pendingApprovalPromises.push(p);
     }
 
-    // When this session last showed ANY sign of life. Half of the watchdog
-    // below; stamped here because this handler sees every event for the turn.
+    // When this session last showed ANY sign of life. Drives the inactivity
+    // probe below; stamped here because this handler sees every turn event.
     let lastEventAt = Date.now();
     const done = new Promise((resolve, reject) => {
       turnWaiters.set(realId, {
@@ -1221,88 +1220,85 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       //   2. `postOk` — the POST returning. Only ever resolves on success,
       //      so a 300s timeout cannot masquerade as a finished turn. Kept
       //      because it is a genuine second witness for short turns.
-      //   3. The ceiling — a last resort so a lost idle event cannot block
-      //      this function forever. NOT a limit on how long an agent may
-      //      work: opencode keeps going regardless, and anything streamed
-      //      has already been broadcast. It only bounds how long we wait
-      //      without hearing anything conclusive.
+      //   3. The inactivity probe below — asks opencode what is going on
+      //      once a session has gone silent, and distinguishes a finished
+      //      turn from a stalled provider stream.
       //
       // Polling opencode for "is this session busy" was considered and
       // rejected on evidence: there is no such endpoint (/session/active
-      // 500s), and inferring it from the message list is unsafe — a single
+      // 500s), and "last message is complete" alone is unusable — a single
       // turn emits one COMPLETED assistant message per tool round (seven in
-      // a measured case), so "last message is complete" is true between
-      // every round and would truncate the turn after the first tool call.
-      // The watchdog (layer 3). Catches the one case the signals above miss:
-      // a HEALTHY stream that simply never delivered this session's
-      // session.idle. It is a FALLBACK — it races alongside the others and
-      // is beaten by them in every normal turn, so it adds no latency to a
-      // healthy turn and can only ever shorten a hang.
+      // a measured case), so it holds between every round. It is only safe
+      // in combination with a silence window, which is what layer 3 does.
+      // Layer 3: the inactivity probe. One timer, one question, two answers.
       //
-      // Two conditions, and it needs BOTH, because each alone is wrong:
+      // Replaces a separate "watchdog" and a one-hour ceiling. Those were
+      // written before the real failure was understood: the watchdog only
+      // fired when the last message was COMPLETE (a lost session.idle on a
+      // finished turn — something never actually observed), while the
+      // failure that happens constantly leaves the message INCOMPLETE, so
+      // nothing but the hour-long ceiling could ever end it.
       //
-      //   silence alone     — an agent inside a twenty-minute bash call is
-      //                       equally silent. Acting on silence would cut
-      //                       live work off mid-task.
-      //   "finished" alone  — a turn emits one COMPLETED assistant message
-      //                       per tool round (seven in a measured case), so
-      //                       this is briefly true between EVERY round and
-      //                       would truncate the turn after the first tool.
-      //
-      // Together they separate cleanly, because a tool call lives INSIDE a
-      // message: while bash runs, that message cannot be marked completed.
-      // So "finished" rules out mid-tool, and the silence window rules out
-      // between-rounds — a gap measured in milliseconds against a threshold
-      // of minutes.
-      //
-      // The message fetch happens only AFTER the silence threshold is
-      // already met, so a healthy turn never makes this request at all.
-      let watchdogTimer = null;
-      let watchdogBusy = false;
-      const watchdog = new Promise((resolve) => {
-        watchdogTimer = setInterval(async () => {
-          if (watchdogBusy) return; // never let a slow fetch stack up
-          // Checked before the fetch as well as inside the decision, so a
-          // healthy turn issues no request at all.
-          if (Date.now() - lastEventAt < TURN_SILENCE_BEFORE_PROBE_MS) return;
-          watchdogBusy = true;
+      // It races alongside the signals above and is beaten by them on every
+      // healthy turn, so it adds no latency and issues no HTTP request at
+      // all until the session has genuinely gone quiet.
+      let probeTimer = null;
+      let probeBusy = false;
+      let stalledFor = 0;
+      const probe = new Promise((resolve) => {
+        probeTimer = setInterval(async () => {
+          if (probeBusy) return; // never let a slow fetch stack up
+          if (Date.now() - lastEventAt < TURN_INACTIVITY_MS) return;
+          probeBusy = true;
           try {
             const msgs = await api(`/session/${realId}/message`, { timeoutMs: 20000 });
             const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
             const silentMs = Date.now() - lastEventAt;
-            if (watchdogSaysFinished(silentMs, last)) {
+            const verdict = classifyIdleTurn(silentMs, last);
+            if (verdict === "finished") {
               console.error(
-                `[opencode] turn for ${sessionId}: silent for ${Math.round(silentMs / 1000)}s`
-                + ` and opencode reports its last message complete — treating the turn as`
-                + ` finished (session.idle lost)`);
+                `[opencode] turn ${sessionId}: silent ${Math.round(silentMs / 1000)}s and`
+                + ` opencode's last message is complete — finishing (session.idle lost)`);
+              resolve();
+            } else if (verdict === "stalled") {
+              stalledFor = silentMs;
+              console.error(
+                `[opencode] turn ${sessionId}: STALLED — silent ${Math.round(silentMs / 1000)}s`
+                + ` with generation incomplete. This is the upstream provider-stream hang`
+                + ` (opencode#54888, unfixed in v1). Aborting so the turn can be resumed.`);
               resolve();
             }
           } catch {
-            // Transient; the next tick tries again. A failure here must not
+            // Transient; the next tick retries. A failed probe must never
             // end a turn — that would be the old bug in a new costume.
           } finally {
-            watchdogBusy = false;
+            probeBusy = false;
           }
-        }, TURN_WATCHDOG_POLL_MS);
-        watchdogTimer.unref?.();
-      });
-
-      let ceilingTimer = null;
-      const ceiling = new Promise((resolve) => {
-        ceilingTimer = setTimeout(() => {
-          console.error(
-            `[opencode] turn for ${sessionId} heard no completion signal in`
-            + ` ${TURN_IDLE_CEILING_MS}ms; finalizing whatever arrived`);
-          resolve();
-        }, TURN_IDLE_CEILING_MS);
-        // Must not hold the event loop open for an hour after a turn ends.
-        ceilingTimer.unref?.();
+        }, TURN_INACTIVITY_POLL_MS);
+        probeTimer.unref?.();
       });
       try {
-        await Promise.race([done, postOk, watchdog, ceiling]);
+        await Promise.race([done, postOk, probe]);
       } finally {
-        clearTimeout(ceilingTimer);
-        clearInterval(watchdogTimer);
+        clearInterval(probeTimer);
+      }
+
+      // A stalled stream is not a finished turn. Abort it server-side so
+      // opencode stops waiting on a provider that will never answer, then
+      // report it as its own outcome so the driver records a resumable
+      // record and the session can be continued rather than silently lost.
+      if (stalledFor) {
+        try {
+          await api(`/session/${realId}/abort`, { method: "POST", timeoutMs: 5000 });
+        } catch (e) {
+          console.error(`[opencode] abort after stall failed for ${sessionId}: ${e.message}`);
+        }
+        state.turnOutcome = {
+          reason: "stalled",
+          error: `the model provider stopped responding mid-generation`
+            + ` (no activity for ${Math.round(stalledFor / 1000)}s)`,
+        };
+        return;
       }
       await Promise.all(pendingApprovalPromises);
 

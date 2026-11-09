@@ -22,7 +22,7 @@
 
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { createOpenCodeBackend, selectVisibleSessions, isUnderRoot, watchdogSaysFinished } from "./backends/opencode.mjs";
+import { createOpenCodeBackend, selectVisibleSessions, isUnderRoot, classifyIdleTurn } from "./backends/opencode.mjs";
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -283,67 +283,81 @@ const BOTH_PROJECTS = [
     drv.indexOf("const backends = {") < drv.indexOf("\nseedOpenCodeRealIds();"));
 }
 
-// ── The turn watchdog's decision (§13e) ───────────────────────────────────
+// ── Classifying a silent turn (§13e) ─────────────────────────────────────
 //
-// Layer 3 of turn completion: it catches a healthy event stream that simply
-// never delivered this session's session.idle. It races alongside the real
-// signals and is beaten by them on every normal turn, so it can only ever
-// shorten a hang — never gate a healthy turn.
+// Layer 3 of turn completion. Once a session has gone quiet, this decides
+// what the silence MEANS: a finished turn whose session.idle we missed, or
+// an upstream provider stall (opencode#54888 — the provider accepts the
+// request, stops sending, and opencode v1 has no stream timeout at all).
 //
-// It requires silence AND a completed last message, and each condition is
-// there to veto a specific wrong answer the other would give. Getting this
-// wrong in the permissive direction truncates a running agent mid-task,
-// which is the worst failure available here, so both halves are pinned.
+// The distinction rests on one fact: a tool call lives INSIDE an assistant
+// message, so a message cannot be marked completed while its tool runs.
+// Therefore "complete" means generation really ended; "incomplete" means it
+// stopped part-way, which is the stall's signature.
+//
+// Both error directions are costly, so both are pinned. Saying "finished"
+// too early truncates a live agent. Saying "stalled" too early aborts and
+// re-runs work that was fine.
 {
-  const T = 600000; // the silence threshold used below, passed explicitly
-  const completed = { info: { role: "assistant", time: { created: 1, completed: 2 } } };
-  const running   = { info: { role: "assistant", time: { created: 1 } } };
-  const userLast  = { info: { role: "user", time: { created: 1 } } };
+  const T = 300000;
+  const complete   = { info: { role: "assistant", time: { created: 1, completed: 2 } } };
+  const midStream  = { info: { role: "assistant", time: { created: 1 } } };
+  const userLast   = { info: { role: "user", time: { created: 1 } } };
 
-  check("silent AND complete means finished",
-    watchdogSaysFinished(T, completed, T) === true);
+  // Too early to judge: this is what holds on every healthy turn, and it is
+  // why the probe issues no request and the turn is never disturbed.
+  check("below the threshold it declines to judge",
+    classifyIdleTurn(5000, complete, T) === null);
+  check("...even one tick short", classifyIdleTurn(T - 1, complete, T) === null);
+  check("...and that holds for an incomplete message too",
+    classifyIdleTurn(T - 1, midStream, T) === null);
 
-  // The case that killed the first design: a turn emits one COMPLETED
-  // assistant message per tool round, so this is briefly true between every
-  // round. Without the silence window it truncates after the first tool.
-  check("complete but NOT silent is not finished",
-    watchdogSaysFinished(5000, completed, T) === false);
-  check("...not even one tick short of the threshold",
-    watchdogSaysFinished(T - 1, completed, T) === false);
+  check("silent with generation complete means finished",
+    classifyIdleTurn(T, complete, T) === "finished");
 
-  // The case that matters most: an agent inside a long bash call is exactly
-  // as silent as a finished one. The tool lives INSIDE the message, so that
-  // message cannot be complete — which is what saves us.
-  check("silent but mid-tool is not finished",
-    watchdogSaysFinished(T * 5, running, T) === false);
+  // The failure that actually happens: generation stopped part-way.
+  check("silent with generation incomplete means stalled",
+    classifyIdleTurn(T, midStream, T) === "stalled");
+  check("...however long it has been silent",
+    classifyIdleTurn(T * 20, midStream, T) === "stalled");
 
-  check("a trailing user message is not finished",
-    watchdogSaysFinished(T * 5, userLast, T) === false);
+  // "Provider accepted the request and never sent a first token" — the
+  // assistant message does not exist yet, so the user prompt is last.
+  check("a trailing user message means stalled",
+    classifyIdleTurn(T, userLast, T) === "stalled");
 
-  // Malformed or absent input must never read as "finished" — failing open
-  // here would end live turns on a bad API response.
+  // Absent or malformed data must read as STALLED, not finished. Stalled is
+  // recoverable (abort and resume); wrongly declaring "finished" silently
+  // truncates a turn and loses the rest of the work.
   for (const [label, msg] of [
     ["null", null], ["undefined", undefined], ["empty object", {}],
-    ["no time", { info: { role: "assistant" } }],
+    ["no time field", { info: { role: "assistant" } }],
     ["completed=0", { info: { role: "assistant", time: { completed: 0 } } }],
   ]) {
-    check(`a ${label} last message is not finished`,
-      watchdogSaysFinished(T * 5, msg, T) === false);
+    check(`a ${label} last message is treated as stalled`,
+      classifyIdleTurn(T, msg, T) === "stalled");
   }
 
-  // Accepts the un-nested shape too, since the API has returned both.
-  check("an un-nested message shape still works",
-    watchdogSaysFinished(T, { role: "assistant", time: { completed: 2 } }, T) === true);
+  // The API has returned both nested and un-nested message shapes.
+  check("an un-nested message shape still reads as finished",
+    classifyIdleTurn(T, { role: "assistant", time: { completed: 2 } }, T) === "finished");
 
-  // The real threshold must stay far above any gap a healthy turn produces
-  // and far below the one-hour ceiling it exists to shorten.
+  // The shipped threshold must sit above a stall that was observed to
+  // RECOVER on its own (112s) and below every stall that never did (738s+).
   const src = readFileSync(new URL("./backends/opencode.mjs", import.meta.url), "utf8");
-  const silence = Number((src.match(/TURN_SILENCE_BEFORE_PROBE_MS = ([\d *]+);/) || [])[1]
+  const ms = (name) => Number((src.match(new RegExp(name + " = ([\\d *]+);")) || [])[1]
     ?.split("*").reduce((a, b) => a * Number(b.trim()), 1));
-  const ceiling = Number((src.match(/TURN_IDLE_CEILING_MS = ([\d *]+);/) || [])[1]
-    ?.split("*").reduce((a, b) => a * Number(b.trim()), 1));
-  check("the silence window is minutes, not seconds", silence >= 60000, silence);
-  check("...and well below the ceiling it shortens", silence < ceiling, { silence, ceiling });
+  const inactivity = ms("TURN_INACTIVITY_MS");
+  check("the threshold is above the observed self-recovery (112s)", inactivity > 112000, inactivity);
+  check("...and below the shortest stall that never recovered (738s)", inactivity < 738000, inactivity);
+  check("the probe polls more often than the threshold",
+    ms("TURN_INACTIVITY_POLL_MS") < inactivity);
+
+  // The structures the old design left behind must be gone, not orphaned.
+  check("the one-hour ceiling is removed", !/TURN_IDLE_CEILING_MS/.test(src));
+  check("a stall aborts the session server-side", /\/abort`, \{ method: "POST"/.test(src));
+  check("a stall reports its own outcome reason",
+    /reason: "stalled"/.test(src));
 }
 
 console.log(`opencode session enumeration: ${pass} passed, ${fail} failed`);

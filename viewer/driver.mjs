@@ -442,7 +442,8 @@ const backends = {
   // (see the process-ownership block after this map) regardless of which
   // backend is the default — baseUrl here just needs to agree with the port
   // that child is started on (--opencode-port).
-  "opencode": createOpenCodeBackend({ ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
+  "opencode": createOpenCodeBackend({
+    noteDelegateAnchor, ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
 };
 
 function getBackend(id) {
@@ -1378,6 +1379,68 @@ setInterval(() => {
   }
 }, 15 * 1000).unref?.();
 
+// ── Delegation anchors: where in the parent the delegation happened ─────
+// The child's "Delegated" label links back to the exact bubble in the
+// parent's feed that created it. Both backends key that bubble by the
+// tool call's own id, so the anchor is the same kind of thing either way —
+// what differs is WHEN it can be learned.
+//
+//   claude-code: captured at call time from _meta["claudecode/toolUseId"].
+//   opencode:    its ToolContext exposes sessionID and messageID but NO
+//                per-call id, so the plugin cannot know it. The driver
+//                recovers it downstream instead, by matching the delegate
+//                tool part streaming back from the parent against the
+//                prompt we delegated with. Deterministic, not timing-based.
+//
+// Doing the work here rather than accepting a degraded OpenCode path is
+// deliberate: a link that silently behaves differently depending on which
+// backend the parent happens to run is the kind of inconsistency that makes
+// a feature feel unreliable rather than merely limited.
+const pendingDelegateAnchors = new Map(); // parentSessionId -> [{ childId, prompt }]
+
+function expectDelegateAnchor(parentSessionId, childId, prompt) {
+  if (!parentSessionId || !childId) return;
+  const list = pendingDelegateAnchors.get(parentSessionId) || [];
+  list.push({ childId, prompt: String(prompt || "").slice(0, 400) });
+  // Bounded: a parent that somehow never emits a matching part must not
+  // grow this list forever.
+  while (list.length > 16) list.shift();
+  pendingDelegateAnchors.set(parentSessionId, list);
+}
+
+// Called by the opencode backend for every tool part it renders. Cheap: one
+// map lookup, and an immediate return when this session has no delegation
+// waiting to be matched.
+function noteDelegateAnchor(parentSessionId, part) {
+  const list = pendingDelegateAnchors.get(parentSessionId);
+  if (!list?.length || !part?.id) return;
+  const prompt = part.state?.input?.prompt;
+  if (typeof prompt !== "string") return;
+  const key = prompt.slice(0, 400);
+  const i = list.findIndex((e) => e.prompt === key);
+  if (i === -1) return;
+  const { childId } = list[i];
+  list.splice(i, 1);
+  if (!list.length) pendingDelegateAnchors.delete(parentSessionId);
+  const rel = sessionRelations[childId];
+  if (!rel) return;
+  sessionRelations[childId] = { ...rel, native: { ...(rel.native || {}), toolUseId: part.id } };
+  saveSessionRelations();
+}
+
+// What the child's Delegated label needs: which session to open, and which
+// bubble to land on. Returned by /turn-status — a DIRECT driver-to-browser
+// route — rather than threaded through the transcript, server.py's seed and
+// the SSE replay, which are precisely the hops that have silently dropped a
+// new field twice in this branch.
+function delegationAnchorFor(sessionId) {
+  const rel = sessionRelations[sessionId];
+  if (!rel || rel.childKind !== "delegated") return null;
+  const parentSessionId = rel.createdBy || rel.parent;
+  if (!parentSessionId) return null;
+  return { parentSessionId, bubbleId: rel.native?.toolUseId || null };
+}
+
 // ── Tool logic, shared by both backends ──────────────────────────────────
 // ONE implementation. Claude Code reaches these through an in-process SDK
 // MCP server built per turn; the OpenCode plugin reaches the same functions
@@ -1627,6 +1690,9 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
     ...(toolUseId ? { native: { toolUseId } } : {}),
   });
   peers.ensure(childId, { title: childTitle, backend });
+  // OpenCode cannot tell us the call id up front, so arm the match now and
+  // let noteDelegateAnchor() fill it in when the part streams back.
+  if (!toolUseId) expectDelegateAnchor(fromSessionId, childId, prompt);
 
   // C7: a model id means nothing to another backend, so it is only carried
   // across when the backends match. Otherwise the child takes its own
@@ -2952,6 +3018,9 @@ const server = createServer(async (req, res) => {
       // for "has a parent". A delegated child HAS a parent and is still
       // promptable, so the old `isChild` would now be a lie for it.
       rosterChild: sessionId ? isRosterChild(sessionId) : false,
+      // Where this session was delegated from, for the Delegated label's
+      // link. Null for anything that was not delegated.
+      delegationAnchor: sessionId ? delegationAnchorFor(sessionId) : null,
       parentSessionId: sessionId ? parentOfSession(sessionId) : null,
       autoApprove: effectiveAutoApprove(sessionId, state),
     }));

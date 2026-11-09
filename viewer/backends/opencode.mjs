@@ -39,7 +39,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
-export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent }) {
+export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -880,6 +880,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             // structurally significant thing a turn can do look like a grep.
             // Matches what the claude-code backend does with Task/Agent, so
             // both backends produce the same bubble for the same act.
+            // A delegate_session call streaming back. Its part id is the
+            // bubble id the browser will key this by, and it is the only
+            // place that id is observable — OpenCode's ToolContext does not
+            // expose it to the plugin that made the call. The driver matches
+            // it against the prompt it delegated with and stamps the child's
+            // relation row, so the child can link back to exactly here.
+            noteDelegateAnchor?.(sessionId, part);
             broadcast(sessionId, "tool", summarizeToolPart(part), part.id, null, msgModel || null);
             emittedIds.add(part.id);
           }

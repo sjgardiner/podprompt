@@ -2152,6 +2152,24 @@ async function refreshPeerHandles() {
     peersFetchedAt = Date.now();
   } catch { /* a failed lookup just leaves the title unlinked */ }
 }
+
+// The Delegated label links back to the exact bubble in the parent that
+// created this session — not merely to the parent.
+//
+// Anchoring is SKIPPED when the target would not be visible. A delegation is
+// rendered as a tool bubble, so with tools hidden it is in the DOM but
+// display:none: scrolling to it would land on a zero-height element and the
+// highlight would flash invisibly. Overriding the setting to reveal it would
+// be fighting a choice the user made; arriving at the right session with no
+// jump is the honest behaviour.
+async function openDelegationSource(handle) {
+  const a = delegationAnchor;
+  if (!a || !a.parentSessionId) { await openPeerByHandle(handle); return; }
+  const canAnchor = !!a.bubbleId && settings.tools !== 'hide';
+  if (a.parentSessionId !== currentSessionId) viewSession(a.parentSessionId);
+  if (canAnchor) scrollToBubbleWhenReady(a.bubbleId);
+}
+
 async function openPeerByHandle(handle) {
   const bare = String(handle || '').replace(/^@/, '');
   if (!bare) return;
@@ -2214,8 +2232,13 @@ function applyOrigin(m, origin) {
     // the session rows' disclosure triangle follows.
     if (!m.peerLinkWired) {
       m.titleEl.classList.add('peer-link');
-      m.titleEl.title = `Open ${who}`;
-      m.titleEl.addEventListener('click', (e) => { e.stopPropagation(); openPeerByHandle(who); });
+      const deep = kind === 'delegate';
+      m.titleEl.title = deep ? `Open ${who} where this was delegated` : `Open ${who}`;
+      m.titleEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (deep) openDelegationSource(who);
+        else openPeerByHandle(who);
+      });
       m.peerLinkWired = true;
     }
   }
@@ -3206,6 +3229,7 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   delegatedChildren = [];
   heldMail = [];
   mailExpanded = false;
+  delegationAnchor = null;
   const oldMailBar = document.getElementById('mail-bar');
   if (oldMailBar) { oldMailBar.classList.remove('show'); oldMailBar.innerHTML = ''; }
   currentSessionIsChild = knownChild;
@@ -3990,6 +4014,9 @@ let subAgents = [];            // roster for the session being viewed
 // separate list from subAgents — they are not sub-agents, they are sessions,
 // and nothing should ever render them into the roster.
 let delegatedChildren = [];
+// Where this session was delegated from: { parentSessionId, bubbleId }.
+// Supplied by /turn-status, a direct driver-to-browser route.
+let delegationAnchor = null;
 let currentSessionIsChild = false;
 let currentSessionParent = null;
 // True while the sub-agent being VIEWED is itself still running. A child
@@ -5016,6 +5043,7 @@ async function resyncTurnStatus() {
     // child also has a parent but is a real session, so it keeps its input
     // bar, controls and Continue strip.
     currentSessionIsChild = !!data.rosterChild;
+    delegationAnchor = data.delegationAnchor || null;
     currentSessionParent = data.parentSessionId || null;
     applySubAgentBanner();
     refreshSubAgents();

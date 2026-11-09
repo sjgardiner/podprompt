@@ -428,6 +428,35 @@ const resumable = (reason, atMsAgo = HOUR, extra = {}) =>
     (src2.match(/resolvedBackendId\(sessionId\) \|\| defaultBackendId\(\)/g) || []).length);
 }
 
+// ── Deleting a session must drop its turn state ──────────────────────────
+//
+// FOUND BY PURGING 50 SESSIONS AT ONCE: 24 of the 25 remaining turn-state
+// rows belonged to sessions that no longer existed. /delete-session cleaned
+// relation rows and orphaned mail and forgot this one index entirely, so the
+// file grew monotonically and autoResumeSweep walked every dead row once a
+// minute, forever.
+//
+// Harmless until now only by luck: every orphan carrying a resumable said
+// "aborted", which is the one reason the sweep never acts on. One saying
+// "error" would have had the supervisor repeatedly trying to resurrect a
+// session with no transcript and no relation row to resolve a backend from.
+{
+  const del = src.slice(src.indexOf('path === "/delete-session"'));
+  const body = del.slice(0, del.indexOf('path === "/rename-session"'));
+  check("the delete route drops turn state", /delete turnState\[id\]/.test(body), body.slice(-900));
+  check("...for the cascaded children as well as the target",
+    /for \(const id of \[\.\.\.gone, body\.sessionId\]\)/.test(body), body.slice(-900));
+  check("...and persists the removal", /if \(droppedTurnState\) saveTurnState\(\);/.test(body));
+  // Reported back, so a caller can tell a clean delete from one that left
+  // something behind.
+  check("...and reports what it dropped", /droppedTurnState,/.test(body));
+  // It must use `gone` (what ACTUALLY deleted), not `doomed` (what was
+  // attempted) — otherwise a child whose delete failed loses the turn state
+  // that would let it be resumed, while the session itself survives.
+  check("it drops state only for sessions that really went",
+    !/for \(const id of \[\.\.\.doomed/.test(body), body.slice(-900));
+}
+
 // ── Wiring ────────────────────────────────────────────────────────────────
 {
   check("the sweep is actually scheduled", /autoResumeSweep\(\);/.test(src) && /AUTO_RESUME_SWEEP_MS\)/.test(src));

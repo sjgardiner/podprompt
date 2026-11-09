@@ -5264,8 +5264,27 @@ const server = createServer(async (req, res) => {
       const orphanMail = inbox.open().filter((e) => !sessions.has(e.to?.id)
         && (doomed.includes(e.to?.id) || e.to?.id === body.sessionId));
       for (const e of orphanMail) inbox.discard(e.id);
+      // And the turn state, which was the one index this route forgot.
+      //
+      // Found by purging 50 sessions at once: 24 of the 25 remaining
+      // turn-state rows belonged to sessions that no longer existed. The
+      // file grew monotonically, and autoResumeSweep walks every row of it
+      // once a minute forever.
+      //
+      // Harmless so far only by luck — the orphans carrying a resumable all
+      // said "aborted", which the sweep never resumes. One saying "error"
+      // would have had the supervisor repeatedly trying to resurrect a
+      // session with no transcript and no relation row.
+      let droppedTurnState = 0;
+      for (const id of [...gone, body.sessionId]) {
+        if (turnState[id]) { delete turnState[id]; droppedTurnState++; }
+      }
+      if (droppedTurnState) saveTurnState();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, cascaded, kept: [...kept], droppedMail: orphanMail.length }));
+      res.end(JSON.stringify({
+        ok: true, cascaded, kept: [...kept],
+        droppedMail: orphanMail.length, droppedTurnState,
+      }));
     } catch (e) {
       console.error("[driver] delete-session failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });

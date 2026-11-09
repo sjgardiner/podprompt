@@ -74,6 +74,33 @@ for (const [l,v] of [["null",null],["undefined",undefined],["number",42],["plain
   check("history reconstruction splits identically", /MD11: a coalesced delivery is ONE durable message/.test(src));
   check("no '---' separator remains in the format", !/join\("\\n\\n---\\n\\n"\)/.test(src));
 }
+// ── The same sender twice in one batch ───────────────────────────────────
+//
+// From a LIVE run: three probe sub-agents each sent a greeting, then each
+// sent a completion receipt, and all six coalesced into one delivery. So the
+// same handle appears twice, non-adjacently, in a six-message batch — the
+// largest and most interleaved case the split has actually seen.
+//
+// Worth pinning because the obvious implementation of a sender-keyed split
+// (group by handle) would silently merge the two halves and lose the
+// ordering, and the count check would still pass if it merged a pair while
+// splitting something else into two.
+{
+  const entries = [
+    E("probe-cc", "greeting one"), E("probe-oc1", "greeting two"), E("probe-oc2", "greeting three"),
+    E("probe-cc", "receipt one"), E("probe-oc1", "receipt two"), E("probe-oc2", "receipt three"),
+  ];
+  const out = f.splitDeliveredMessages(f.composeDelivery(entries));
+  check("a six-message batch splits into six", out?.length === 6, out?.length);
+  check("a repeated sender is NOT merged",
+    out?.filter((x) => x.sender === "@probe-cc").length === 2,
+    out?.map((x) => x.sender));
+  check("order is preserved across the repeat",
+    out?.map((x) => x.text).join("|")
+      === "greeting one|greeting two|greeting three|receipt one|receipt two|receipt three",
+    out?.map((x) => x.text));
+}
+
 // ── The stop notice (MD12) ───────────────────────────────────────────────
 //
 // WHAT THIS GUARDS. An agent cannot tell from inside its own transcript that

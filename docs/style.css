@@ -515,6 +515,56 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
 .page-nav .to-prev { text-align: left; }
 .page-nav .to-next { text-align: right; margin-left: auto; }
 
+/* ── Diagrams ───────────────────────────────────────────────────
+   Inline SVG, so it inherits the palette below rather than baking
+   colours in. Scales with the column; on a narrow screen it keeps a
+   minimum width and the figure scrolls, because shrinking a labelled
+   diagram to phone width makes the labels unreadable.
+   ─────────────────────────────────────────────────────────────── */
+
+figure.diagram {
+  margin: 1.25rem 0 1.5rem;
+  max-width: none;
+  overflow-x: auto;
+}
+
+figure.diagram svg {
+  display: block;
+  width: 100%;
+  min-width: 560px;
+  height: auto;
+}
+
+/* Surfaces */
+.dgm-box      { fill: var(--bg-raised); stroke: var(--border); stroke-width: 1; }
+.dgm-box-key  { fill: var(--bg-raised); stroke: var(--accent); stroke-width: 1.5; }
+.dgm-boundary { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 5 4; }
+.dgm-well     { fill: var(--bg-code); stroke: var(--border); stroke-width: 1; }
+
+/* Connectors */
+.dgm-line { fill: none; stroke: var(--border); stroke-width: 1.5; }
+.dgm-flow { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+
+/* Text */
+.dgm-text,
+.dgm-mono,
+.dgm-muted,
+.dgm-key {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  fill: var(--text);
+}
+
+.dgm-mono  { font-family: var(--font-mono); font-size: 12px; }
+.dgm-muted { fill: var(--text-muted); font-size: 11.5px; }
+.dgm-key   { fill: var(--accent); font-weight: 600; }
+
+.dgm-title { font-size: 13.5px; font-weight: 600; fill: var(--text); }
+
+/* Per-backend accents, matching the badges used in the prose. */
+.dgm-claude   { fill: var(--link); }
+.dgm-opencode { fill: var(--violet); }
+
 /* ── Figures / screenshots ──────────────────────────────────── */
 
 figure {

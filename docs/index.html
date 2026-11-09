@@ -87,30 +87,87 @@
         can be held for your approval. You decide how much rope to give.
       </p>
 
-      <div class="code-block">
-<pre>                    your browser
-                         │
-               ┌─────────┴─────────┐
-               │   PodPrompt UI    │   one window, every session
-               └─────────┬─────────┘
-                         │
-   ╔═════════════════════╪═════════════════════╗
-   ║   container         │                     ║
-   ║            ┌────────┴────────┐            ║
-   ║            │     driver      │            ║
-   ║            └───┬─────────┬───┘            ║
-   ║                │         │                ║
-   ║        ┌───────┴──┐   ┌──┴───────┐        ║
-   ║        │  Claude  │   │ OpenCode │        ║
-   ║        │   Code   │   │          │        ║
-   ║        └───┬──────┘   └──────┬───┘        ║
-   ║            │                 │            ║
-   ║      @session-a ◀── mail ──▶ @session-b   ║
-   ║            │                 │            ║
-   ║       sub-agents        delegated         ║
-   ║                          sessions         ║
-   ╚═══════════════════════════════════════════╝</pre>
-      </div>
+      <figure class="diagram">
+        <svg viewBox="0 0 720 460" role="img" aria-labelledby="arch-t arch-d">
+          <title id="arch-t">How PodPrompt fits together</title>
+          <desc id="arch-d">Your browser talks to a single PodPrompt interface,
+          which talks to a driver inside a Docker container. The driver runs two
+          backends, Claude Code and OpenCode. Sessions on either backend exchange
+          mail with each other, and each session can have sub-agents or delegated
+          sessions of its own.</desc>
+
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border)"/>
+            </marker>
+            <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/>
+            </marker>
+          </defs>
+
+          <!-- your browser -->
+          <text class="dgm-text" x="360" y="18" text-anchor="middle">your browser</text>
+          <path class="dgm-line" d="M 360 28 V 48" marker-end="url(#arrow)"/>
+
+          <!-- the UI -->
+          <rect class="dgm-box-key" x="210" y="50" width="300" height="50" rx="6"/>
+          <text class="dgm-title" x="360" y="72" text-anchor="middle">PodPrompt UI</text>
+          <text class="dgm-muted" x="360" y="89" text-anchor="middle">one window, every session</text>
+
+          <path class="dgm-line" d="M 360 100 V 158" marker-end="url(#arrow)"/>
+
+          <!-- container boundary -->
+          <rect class="dgm-boundary" x="40" y="126" width="640" height="320" rx="8"/>
+          <text class="dgm-muted" x="54" y="146">container</text>
+
+          <!-- driver -->
+          <rect class="dgm-box" x="285" y="160" width="150" height="42" rx="5"/>
+          <text class="dgm-title" x="360" y="186" text-anchor="middle">driver</text>
+
+          <!-- driver out to each backend -->
+          <path class="dgm-line" d="M 360 202 V 224 H 215 V 244" marker-end="url(#arrow)"/>
+          <path class="dgm-line" d="M 360 202 V 224 H 505 V 244" marker-end="url(#arrow)"/>
+
+          <!-- backends -->
+          <rect class="dgm-box" x="140" y="246" width="150" height="48" rx="5"/>
+          <text class="dgm-title dgm-claude" x="215" y="268" text-anchor="middle">Claude Code</text>
+          <text class="dgm-muted" x="215" y="284" text-anchor="middle">backend</text>
+
+          <rect class="dgm-box" x="430" y="246" width="150" height="48" rx="5"/>
+          <text class="dgm-title dgm-opencode" x="505" y="268" text-anchor="middle">OpenCode</text>
+          <text class="dgm-muted" x="505" y="284" text-anchor="middle">backend</text>
+
+          <path class="dgm-line" d="M 215 294 V 328" marker-end="url(#arrow)"/>
+          <path class="dgm-line" d="M 505 294 V 328" marker-end="url(#arrow)"/>
+
+          <!-- sessions, and the mail between them -->
+          <rect class="dgm-well" x="130" y="330" width="170" height="42" rx="5"/>
+          <text class="dgm-mono" x="215" y="356" text-anchor="middle">@session-a</text>
+
+          <rect class="dgm-well" x="420" y="330" width="170" height="42" rx="5"/>
+          <text class="dgm-mono" x="505" y="356" text-anchor="middle">@session-b</text>
+
+          <path class="dgm-flow" d="M 304 351 H 416"
+                marker-start="url(#arrow-accent)" marker-end="url(#arrow-accent)"/>
+          <text class="dgm-key" x="360" y="344" text-anchor="middle">mail</text>
+
+          <path class="dgm-line" d="M 215 372 V 398" marker-end="url(#arrow)"/>
+          <path class="dgm-line" d="M 505 372 V 398" marker-end="url(#arrow)"/>
+
+          <!-- the two kinds of child -->
+          <rect class="dgm-box" x="140" y="400" width="150" height="32" rx="5"/>
+          <text class="dgm-text" x="215" y="421" text-anchor="middle">sub-agents</text>
+
+          <rect class="dgm-box" x="430" y="400" width="150" height="32" rx="5"/>
+          <text class="dgm-text" x="505" y="421" text-anchor="middle">delegated sessions</text>
+        </svg>
+        <figcaption>
+          Either kind of child can hang off any session, on either backend — they
+          are drawn one per side only to keep the lines readable.
+        </figcaption>
+      </figure>
     </section>
 
     <section id="concepts">

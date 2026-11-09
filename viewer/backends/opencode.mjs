@@ -56,6 +56,42 @@ import nodePath from "node:path";
 const TURN_INACTIVITY_MS = 5 * 60 * 1000;
 const TURN_INACTIVITY_POLL_MS = 30 * 1000;
 
+// §15/KD1. The raw evidence a failed opencode turn can offer, pulled off the
+// events stashed during the turn and handed to the driver, which assigns the
+// meaning (classifyFailure in limits.mjs). The split is deliberate: both
+// backends report the same four conditions through completely different
+// fields, and a supervisor reading the resulting record should not have to
+// know which runtime produced it.
+//
+// WHY THE EVENTS AND NOT THE THROWN ERROR. What reaches the catch is usually
+// `fetch failed` or a rejected SSE waiter — a symptom with no status code,
+// no headers and no verdict. Everything useful arrived earlier, on
+// session.status and session.error, and was previously discarded.
+//
+// THE ONE THING TO REMEMBER ABOUT isRetryable: opencode's `retry` status IS
+// its own internal retry loop, so by the time session.error fires it has
+// already waited and already given up. isRetryable:false is therefore a
+// considered verdict from the component closest to the provider, not a
+// guess, and our own retry is a SECOND layer on top of a failed first one.
+function failureEvidence(state) {
+  const err = state.lastApiError || null;
+  const retry = state.lastRetryStatus || null;
+  if (!err && !retry) return {};
+  return {
+    statusCode: err?.statusCode ?? null,
+    isRetryable: err?.isRetryable,
+    headers: err?.headers || null,
+    // The retry announcement's `next` is the horizon opencode itself
+    // planned to use. Only meaningful if the retries then failed, which is
+    // exactly the case we are in when this runs.
+    nextRetryAt: retry?.next ?? null,
+    // Appended to the thrown error's text rather than replacing it: the
+    // provider's own words are frequently the only thing that identifies a
+    // quota wall, since several providers report one as a bare 400.
+    providerMessage: err?.message || retry?.message || null,
+  };
+}
+
 // What a silent session turns out to be. Returns null while it is too early
 // to judge, otherwise "finished" or "stalled".
 //
@@ -1149,6 +1185,53 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         broadcastStatus(sessionId, { type: "compacting", active: false, result: "success" });
         return;
       }
+
+      // §15/KD3. opencode announces its OWN retry loop here, and the payload
+      // carries `next` — the instant it will try again. Neither this event
+      // nor session.error below was handled for a parent session, which is
+      // half of why a usage-limit death was recorded as a clean completion.
+      //
+      // Stashed as well as broadcast: if the retries go on to exhaust
+      // themselves, this is the only place the horizon was ever stated.
+      if (evt.type === "session.status") {
+        const st = evt.properties?.status;
+        if (st?.type === "retry") {
+          state.lastRetryStatus = { attempt: st.attempt, message: st.message || null, next: st.next || null };
+          console.log(`[opencode] ${sessionId} retrying (attempt ${st.attempt})`
+            + (st.next ? `, next at ${new Date(st.next < 1e11 ? st.next * 1000 : st.next).toISOString()}` : "")
+            + (st.message ? `: ${st.message}` : ""));
+          // Surfaced so a turn silent for minutes mid-retry does not read as
+          // one of the §13e stalls.
+          broadcastStatus(sessionId, {
+            type: "api_retry", attempt: st.attempt,
+            message: st.message || null, nextAt: st.next || null,
+          });
+        }
+        return;
+      }
+
+      // The final failure, after opencode's internal retries gave up. The
+      // payload is the richest evidence either backend produces: a status
+      // code, opencode's own isRetryable verdict, and the provider's raw
+      // response headers — which is where `retry-after` lives for every
+      // provider that sends one.
+      if (evt.type === "session.error") {
+        const err = evt.properties?.error;
+        if (err) {
+          state.lastApiError = {
+            name: err.name || null,
+            message: err.data?.message || null,
+            statusCode: err.data?.statusCode ?? null,
+            isRetryable: err.data?.isRetryable,
+            headers: err.data?.responseHeaders || null,
+          };
+          console.log(`[opencode] ${sessionId} session.error: ${err.name || "?"}`
+            + ` status=${err.data?.statusCode ?? "-"}`
+            + ` retryable=${err.data?.isRetryable ?? "-"}`
+            + (err.data?.message ? `: ${err.data.message}` : ""));
+        }
+        return;
+      }
     }
 
     function onPermission(perm) {
@@ -1347,6 +1430,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
           reason: "stalled",
           error: `the model provider stopped responding mid-generation`
             + ` (no activity for ${Math.round(stalledFor / 1000)}s)`,
+          ...failureEvidence(state),
         };
         return;
       }
@@ -1410,7 +1494,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // driver.mjs's /abort handler records the user's intent instead and
       // its runTurn wrapper prefers that, which is what lets both backends
       // report reason:"aborted" identically.
-      state.turnOutcome = { reason: "error", error: e.message };
+      state.turnOutcome = { reason: "error", error: e.message, ...failureEvidence(state) };
     } finally {
       // Last chance to recover a delegation anchor.
       //

@@ -76,6 +76,9 @@ import {
   createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
 } from "./autonomy.mjs";
 import { createPeers, createInbox, LOCAL_REALM } from "./messaging.mjs";
+import {
+  CATEGORY, NO_RETRY, classifyFailure, nextAttemptAt, createLimitRegistry,
+} from "./limits.mjs";
 
 function parseArgs(argv) {
   const args = {
@@ -457,9 +460,30 @@ function expirePendingApprovals(sessionId) {
 // registerChild/autoApproveForSession are what let a backend surface a child
 // session without knowing anything about the relation index or how
 // auto-approve is resolved across a tree it cannot see.
+// KD4: a usage limit belongs to the ACCOUNT, not the session, so what we
+// learn from one session's failure has to be available to every other
+// session on that backend. claude-code announces limit changes on a
+// standalone `rate_limit_event` that arrives BEFORE anything fails — the
+// only way to hold a reset time at the moment a turn dies is to have kept
+// the last one.
+const limitRegistry = createLimitRegistry();
+
+function noteRateLimitInfo(backendId, info) {
+  if (!info) return;
+  limitRegistry.note(backendId, info);
+  // Surfaced immediately rather than only on failure: a warning state is
+  // precisely the moment the user can still do something about it.
+  if (info.status === "rejected" || info.status === "allowed_warning") {
+    console.log(`[driver] ${backendId} rate limit ${info.status}`
+      + (info.rateLimitType ? ` (${info.rateLimitType})` : "")
+      + (info.resetsAt ? ` resets ${new Date(info.resetsAt < 1e11 ? info.resetsAt * 1000 : info.resetsAt).toISOString()}` : ""));
+  }
+}
+
 const backendHooks = {
   cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval,
   registerChild: registerChildSession,
+  noteRateLimitInfo,
   autoApproveForSession,
   // Lets a backend retract a card when its own runtime says the request
   // behind it is dead. See resolveApprovalExternally.
@@ -1128,6 +1152,14 @@ function markTurnEnded(sessionId, outcome) {
       error: outcome.error || null,
       lastTool: rec.lastTool || null,
       at: nowIso(),
+      // KD1/KD2. The reason string says WHETHER to retry; the category says
+      // WHEN, and whether to bother at all. Both are kept because the reason
+      // also drives resumePromptFor's wording, which the agent reads.
+      ...(outcome.category ? { category: outcome.category } : {}),
+      // An absolute instant, not a delay: the sweep runs on a timer and a
+      // relative answer would drift with it.
+      ...(outcome.retryAt ? { retryAt: new Date(outcome.retryAt).toISOString() } : {}),
+      ...(outcome.horizonSource ? { horizonSource: outcome.horizonSource } : {}),
     } } : {}),
   };
   saveTurnState();
@@ -1179,6 +1211,31 @@ function resumePromptFor(resumable, { automatic = false } = {}) {
       + " left off, keeping what was already completed. Do not restart from the beginning."
       + tool + unreviewed;
   }
+  // Checked ahead of the reason, because a usage limit can arrive under
+  // either "error" or "stalled" and the wording below would misdescribe it
+  // as an infrastructure fault or a system error. From the agent's side a
+  // limit is indistinguishable from being cut off mid-thought, so saying
+  // which it was is the difference between resuming and re-deriving.
+  // Reachable only through a human clicking Continue — the supervisor never
+  // resumes this category. Worded for that reader: they have presumably
+  // just fixed the billing problem, and the agent should know that is what
+  // happened rather than hunting for a fault in its own work.
+  if (resumable.category === CATEGORY.QUOTA_EXHAUSTED) {
+    return "Your previous turn was cut short because the account ran out of credit or hit"
+      + " a hard billing limit. That has now been dealt with. Nothing was wrong with your"
+      + " work or your approach. Resume from where you left off, keeping everything already"
+      + " completed, and do not restart from the beginning." + tool + unreviewed;
+  }
+  if (resumable.category === CATEGORY.RATE_LIMITED
+      || resumable.category === CATEGORY.OVERLOADED) {
+    const what = resumable.category === CATEGORY.RATE_LIMITED
+      ? "the account reached a usage limit"
+      : "the model provider was overloaded";
+    return `Your previous turn was cut short because ${what}. That limit has since`
+      + " lifted. Nothing was wrong with your work or your approach, and no action you took"
+      + " caused this. Resume from where you left off, keeping everything already completed,"
+      + " and do not restart from the beginning." + tool + unreviewed;
+  }
   // Says plainly that nothing was wrong with the work, because the agent
   // cannot tell from its own transcript: from the inside, a stalled turn
   // looks exactly like being cut off mid-thought, and an agent that assumes
@@ -1221,27 +1278,84 @@ const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
 // text, so it could equally be a permanently malformed request — which is
 // what the strike cap is for. Three attempts, then it waits for a human.
 const AUTO_RESUME_MAX_STRIKES = 3;
-// Spacing between attempts for the SAME session, by strike. A crash that
-// repeats instantly should not burn three turns in three seconds: a
-// transient condition needs time to clear before the retry means anything.
-const AUTO_RESUME_BACKOFF_MS = [60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000];
 const AUTO_RESUME_SWEEP_MS = 60 * 1000;
 
+// When may this session next be tried? Pure given its inputs, and exported
+// through the sweep AND the session list — the browser needs the same answer
+// so that a session legitimately waiting four hours for a five-hour limit to
+// reset does not read as one of the silent hangs of §13e.
+function plannedWakeFor(sessionId, rec, resumable, strikes, now = Date.now()) {
+  // Prefer a limit learned since this turn died. The account-wide registry
+  // may know about a reset that this session never saw — it failed first and
+  // another session discovered the horizon afterwards.
+  let retryAt = resumable.retryAt || null;
+  if (resumable.category === CATEGORY.RATE_LIMITED && !retryAt) {
+    const info = limitRegistry.get(sessionIdToBackend.get(sessionId));
+    if (info?.status === "rejected" && info.resetsAt) retryAt = info.resetsAt;
+  }
+  const plan = nextAttemptAt({
+    category: resumable.category,
+    retryAt,
+    strikes,
+    // After a failed attempt the clock restarts from THAT attempt, not from
+    // the original failure — otherwise every subsequent sweep would find the
+    // ladder step already elapsed and retry immediately.
+    failedAt: rec.autoResume?.lastAt || resumable.at,
+    now,
+    jitterSeed: sessionId,
+  });
+  return plan;
+}
+
+// A long wait must not look like a hang. §13e trained everyone to read a
+// silent session as broken, and a five-hour limit means a session correctly
+// sleeps for up to five hours — so it says WHEN it will resume rather than
+// sitting there looking dead. Null when there is nothing scheduled, so
+// callers can spread it without inventing fields.
+function describeWake(sessionId) {
+  const rec = turnState[sessionId];
+  const resumable = rec?.resumable;
+  if (!resumable || rec.inFlight) return {};
+  if (!AUTO_RESUME_REASONS.has(resumable.reason)) return {};
+  if (NO_RETRY.has(resumable.category)) return { resumeBlocked: resumable.category };
+  const strikes = rec.autoResume?.strikes || 0;
+  if (strikes >= AUTO_RESUME_MAX_STRIKES) return { resumeBlocked: "strikes-exhausted" };
+  const plan = plannedWakeFor(sessionId, rec, resumable, strikes);
+  if (!plan.at) return {};
+  return {
+    resumeAt: new Date(plan.at).toISOString(),
+    resumeScheduled: plan.scheduled,
+    resumeAttempt: strikes + 1,
+    resumeMaxAttempts: AUTO_RESUME_MAX_STRIKES,
+  };
+}
+
+// Spacing is no longer a single ladder. §15/KD3: the wait belongs to the
+// CATEGORY of failure, and when a backend tells us when service resumes we
+// wait until then instead of guessing. Both live in limits.mjs; what remains
+// here is the decision to act.
 function autoResumeSweep() {
+  const now = Date.now();
   for (const [sessionId, rec] of Object.entries(turnState)) {
     const resumable = rec?.resumable;
     if (!resumable || rec.inFlight) continue;
     if (!AUTO_RESUME_REASONS.has(resumable.reason)) continue;
 
+    // KD2. A wall that cannot move until a human buys credits or an org
+    // lifts a block: every attempt is waste, and retrying merely decides how
+    // much. Left for a human, exactly like a spent strike count.
+    if (NO_RETRY.has(resumable.category)) continue;
+
     const prior = rec.autoResume || null;
     const strikes = prior?.strikes || 0;
     if (strikes >= AUTO_RESUME_MAX_STRIKES) continue; // poison pill: leave it for a human
 
-    const waited = Date.now()
-      - new Date(prior?.lastAt || resumable.at || 0).getTime();
-    if (!(waited >= AUTO_RESUME_BACKOFF_MS[Math.min(strikes, AUTO_RESUME_BACKOFF_MS.length - 1)])) {
-      continue;
-    }
+    // Computed fresh each sweep rather than stored, so that a limit learned
+    // AFTER this turn died (from some other session on the same backend)
+    // still moves this session's wake — and so a restart cannot strand a
+    // session on a schedule nobody can see.
+    const plan = plannedWakeFor(sessionId, rec, resumable, strikes, now);
+    if (!plan.at || now < plan.at) continue;
     if (!sessionIsIdle(sessionId)) continue;
 
     // Recorded BEFORE starting, because startTurn clears the resumable
@@ -1266,6 +1380,8 @@ function autoResumeSweep() {
     }
     console.log(
       `[driver] auto-resume ${sessionId}: reason=${resumable.reason}`
+      + (resumable.category ? ` category=${resumable.category}` : "")
+      + ` via ${plan.reason}`
       + ` attempt ${strikes + 1}/${AUTO_RESUME_MAX_STRIKES}`);
   }
 }
@@ -1882,7 +1998,15 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
       // decide to do that without knowing.
       stalled: (() => {
         const r = resumableFor(s.sessionId);
-        return r ? { reason: r.reason, at: r.at, lastTool: r.lastTool || null } : null;
+        if (!r) return null;
+        // category/resumeAt included so a parent can tell "waiting out a
+        // usage limit, will resume by itself" from "dead, restart me" —
+        // restarting the first is pure waste and will fail the same way.
+        return {
+          reason: r.reason, at: r.at, lastTool: r.lastTool || null,
+          category: r.category || null,
+          ...describeWake(s.sessionId),
+        };
       })(),
       // Addressable, but marked: a sub-agent its parent is blocking on will
       // queue your message behind that delegation, and what the parent
@@ -3290,6 +3414,14 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
   stampSessionHost(sessionId, state.cwd);
   state.turnAnnounced = false;
   state.turnSource = source;
+  // Cleared per turn, NOT left to accumulate. These are stashed mid-turn by
+  // the backends (§15/KD1) and read at the end to classify a failure, so a
+  // 429 that one turn survived must not be sitting there to explain an
+  // unrelated failure two turns later as a rate limit — which would schedule
+  // a long confident wait for a wall that was never there.
+  state.lastApiError = null;
+  state.lastRetryStatus = null;
+  state.lastApiRetry = null;
   try {
     await state.backend.runTurn(sessionId, promptText, state);
   } catch (e) {
@@ -3313,6 +3445,42 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     const outcome = state.abortRequested
       ? { reason: "aborted" }
       : (state.turnOutcome || { reason: "completed" });
+    // KD1. Classify ONCE, here, rather than in each backend: the two
+    // runtimes report the same four conditions through entirely different
+    // fields, and the supervisor downstream should not have to know which
+    // backend produced the record it is reading. The backends' job is to
+    // surface the raw evidence (status code, terminal reason, headers); the
+    // meaning is assigned in one place.
+    if (outcome.reason === "error" || outcome.reason === "stalled") {
+      const verdict = classifyFailure({
+        statusCode: outcome.statusCode,
+        apiErrorStatus: outcome.apiErrorStatus,
+        isRetryable: outcome.isRetryable,
+        terminalReason: outcome.terminalReason,
+        headers: outcome.headers,
+        nextRetryAt: outcome.nextRetryAt,
+        // The provider's own words are often the only thing identifying a
+        // quota wall — several providers behind opencode report one as a
+        // bare 400 with prose and no distinguishing status code.
+        text: [outcome.error, outcome.providerMessage].filter(Boolean).join(" "),
+        // Stashed from the standalone rate_limit_event, which arrives before
+        // the failure it explains — see noteRateLimitInfo.
+        rateLimitInfo: limitRegistry.get(state.backend?.id),
+      });
+      outcome.category = verdict.category;
+      outcome.retryAt = verdict.retryAt;
+      outcome.horizonSource = verdict.horizonSource;
+      if (verdict.category !== CATEGORY.TRANSIENT) {
+        console.log(`[driver] turn failed for ${sessionId}: ${verdict.category}`
+          + (verdict.detail ? ` (${verdict.detail})` : "")
+          + (verdict.retryAt ? `, retry after ${new Date(verdict.retryAt).toISOString()}` : ""));
+      }
+    }
+    // Raw evidence is for classification only; it must not reach the browser
+    // or the turn-end record, where it would be dead weight nobody reads.
+    for (const k of ["statusCode", "apiErrorStatus", "isRetryable", "terminalReason", "headers", "nextRetryAt", "providerMessage"]) {
+      delete outcome[k];
+    }
     const announced = state.turnAnnounced;
     state.turnOutcome = null;
     state.abortRequested = false;
@@ -4575,6 +4743,13 @@ const server = createServer(async (req, res) => {
         lastTool: resumable.lastTool || null,
         at: resumable.at,
         prompt: resumePromptFor(resumable),
+        // So the strip can say "waiting for the usage limit to reset,
+        // resuming at 14:32" instead of offering a Continue that is about to
+        // fail exactly the same way. The button stays available — the user
+        // may know something we do not — but it is no longer the only thing
+        // on offer, and a long sleep stops reading as a hang.
+        category: resumable.category || null,
+        ...describeWake(sessionId),
       } : { available: false }),
     }));
     return;

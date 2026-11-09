@@ -3095,6 +3095,19 @@ function connect() {
     // "esc to interrupt (12s)" line).
     if (s.type === 'tool_progress') setTurnIndicator(`Running \`${s.toolName}\`… (${Math.round(s.elapsedSeconds)}s)`);
 
+    // §15. A backend retrying internally can go quiet for minutes, which
+    // looks exactly like one of the §13e stalls. Saying so costs one line
+    // and removes the whole question — and if the retries go on to fail,
+    // the user has already seen it coming.
+    if (s.type === 'api_retry') {
+      const of = s.maxRetries ? `/${s.maxRetries}` : '';
+      const when = s.nextAt
+        ? ` — next at ${new Date(s.nextAt < 1e11 ? s.nextAt * 1000 : s.nextAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        : (s.delayMs ? ` — retrying in ${Math.round(s.delayMs / 1000)}s` : '');
+      const why = s.status ? ` after HTTP ${s.status}` : '';
+      setTurnIndicator(`Provider retry ${s.attempt}${of}${why}${when}`);
+    }
+
     // Real per-token streaming (includePartialMessages): a text/thinking
     // block just started — create its bubble now and mark it as
     // live-streamed so the eventual 'message' event finalizes instead of
@@ -3987,6 +4000,44 @@ const RESUME_WORDING = {
   stalled: 'The model provider stopped responding mid-generation.',
 };
 
+// §15. The CATEGORY outranks the reason, because a usage limit arrives under
+// both "error" and "stalled" and the wording above would misdescribe it as a
+// fault. Naming it correctly is the difference between the user hunting for
+// a bug and the user waiting two minutes.
+const RESUME_CATEGORY_WORDING = {
+  rate_limited: 'The previous turn was cut short by a usage limit.',
+  overloaded: 'The model provider was overloaded and stopped responding.',
+  quota_exhausted: 'The previous turn was cut short: this account is out of credits.',
+};
+
+// A session can legitimately sleep for hours waiting out a five-hour limit.
+// §13e trained everyone to read a silent session as broken, so a scheduled
+// wait has to announce itself — otherwise the correct behaviour looks
+// exactly like the bug it replaced.
+function describeResumePlan(d) {
+  if (d.resumeBlocked === 'quota_exhausted') {
+    return ' It will not retry on its own — the limit needs credits or a reset.';
+  }
+  if (d.resumeBlocked === 'strikes-exhausted') {
+    return ' Automatic retries are exhausted; continuing is up to you.';
+  }
+  if (!d.resumeAt) return '';
+  const at = new Date(d.resumeAt);
+  if (Number.isNaN(at.getTime())) return '';
+  const mins = Math.round((at.getTime() - Date.now()) / 60000);
+  // "in 3 minutes" is easier to act on than a wall-clock time for short
+  // waits; a clock time is easier for long ones, where the user wants to
+  // know whether to go and do something else.
+  const when = mins <= 0 ? 'any moment now'
+    : mins < 90 ? `in ~${mins} minute${mins === 1 ? '' : 's'}`
+    : `at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const attempt = d.resumeAttempt && d.resumeMaxAttempts
+    ? ` (attempt ${d.resumeAttempt} of ${d.resumeMaxAttempts})` : '';
+  return d.resumeScheduled
+    ? ` Waiting for the limit to reset — resuming ${when}${attempt}.`
+    : ` It will retry by itself ${when}${attempt}.`;
+}
+
 
 // Messages are appended to the feed, so a resume bar that merely lives there
 // would drift upward as the turn's output arrives. Re-appending on every show
@@ -4023,10 +4074,15 @@ async function refreshResumeBar() {
     resumeBar.classList.remove('show');
     return;
   }
-  const why = RESUME_WORDING[d.reason] || 'The previous turn ended abnormally.';
-  const detail = d.error ? ` ${String(d.error).slice(0, 120)}` : '';
+  const why = RESUME_CATEGORY_WORDING[d.category]
+    || RESUME_WORDING[d.reason]
+    || 'The previous turn ended abnormally.';
+  // Suppressed for a usage limit: the raw provider text is long, repeats
+  // what the sentence above already says, and crowds out the one new piece
+  // of information the user actually needs — when it resumes.
+  const detail = (d.error && !d.category) ? ` ${String(d.error).slice(0, 120)}` : '';
   const tool = d.lastTool ? ` (during ${d.lastTool})` : '';
-  resumeText.textContent = `${why}${tool}${detail}`;
+  resumeText.textContent = `${why}${tool}${detail}${describeResumePlan(d)}`;
   resumeBar.classList.add('show');
   placeResumeBar();
 }

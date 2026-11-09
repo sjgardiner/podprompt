@@ -18,6 +18,9 @@
 // drift from the shipped code.
 
 import { readFileSync } from "node:fs";
+import {
+  CATEGORY, NO_RETRY, LADDER, RESET_PAD_MS, nextAttemptAt, createLimitRegistry,
+} from "./limits.mjs";
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -49,7 +52,11 @@ function bodyOf(name) {
 const AGO = (ms) => new Date(Date.now() - ms).toISOString();
 const HOUR = 3600000;
 
-function fresh(state, { startOk = true, idle = true } = {}) {
+// The scheduling half now lives in limits.mjs (§15/KD3), and the REAL
+// implementations are injected rather than stubbed. Stubbing them would let
+// the two halves drift: the sweep's whole job is now "ask limits.mjs when,
+// then act", and a fake clock-oracle would assert only the acting.
+function fresh(state, { startOk = true, idle = true, backend = "claude-code", limitInfo = null } = {}) {
   const sandbox = `
     // Silenced: the sweep logs each resume, which would bury the results.
     const console = { log() {}, error() {} };
@@ -63,16 +70,28 @@ function fresh(state, { startOk = true, idle = true } = {}) {
       calls.started.push({ sessionId, prompt, ...opts });
       return arguments[1] ? { ok: true } : { ok: false, reason: "autonomy-paused" };
     };
+    const { CATEGORY, NO_RETRY, nextAttemptAt } = arguments[3];
+    const sessionIdToBackend = arguments[4];
+    const limitRegistry = arguments[5];
     const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
     const AUTO_RESUME_MAX_STRIKES = 3;
-    const AUTO_RESUME_BACKOFF_MS = [60000, 300000, 900000];
+    ${bodyOf("plannedWakeFor")}
     ${bodyOf("autoResumeSweep")}
-    return { autoResumeSweep, turnState, calls };
+    ${bodyOf("describeWake")}
+    return { autoResumeSweep, describeWake, plannedWakeFor, turnState, calls };
   `;
-  return new Function(sandbox)(state, startOk, idle);
+  const registry = createLimitRegistry();
+  if (limitInfo) registry.note(backend, limitInfo);
+  const backendMap = new Map(Object.keys(state).map((id) => [id, backend]));
+  return new Function(sandbox)(
+    state, startOk, idle,
+    { CATEGORY, NO_RETRY, nextAttemptAt },
+    backendMap, registry,
+  );
 }
 
-const resumable = (reason, atMsAgo = HOUR) => ({ reason, error: null, lastTool: null, at: AGO(atMsAgo) });
+const resumable = (reason, atMsAgo = HOUR, extra = {}) =>
+  ({ reason, error: null, lastTool: null, at: AGO(atMsAgo), ...extra });
 
 // ── Which reasons are eligible ────────────────────────────────────────────
 {
@@ -207,6 +226,138 @@ const resumable = (reason, atMsAgo = HOUR) => ({ reason, error: null, lastTool: 
   // Dropping it on success is what resets the count.
   const ended = bodyOf("markTurnEnded");
   check("...so a clean turn clears it", /bad && rec\.autoResume/.test(ended), ended.slice(0, 200));
+}
+
+// ── §15: a quota wall is never retried ────────────────────────────────────
+//
+// The failure mode this prevents: treating "out of credits until a human
+// buys more" exactly like "the process crashed" — burning all three strikes
+// against an immovable wall inside the first three minutes, then declaring
+// the session beyond help for a reason that had nothing to do with it.
+{
+  const wall = fresh({ a: {
+    inFlight: false,
+    resumable: resumable("error", HOUR, { category: CATEGORY.QUOTA_EXHAUSTED }),
+  } });
+  wall.autoResumeSweep();
+  check("a quota-exhausted turn is never retried", wall.calls.started.length === 0);
+  check("...and does not even spend a strike", wall.turnState.a.autoResume === undefined);
+  check("...and says so rather than going quiet",
+    wall.describeWake("a").resumeBlocked === CATEGORY.QUOTA_EXHAUSTED, wall.describeWake("a"));
+
+  // Every other category still retries — the point is discrimination, not
+  // a new way to refuse.
+  for (const category of [CATEGORY.TRANSIENT, CATEGORY.RATE_LIMITED, CATEGORY.OVERLOADED]) {
+    const d = fresh({ a: {
+      inFlight: false, resumable: resumable("error", 2 * HOUR, { category }),
+    } });
+    d.autoResumeSweep();
+    check(`${category} is still retried`, d.calls.started.length === 1, category);
+  }
+}
+
+// ── §15: a known reset time replaces the ladder ───────────────────────────
+{
+  const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const waiting = fresh({ a: {
+    inFlight: false,
+    resumable: resumable("error", HOUR, { category: CATEGORY.RATE_LIMITED, retryAt: soon }),
+  } });
+  waiting.autoResumeSweep();
+  // The ladder alone would have fired an hour ago. The reset has not
+  // arrived, so nothing should happen — and this is the assertion that
+  // proves the horizon actually overrides the ladder rather than racing it.
+  check("a session waiting on a future reset is not retried",
+    waiting.calls.started.length === 0, waiting.calls.started);
+
+  const w = waiting.describeWake("a");
+  check("...but it reports WHEN it will resume", !!w.resumeAt, w);
+  check("...marked as scheduled, not guessed", w.scheduled !== false && w.resumeScheduled === true, w);
+  // A five-hour limit means a correct five-hour sleep. §13e trained everyone
+  // to read a silent session as broken, so this must not be silent.
+  check("...which is past the reset, not before it",
+    new Date(w.resumeAt).getTime() >= new Date(soon).getTime() + RESET_PAD_MS, w);
+
+  const past = new Date(Date.now() - 60 * 1000).toISOString();
+  const ready = fresh({ a: {
+    inFlight: false,
+    resumable: resumable("error", HOUR, { category: CATEGORY.RATE_LIMITED, retryAt: past }),
+  } });
+  ready.autoResumeSweep();
+  check("an elapsed reset falls back to the ladder and fires",
+    ready.calls.started.length === 1, ready.calls.started);
+}
+
+// ── §15: the account-wide registry can move a session's wake ──────────────
+//
+// KD4. A limit belongs to the ACCOUNT. A session that failed BEFORE anyone
+// knew the reset time must still pick it up from whichever session
+// discovered it — otherwise each one learns the horizon only by failing
+// against the wall itself.
+{
+  const resetsAt = Date.now() + 40 * 60 * 1000;
+  const d = fresh(
+    { a: { inFlight: false, resumable: resumable("error", 2 * HOUR, { category: CATEGORY.RATE_LIMITED }) } },
+    { backend: "claude-code", limitInfo: { status: "rejected", resetsAt } },
+  );
+  d.autoResumeSweep();
+  check("a limit learned elsewhere defers this session's retry",
+    d.calls.started.length === 0, d.calls.started);
+  check("...to just after that reset",
+    new Date(d.describeWake("a").resumeAt).getTime() >= resetsAt + RESET_PAD_MS,
+    d.describeWake("a"));
+
+  // Only when the registry says we are actually blocked: an "allowed"
+  // snapshot must not park a session that simply crashed.
+  const allowed = fresh(
+    { a: { inFlight: false, resumable: resumable("error", 2 * HOUR, { category: CATEGORY.RATE_LIMITED }) } },
+    { limitInfo: { status: "allowed", resetsAt } },
+  );
+  allowed.autoResumeSweep();
+  check("an 'allowed' snapshot does not defer anything",
+    allowed.calls.started.length === 1, allowed.calls.started);
+}
+
+// ── §15: the wake must be STABLE across sweeps ────────────────────────────
+//
+// The sweep recomputes the wake every minute and compares it to the clock.
+// With Math.random() jitter the same session would get a different deadline
+// each tick — sometimes already past, sometimes not — and the retry would
+// fire on whichever sweep happened to roll low. That is a race, not a
+// schedule.
+{
+  const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const d = fresh({ a: {
+    inFlight: false,
+    resumable: resumable("error", HOUR, { category: CATEGORY.RATE_LIMITED, retryAt: soon }),
+  } });
+  const seen = new Set();
+  for (let i = 0; i < 5; i++) {
+    d.autoResumeSweep();
+    seen.add(d.describeWake("a").resumeAt);
+  }
+  check("the reported wake does not move between sweeps", seen.size === 1, [...seen]);
+  check("...and none of those sweeps fired early", d.calls.started.length === 0);
+}
+
+// ── §15: an exhausted session reports why, rather than going silent ───────
+{
+  const spent = fresh({ a: {
+    inFlight: false, resumable: resumable("error"),
+    autoResume: { strikes: 3, lastAt: AGO(HOUR) },
+  } });
+  check("a strike-exhausted session says so",
+    spent.describeWake("a").resumeBlocked === "strikes-exhausted", spent.describeWake("a"));
+
+  const running = fresh({ a: { inFlight: true, resumable: resumable("error") } });
+  check("a running session advertises no wake",
+    running.describeWake("a").resumeAt === undefined, running.describeWake("a"));
+
+  const aborted = fresh({ a: { inFlight: false, resumable: resumable("aborted") } });
+  check("a deliberately stopped session advertises no wake",
+    aborted.describeWake("a").resumeAt === undefined, aborted.describeWake("a"));
+  check("...and is not flagged as blocked either",
+    aborted.describeWake("a").resumeBlocked === undefined, aborted.describeWake("a"));
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────

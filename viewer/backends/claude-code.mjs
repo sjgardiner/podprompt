@@ -37,7 +37,48 @@ import { z } from "zod";
 //
 // Naming alone did not fix that. This does, because it names our tools
 // explicitly, which is enough for the model to go and find them.
-export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging, broadcastUserPrompt }) {
+// TerminalReason values that mean the turn did NOT do what it was asked.
+// §15/KD1: these are what a bare `continue` in the result handler was
+// throwing away.
+//
+// Deliberately EXCLUDES the abort family (aborted_streaming, aborted_tools)
+// and the deliberate-stop family (stop_hook_prevented, hook_stopped): those
+// are somebody's decision, and resuming a turn that was stopped on purpose
+// is the worst thing the supervisor could do. Also excludes max_turns,
+// background_requested, tool_deferred and completed — ordinary endings.
+//
+// INCLUDES prompt_too_long and image_error, which will fail again on retry
+// and therefore cost three wasted attempts before the strike cap stops them.
+// That is accepted: the alternative is them staying invisible, which is the
+// exact bug this set exists to fix, and three bounded retries is a much
+// smaller cost than an agent that silently looks finished.
+const BAD_TERMINAL_REASONS = new Set([
+  "blocking_limit", "rapid_refill_breaker", "budget_exhausted",
+  "api_error", "model_error", "turn_setup_failed",
+  "malformed_tool_use_exhausted", "structured_output_retry_exhausted",
+  "prompt_too_long", "image_error",
+]);
+
+// Result subtypes that already imply a terminal reason the result message
+// may not spell out, so classifyFailure sees the same evidence either way.
+const SUBTYPE_TERMINAL_REASON = {
+  error_max_budget_usd: "budget_exhausted",
+  error_max_structured_output_retries: "structured_output_retry_exhausted",
+};
+
+// Human-readable, because this string is shown to the user AND fed back to
+// the agent in the resume prompt. `result` carries the CLI's own error text
+// when there is one; the codes are a fallback so the message is never empty.
+function describeResultFailure(msg) {
+  const parts = [];
+  if (typeof msg.result === "string" && msg.result.trim()) parts.push(msg.result.trim());
+  if (msg.terminal_reason && msg.terminal_reason !== "completed") parts.push(`terminal_reason=${msg.terminal_reason}`);
+  if (msg.api_error_status) parts.push(`HTTP ${msg.api_error_status}`);
+  if (msg.subtype && msg.subtype !== "success") parts.push(msg.subtype);
+  return parts.join(" · ") || "the turn ended with an error flag but no detail";
+}
+
+export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, registerChild, autoApproveForSession, updateSubAgent, messaging, broadcastUserPrompt, noteRateLimitInfo }) {
   // Best-effort transcript-uuid -> live bubble-id pairing, kept for this
   // process's lifetime only. Filled by runTurn's consume() loop (which
   // drains the stream tracker's announced ids per completed assistant
@@ -1680,6 +1721,33 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           continue;
         }
 
+        // §15/KD3. A STANDALONE event, fired whenever limit info changes —
+        // which means it arrives BEFORE the turn it will eventually kill.
+        // Stashing it as it streams is the only way to still be holding the
+        // reset time at the moment the failure lands; by then the event is
+        // long gone and the result message carries no reset time of its own.
+        if (msg.type === "rate_limit_event" && msg.rate_limit_info) {
+          noteRateLimitInfo?.("claude-code", msg.rate_limit_info);
+          continue;
+        }
+
+        // The SDK retrying internally. Surfaced so a turn that goes quiet
+        // for two minutes mid-retry does not read as a stall — and recorded,
+        // because error_status here is often the only status code we ever
+        // see when the retries go on to succeed or to exhaust themselves.
+        if (msg.type === "system" && msg.subtype === "api_retry") {
+          state.lastApiRetry = {
+            attempt: msg.attempt, maxRetries: msg.max_retries,
+            delayMs: msg.retry_delay_ms, status: msg.error_status ?? null,
+            at: Date.now(),
+          };
+          broadcastStatus(sessionId, {
+            type: "api_retry", attempt: msg.attempt, maxRetries: msg.max_retries,
+            delayMs: msg.retry_delay_ms, status: msg.error_status ?? null,
+          });
+          continue;
+        }
+
         if (msg.type === "result") {
           // supportedModels() used to be called here too (and, briefly,
           // usage_EXPERIMENTAL_...() alongside it) — moved to the
@@ -1690,6 +1758,42 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // is winding down, not because the CLI lacks the command.
           // usage_EXPERIMENTAL_...() has since moved again, off this
           // per-turn `q` entirely — see refreshPlanUsage() above.
+          //
+          // §15/KD1. This used to be a bare `continue`, and that single word
+          // was the bug: the SDK was telling us the turn had been killed by
+          // a usage limit and we discarded the message, so the driver filed
+          // it as a clean completion and the keep-alive supervisor never saw
+          // a failure to act on.
+          //
+          // DO NOT "SIMPLIFY" THIS TO A subtype CHECK. is_error,
+          // api_error_status and terminal_reason all live on the SUCCESS
+          // result type: a usage-limit ending arrives as
+          // subtype:"success" + is_error:true + terminal_reason:
+          // "blocking_limit". Switching on subtype alone passes every test
+          // that does not involve a real limit and catches none of them.
+          const failed = msg.is_error === true
+            || (msg.subtype && msg.subtype !== "success")
+            || BAD_TERMINAL_REASONS.has(msg.terminal_reason);
+          if (failed && !state.abortRequested) {
+            // Does not overwrite an outcome the turn already recorded: a
+            // thrown error carries a real message, whereas by this point the
+            // result is a summary of it.
+            state.turnOutcome = state.turnOutcome || {
+              reason: "error",
+              error: describeResultFailure(msg),
+            };
+            // Raw evidence for classifyFailure. Attached even when an
+            // outcome already exists, because the thrown error that produced
+            // it carried none of these fields.
+            state.turnOutcome.terminalReason = msg.terminal_reason
+              || SUBTYPE_TERMINAL_REASON[msg.subtype] || null;
+            state.turnOutcome.apiErrorStatus =
+              msg.api_error_status ?? state.lastApiRetry?.status ?? null;
+            console.log(`[claude-code] turn ${sessionId} ended badly:`
+              + ` subtype=${msg.subtype} is_error=${msg.is_error}`
+              + ` terminal_reason=${msg.terminal_reason || "-"}`
+              + ` api_error_status=${msg.api_error_status ?? "-"}`);
+          }
           continue;
         }
 

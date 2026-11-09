@@ -452,7 +452,11 @@ deploy_viewer() {
         exit 1
     fi
 
-    local required=(server.py viewer.html start-viewer.sh driver.mjs autonomy.mjs messaging.mjs opencode-plugin.ts backends)
+    # This list is both the preflight check AND the copy manifest below, so a
+    # new driver module that is not named here is silently never deployed —
+    # the driver then dies on import at startup, in the container, with the
+    # repo looking perfectly fine.
+    local required=(server.py viewer.html start-viewer.sh driver.mjs autonomy.mjs messaging.mjs limits.mjs opencode-plugin.ts backends)
     local missing=()
     local f
     for f in "${required[@]}"; do

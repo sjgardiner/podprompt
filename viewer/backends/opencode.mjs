@@ -611,6 +611,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     const { timeoutMs, headers, ...rest } = opts || {};
     let signal;
     let timer;
+    const startedAt = Date.now();
     if (timeoutMs) {
       const ctl = new AbortController();
       timer = setTimeout(() => ctl.abort(new Error(`OpenCode API ${path} timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -629,6 +630,32 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       if (res.status === 204) return null;
       const ct = res.headers.get("content-type") || "";
       return ct.includes("application/json") ? res.json() : res.text();
+    } catch (e) {
+      // A connection-level failure from undici arrives as the bare string
+      // "fetch failed" — no method, no path, no elapsed time. That is what
+      // reaches the user as a turn's resumable.error, and it is useless:
+      // four OpenCode sessions died with exactly that message and it was
+      // impossible to tell from it WHICH request had failed, let alone why.
+      //
+      // It matters most for the turn-driving POST /session/{id}/message,
+      // which carries no timeoutMs and so stays open for the entire turn —
+      // minutes, often with no bytes flowing while a tool runs. Anything
+      // that severs that socket lands here, and without the context below
+      // the failure is indistinguishable from any other fetch in the file.
+      //
+      // Errors this function raised itself already name the path; only the
+      // thrown-from-underneath ones need dressing.
+      if (e && typeof e.message === "string" && !e.message.startsWith("OpenCode API")) {
+        const ms = Date.now() - startedAt;
+        const method = (rest.method || "GET").toUpperCase();
+        const dressed = new Error(
+          `OpenCode API ${method} ${path} failed after ${ms}ms: ${e.message}`,
+          { cause: e });
+        dressed.opencodePath = path;
+        dressed.elapsedMs = ms;
+        throw dressed;
+      }
+      throw e;
     } finally {
       if (timer) clearTimeout(timer);
     }

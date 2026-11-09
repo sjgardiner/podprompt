@@ -160,11 +160,17 @@ const NATIVE = { kid: { childKind: "native-task" } };
 // site is the feature; assert it against source, since the surrounding
 // function cannot be unit-tested in isolation.
 {
-  const parkAt = src.indexOf('inbox.park(e.id, "watched")');
-  const gate = parkAt < 0 ? "" : src.slice(Math.max(0, parkAt - 300), parkAt);
-  check("the watched gate still exists",
-    /if \(!userDirected && isWatched\(sessionId\)/.test(gate), gate.slice(-120));
-  check("...and consults autoDeliverFor", /!autoDeliverFor\(sessionId\)/.test(gate), gate.slice(-120));
+  // Asserted against the whole function rather than a fixed-size window
+  // before the park call: the gate's operands are now hoisted into locals,
+  // and a byte-distance assertion broke the moment a comment grew. What
+  // must hold is that the decision still READS both inputs and that the
+  // park happens only when they say so — not where the characters sit.
+  const drain = bodyOf("maybeDrainInbox");
+  check("the hold decision reads isWatched", /isWatched\(sessionId\)/.test(drain));
+  check("the hold decision reads autoDeliverFor", /autoDeliverFor\(sessionId\)/.test(drain));
+  check("mail is parked as 'watched' only behind that decision",
+    /if \(!userDirected && watched && !auto\) \{\s*\n\s*for \(const e of group\) inbox\.park\(e\.id, "watched"\);/.test(drain),
+    drain.slice(drain.indexOf("watched && !auto") - 60, drain.indexOf("watched && !auto") + 120));
 
   // The autonomy gate must NOT be bypassed by it: the user asked for
   // visibility-gating to be skippable, explicitly keeping the budget as the

@@ -1235,7 +1235,16 @@ function composeDelivery(entries) {
 }
 
 function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
-  if (!sessionIsIdle(sessionId)) return false;
+  if (!sessionIsIdle(sessionId)) {
+    // Mail that arrives mid-turn is left QUEUED and retried when the turn
+    // ends, so it never reaches the hold decision below on this pass. That
+    // is correct, but it is also a second silent state — logged so the
+    // timeline reads continuously rather than skipping from "sent" to
+    // "delivered" with an unexplained gap in between.
+    const waiting = inbox.pendingFor(sessionId).length;
+    if (waiting) console.log(`[driver] mail ${sessionId}: ${waiting} msg(s) queued, session busy`);
+    return false;
+  }
   // Everything pending, not a per-chain slice. nextDrainGroup existed solely
   // so one chain's budget could not pay for another's work; with a single
   // global counter (AD2) there is nothing left to keep apart, and coalescing
@@ -1247,7 +1256,21 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Checked BEFORE the gate because it is the more specific condition —
   // and skipped entirely for a delivery the user explicitly asked for,
   // which is the whole point of the button.
-  if (!userDirected && isWatched(sessionId) && !autoDeliverFor(sessionId)) {
+  // Every input to the hold decision, logged once, at the point of decision.
+  //
+  // This exists because the logging used to be one-sided: a DELIVERY logged
+  // ("drain -> ..."), a HOLD logged nothing. So the system recorded the
+  // outcome you can already see on screen and stayed silent about the one
+  // that needs explaining, and "why was that delivered when I was watching?"
+  // could only be answered by archaeology — twice, at length, wrongly.
+  // Cheap: one line per arrival of mail, not per message.
+  const watched = isWatched(sessionId);
+  const auto = autoDeliverFor(sessionId);
+  console.log(
+    `[driver] mail ${sessionId}: ${group.length} msg(s), watched=${watched}`
+    + ` autoDeliver=${auto} userDirected=${userDirected}`
+    + ` -> ${!userDirected && watched && !auto ? "HOLD" : "deliver"}`);
+  if (!userDirected && watched && !auto) {
     for (const e of group) inbox.park(e.id, "watched");
     broadcastStatus(sessionId, { type: "inbox_changed" });
     return false;

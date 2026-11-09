@@ -164,6 +164,13 @@ export default (async () => {
             .describe("The work, stated so it stands alone. The new session starts a FRESH conversation: it cannot see this one, anything you have read, or the instructions you were given — if it needs background, put it here. It DOES share the same workspace and working directory, so refer to files by path rather than pasting them."),
           title: tool.schema.string().optional()
             .describe("Short label for the new session."),
+          model: tool.schema.string().optional()
+            .describe("Which model the new session runs on. Omit to inherit yours when the"
+              + " backend matches, or that backend's default otherwise. Model ids differ by"
+              + " backend and are not listed anywhere — if you want a particular one and do"
+              + " not know its id, just guess: an unrecognized value is rejected with the"
+              + " full list of ids that backend accepts, and nothing else happens, so you"
+              + " can immediately call again with a real one."),
           await: tool.schema.boolean().optional()
             .describe("Default false: returns immediately and the result arrives later as a"
               + " message. Set true ONLY for quick work whose answer you need inside this turn"
@@ -188,6 +195,7 @@ export default (async () => {
                 backend: args.backend,
                 prompt: args.prompt,
                 title: args.title || null,
+                model: args.model || null,
                 awaitResult: args.await === true,
               }),
             })

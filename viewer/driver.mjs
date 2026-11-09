@@ -1626,6 +1626,41 @@ function parentBackendId(sessionId) {
   return sessionIdToBackend.get(sessionId) || null;
 }
 
+// Resolve a requested model id against a backend's real list, for
+// delegation's SELF-TEACHING rejection. Nothing in this environment tells a
+// model what ids a backend accepts: there is no list_models tool, no mention
+// of the driver or its /models route in any system prompt, and the two
+// backends' id shapes do not rhyme ("sonnet" vs "opencode/iceman-free"), so
+// guessing from training priors cannot work. Rather than add a tool nobody
+// would think to call, the FIRST wrong guess is answered with the whole list
+// — the error message is the documentation, and it arrives exactly when it is
+// needed.
+//
+// Matching is case-insensitive and returns the canonical id, because "Sonnet"
+// is a typo rather than a thing worth teaching.
+//
+// Fails OPEN when the backend cannot answer: an unreachable `opencode serve`
+// or an unwarmed model cache is a backend problem, and refusing a delegation
+// over it would be a worse failure than forwarding an id the backend will
+// judge for itself.
+async function resolveModelId(backendId, wanted) {
+  const backend = backends[backendId];
+  if (!backend || typeof backend.listModels !== "function") return { ok: true, id: wanted };
+  let available = [];
+  try {
+    const info = await backend.listModels(null);
+    available = (info?.available || []).map((m) => m && m.id).filter(Boolean);
+  } catch {
+    return { ok: true, id: wanted };
+  }
+  if (!available.length) return { ok: true, id: wanted };
+  const exact = available.find((id) => id === wanted);
+  if (exact) return { ok: true, id: exact };
+  const ci = available.find((id) => id.toLowerCase() === wanted.toLowerCase());
+  if (ci) return { ok: true, id: ci };
+  return { ok: false, available };
+}
+
 // delegate: create a child session on a named backend and give it work.
 // Always CREATES — addressing an existing session is `message`. Keeping that
 // boundary sharp is what stops the parent-edge semantics from going
@@ -1641,6 +1676,22 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   const state = sessions.get(fromSessionId);
   if (!backends[backend]) return { ok: false, reason: "unknown-backend", backend };
   if (!String(prompt || "").trim()) return { ok: false, reason: "empty-prompt" };
+
+  // Checked against the TARGET backend (a model id means nothing to the
+  // other one) and BEFORE noteFanout, so a wrong guess costs nothing but the
+  // round trip — the whole point is that guessing is the intended way to
+  // find out, so it must be cheap to be wrong. See resolveModelId.
+  let wantModel = model === null || model === undefined ? "" : String(model).trim();
+  if (wantModel) {
+    const resolved = await resolveModelId(backend, wantModel);
+    if (!resolved.ok) {
+      return {
+        ok: false, reason: "unknown-model",
+        backend, model: wantModel, available: resolved.available,
+      };
+    }
+    wantModel = resolved.id;
+  }
 
   // Breadth before depth: the counter bounds how long a cascade runs, not
   // how wide it goes, and width is where the expensive failure lives.
@@ -1698,8 +1749,8 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   // across when the backends match. Otherwise the child takes its own
   // backend's default.
   const parentBackend = sessionIdToBackend.get(fromSessionId) || null;
-  const inherited = (!model && parentBackend === backend) ? state?.model : null;
-  const chosenModel = model || inherited || null;
+  const inherited = (!wantModel && parentBackend === backend) ? state?.model : null;
+  const chosenModel = wantModel || inherited || null;
   if (chosenModel) preSeeds.set(childId, { ...(preSeeds.get(childId) || {}), model: chosenModel });
 
   // Auto-approve is NOT set here: it resolves through the parent edge at
@@ -1951,6 +2002,18 @@ function describeReceipt(receipt, to) {
     return `No backend called "${receipt.backend}". Use "claude-code" or "opencode".`;
   }
   if (receipt.reason === "empty-prompt") return "Delegation needs a prompt describing the work.";
+  // The one rejection that is meant to be USEFUL rather than merely correct:
+  // the valid ids are not discoverable anywhere else, so they ride back on
+  // the error. Phrased as a retry instruction because the caller is a model
+  // that just guessed and can immediately guess right.
+  if (receipt.reason === "unknown-model") {
+    const list = (receipt.available || []).join(", ");
+    return `No model called "${receipt.model}" on ${receipt.backend}.`
+      + (list
+        ? ` The ids it accepts are: ${list}. Call delegate_session again with one of those`
+          + ` as model, or omit model to use the default.`
+        : ` Omit model to use the default.`);
+  }
   const why = {
     "unknown-handle": `No peer called ${to} in this realm. Use list_sessions to see who exists.`,
     "unknown-realm": `No such realm in ${to}. Only local peers are reachable right now.`,

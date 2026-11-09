@@ -558,7 +558,15 @@ figure.diagram svg {
      into illegibility. Safe now that the grid track is minmax(0, 1fr) and
      cannot be pushed wider by its contents. */
   min-width: 520px;
+  /* Centred in the column: these are standalone illustrations, not something
+     that reads inline with the paragraph beside it. */
+  margin-inline: auto;
 }
+
+/* Opt out for a diagram whose content is anchored to one edge — an annotated
+   panel with leader lines running rightwards reads as detached when centred,
+   and wants its left edge on the text's left edge instead. */
+figure.diagram.flush-left svg { margin-inline: 0; }
 
 /* Surfaces */
 .dgm-box      { fill: var(--bg-raised); stroke: var(--border); stroke-width: 1; }

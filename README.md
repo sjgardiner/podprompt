@@ -54,7 +54,7 @@ Keep the checkout somewhere permanent: the command resolves it from its own
 location on every run, which is what lets `--build` and `--deploy-viewer` work
 from any directory.
 
-Full detail, including API-key and LiteLLM setups: **[Install & launch](docs/install.html)**.
+Full detail, including API-key and LiteLLM setups: **[Install & launch](https://sjgardiner.github.io/podprompt/install.html)**.
 
 ## What it does
 
@@ -75,23 +75,23 @@ Full detail, including API-key and LiteLLM setups: **[Install & launch](docs/ins
 
 ## Documentation
 
-The guide lives in [`docs/`](docs/). It is plain HTML with no build step — open
-[`docs/index.html`](docs/index.html) in a browser.
+**https://sjgardiner.github.io/podprompt/** — or open `docs/index.html` from a
+clone. It is plain HTML with no build step and no dependencies.
 
 | Page | What's in it |
 | --- | --- |
-| [Start here](docs/index.html) | What PodPrompt is, the five ideas, quickstart |
-| [Install & launch](docs/install.html) | Prerequisites, building, credentials, troubleshooting |
-| [The interface](docs/tour.html) | Header instruments, every bubble type, every setting and its default |
-| [Many sessions](docs/sessions.html) | Running several at once, sub-agents, and what each Stop stops |
-| [Sessions talking](docs/messaging.html) | Handles, the tools agents have, and why mail sometimes waits |
-| [Delegating work](docs/delegation.html) | Spawning sessions, choosing backend and model, collecting results |
-| [Running unattended](docs/unattended.html) | Budgets, time windows, usage limits, automatic recovery |
-| [Playbook](docs/playbook.html) | Patterns for real leverage, and a "nothing is happening" checklist |
-| [Reference](docs/reference.html) | Every flag, variable, path, port, and numeric default |
+| [Start here](https://sjgardiner.github.io/podprompt/) | What PodPrompt is, the five ideas, quickstart |
+| [Install & launch](https://sjgardiner.github.io/podprompt/install.html) | Prerequisites, building, credentials, troubleshooting |
+| [The interface](https://sjgardiner.github.io/podprompt/tour.html) | Header instruments, every bubble type, every setting and its default |
+| [Many sessions](https://sjgardiner.github.io/podprompt/sessions.html) | Running several at once, sub-agents, and what each Stop stops |
+| [Sessions talking](https://sjgardiner.github.io/podprompt/messaging.html) | Handles, the tools agents have, and why mail sometimes waits |
+| [Delegating work](https://sjgardiner.github.io/podprompt/delegation.html) | Spawning sessions, choosing backend and model, collecting results |
+| [Running unattended](https://sjgardiner.github.io/podprompt/unattended.html) | Budgets, time windows, usage limits, automatic recovery |
+| [Playbook](https://sjgardiner.github.io/podprompt/playbook.html) | Patterns for real leverage, and a "nothing is happening" checklist |
+| [Reference](https://sjgardiner.github.io/podprompt/reference.html) | Every flag, variable, path, port, and numeric default |
 
-New here? Read [Start here](docs/index.html), then
-[The interface](docs/tour.html).
+New here? Read [Start here](https://sjgardiner.github.io/podprompt/), then
+[The interface](https://sjgardiner.github.io/podprompt/tour.html).
 
 ## The five ideas
 

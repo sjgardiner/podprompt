@@ -4226,11 +4226,25 @@ const server = createServer(async (req, res) => {
         if (s_.archived || s_.unreachable) continue;
         peers.ensure(s_.sessionId, {
           title: s_.customTitle || s_.summary || s_.firstPrompt || null,
-          // Only a title the USER set may move a handle. A backend's
-          // auto-summary drifts — sampled live it held a later user message
-          // rather than the first — so following it would rename a session
-          // every few turns for no benefit.
-          titleIsCustom: !!s_.customTitle,
+          // NEVER from this route, whatever the title looks like.
+          //
+          // This was briefly `!!s_.customTitle`, on the assumption that a
+          // custom title meant the user had set one. IT DOES NOT: both
+          // backends auto-title their own sessions into that field. Measured
+          // on six delegated probes — every one carried a machine-generated
+          // customTitle, and one had its parent-chosen handle @probe2-oc2
+          // silently re-derived to @podprompt-messaging-connectivity.
+          //
+          // Worse, it was nondeterministic: a sibling with the identical
+          // auto-title kept its handle only because the derived name was
+          // already taken and the collision refusal fired, and a third
+          // escaped on poll timing. Nothing here can tell a backend's guess
+          // from a human's intent, so this route does not try.
+          //
+          // The only honest signal is a title arriving through a route the
+          // USER drove: /rename-session and /peer-settings, which pass
+          // titleIsCustom themselves.
+          titleIsCustom: false,
           backend: s_.backend,
         });
       }

@@ -213,6 +213,40 @@ const NATIVE = { kid: { childKind: "native-task" } };
   check("a route exists to change it", /path === "\/auto-deliver"/.test(src));
 }
 
+// ── MD14: a backend's auto-title must never move a handle ────────────────
+//
+// SHIPPED AND CAUGHT BY LIVE PROBES. Re-derivation was gated on
+// `!!s_.customTitle`, on the assumption that a custom title meant the user
+// had set one. BOTH BACKENDS AUTO-TITLE THEIR OWN SESSIONS into that field.
+//
+// Measured on six delegated probes: every one carried a machine-generated
+// customTitle, and @probe2-oc2 — a handle its parent chose — was silently
+// re-derived to @podprompt-messaging-connectivity. A sibling with the
+// identical auto-title kept its handle only because the derived name was
+// already taken and the collision refusal fired; a third escaped on poll
+// timing. So the naming was NONDETERMINISTIC, which is worse than being
+// consistently wrong.
+//
+// The /sessions poll cannot tell a backend's guess from a human's intent,
+// so it must not claim to.
+{
+  const poll = src.slice(src.indexOf("for (const s_ of allSessions)"));
+  const ensure = poll.slice(0, poll.indexOf("}", poll.indexOf("peers.ensure(")) + 1);
+  check("the sessions poll never claims a title is user-set",
+    /titleIsCustom: false/.test(ensure), ensure.slice(0, 300));
+  check("...and specifically not from customTitle",
+    !/titleIsCustom: !!s_\.customTitle/.test(src));
+
+  // The routes the USER actually drives must still say so, or a rename
+  // stops moving the handle at all and MD14 does nothing.
+  const rename = src.slice(src.indexOf('path === "/rename-session"'));
+  check("a rename still counts as user intent",
+    /titleIsCustom: !!body\.title/.test(rename.slice(0, 1200)), rename.slice(0, 600));
+  const prefs = src.slice(src.indexOf('peers.ensure(body.sessionId, { title: body.title'));
+  check("peer-settings still counts as user intent",
+    /titleIsCustom: !!body\.title/.test(prefs.slice(0, 300)), prefs.slice(0, 200));
+}
+
 // ── MD10: one grace period, every way of looking away ─────────────────────
 //
 // There used to be two release paths that drifted apart by design: an

@@ -841,6 +841,43 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button.danger { color: var(--danger); border-color: var(--danger); }
 
+  /* MD4: the mail bar. In the feed, anchored last, so delivered mail and
+     the turn it provokes render above it. Styled like a bubble-width panel
+     rather than chrome — it belongs to the conversation. */
+  #mail-bar { display: none; }
+  #mail-bar.show {
+    display: block; margin: 0 auto; max-width: var(--content-width, 860px);
+    border: 1px solid var(--accent); border-radius: 6px;
+    background: var(--surface); font-size: 13px;
+  }
+  #mail-bar .mb-head { display: flex; align-items: center; gap: 10px; padding: 6px 12px; }
+  #mail-bar .mb-spacer { flex: 1; }
+  #mail-bar .mb-toggle { cursor: pointer; user-select: none; color: var(--accent); }
+  #mail-bar .mb-toggle::before { content: '▸ '; }
+  #mail-bar.open .mb-toggle::before { content: '▾ '; }
+  #mail-bar .mb-toggle:hover { text-decoration: underline; }
+  #mail-bar .mb-deliver {
+    font-size: 12px; padding: 2px 10px;
+    border-color: var(--accent); color: var(--accent); background: transparent;
+  }
+  #mail-bar .mb-deliver:disabled { opacity: .45; cursor: default; }
+  #mail-bar .mb-list { border-top: 1px solid var(--border); padding: 4px 6px; }
+  #mail-bar .mb-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px; border-radius: 5px; cursor: pointer;
+  }
+  #mail-bar .mb-row:hover { background: var(--code-bg); }
+  #mail-bar .mb-who { color: var(--accent); flex-shrink: 0; }
+  #mail-bar .mb-text {
+    flex: 1; min-width: 0; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #mail-bar .mb-drop {
+    font-size: 11px; padding: 0 5px; flex-shrink: 0;
+    color: var(--muted); border-color: var(--border); background: transparent;
+  }
+  #mail-bar .mb-drop:hover { color: var(--danger); border-color: var(--danger); }
+
   .session-group-header {
     padding: 8px 14px 4px;
     font-size: 10px;
@@ -2953,7 +2990,7 @@ function connect() {
     // A sub-agent's own progress is reported on the parent's stream, so the
     // roster can stay current without polling.
     if (s.type === 'sub_agents_changed' || s.type === 'tool_progress' || s.type === 'awaiting_input') refreshSubAgents();
-    if (s.type === 'inbox_changed') refreshAutonomy();
+    if (s.type === 'inbox_changed') { refreshAutonomy(); refreshMail(); }
     // Both edges: a turn ending may CREATE something to resume, and a turn
     // starting always retires it.
     if (s.type === 'turn_end' || s.type === 'turn_start') refreshResumeBar();
@@ -3138,7 +3175,20 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   if (!(pendingBackendForNewSession && pendingBackendForNewSession.sessionId === sessionId)) {
     pendingBackendForNewSession = null;
   }
+  // MD1: stop watching the session being left and start watching this one,
+  // both immediately. Without the first half, the old session's mail stays
+  // held until the driver's TTL lapses — up to a minute of silence for mail
+  // the user has visibly walked away from.
+  const leavingSessionId = currentSessionId;
   currentSessionId = sessionId;
+  if (driverBase && leavingSessionId && leavingSessionId !== sessionId) {
+    fetch(`${driverBase}/viewing`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: leavingSessionId, visible: false }),
+    }).catch(() => {});
+  }
+  lastViewingKey = '';          // force a report for the new session
+  reportViewing(true);
   localStorage.setItem(LAST_SESSION_KEY, sessionId);
   if (updateUrl) {
     const url = new URL(location.href);
@@ -3154,6 +3204,10 @@ function viewSession(sessionId, { updateUrl = true, isNewSession = false, knownC
   // sub-agents in between would be wrong.
   subAgents = [];
   delegatedChildren = [];
+  heldMail = [];
+  mailExpanded = false;
+  const oldMailBar = document.getElementById('mail-bar');
+  if (oldMailBar) { oldMailBar.classList.remove('show'); oldMailBar.innerHTML = ''; }
   currentSessionIsChild = knownChild;
   resumeBar.classList.remove('show');
   refreshResumeBar();
@@ -3642,37 +3696,196 @@ function toggleLiftMenu() {
 
 async function autonomyPost(body) {
   try {
-    // `allow` is not a server concept: allowing more IS interacting (AD3),
-    // so it posts presence and the counter reset falls out of the same path
-    // every keystroke uses. One mechanism, not two.
-    const path = body.allow ? '/presence' : '/autonomy-cap';
-    await fetch(`${driverBase}${path}`, {
+    // One route for every cap action now. MD7 deleted /presence, so `allow`
+    // is an explicit branch on /autonomy-cap rather than a presence ping
+    // dressed up as one.
+    await fetch(`${driverBase}/autonomy-cap`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body.allow ? {} : body),
+      body: JSON.stringify(body),
     });
   } catch {}
   refreshAutonomy();
 }
 
-// ── Presence (AD1) ──────────────────────────────────────────────────────
-// The counter resets on human INPUT, never on "a request arrived". The
-// viewer polls /sessions on a timer, so inferring presence from traffic
-// would mean a laptop left open with the tab up resets the counter forever
-// and the gate is decorative. Debounced hard: this fires at most once a
-// minute no matter how much you type.
-let lastPresenceSent = 0;
-function notePresence() {
-  if (!driverBase) return;
-  const now = Date.now();
-  if (now - lastPresenceSent < 60000) return;
-  lastPresenceSent = now;
-  fetch(`${driverBase}/presence`, { method: 'POST' })
-    .then(() => refreshAutonomy())
-    .catch(() => {});
+
+// ── MD4/MD5: the mail bar ───────────────────────────────────────────────
+// Lives in the FEED, forced last, so mail delivered from it and the turn it
+// provokes render ABOVE it — same mechanism placeResumeBar() uses. It is a
+// statement about this conversation, not a global status, so it does not
+// belong in the chrome where the autonomy strip already sits (MD6).
+let heldMail = [];
+let mailExpanded = false;
+
+function mailBarEl() {
+  let el = document.getElementById('mail-bar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'mail-bar';
+    feed.appendChild(el);
+  }
+  return el;
 }
-for (const ev of ['keydown', 'mousedown', 'focus']) {
-  window.addEventListener(ev, notePresence, { passive: true, capture: true });
+
+// Anchors the bottom of the feed. Messages are appended, so without this it
+// would drift upward as the delivered turn produces output.
+function placeMailBar(el) {
+  if (el.parentElement !== feed || feed.lastElementChild !== el) feed.appendChild(el);
+}
+
+async function refreshMail() {
+  if (!driverBase || !currentSessionId) { heldMail = []; renderMailBar(); return; }
+  try {
+    const d = await (await fetch(
+      `${driverBase}/inbox?session=${encodeURIComponent(currentSessionId)}`)).json();
+    // Only mail addressed TO this session, and only what is actually
+    // waiting on a decision. Queued mail resolves itself in seconds and a
+    // bar that flickered for it would train the eye to ignore the bar.
+    heldMail = (d.entries || []).filter(
+      (e) => e.state === 'parked' && e.to?.id === currentSessionId);
+  } catch { return; }
+  renderMailBar();
+}
+
+function renderMailBar() {
+  const el = mailBarEl();
+  if (!heldMail.length) { el.classList.remove('show'); el.innerHTML = ''; return; }
+  const n = heldMail.length;
+  const checked = new Set(
+    [...el.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id));
+  // Checked by default: delivering everything is the common intent, so the
+  // frequent case stays one click and unchecking is the exception.
+  const isChecked = (id) => (el.classList.contains('show') ? checked.has(id) : true);
+
+  el.classList.add('show');
+  el.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'mb-head';
+  const toggle = document.createElement('span');
+  toggle.className = 'mb-toggle';
+  // A single message names its sender in the collapsed line — "1 message
+  // waiting" alone would make you expand it just to learn who it is.
+  toggle.textContent = n === 1
+    ? `✉ ${heldMail[0].fromHandle ? '@' + heldMail[0].fromHandle : 'a peer'} — ${(heldMail[0].text || '').replace(/^\[[^\]]+\]\s*/, '').slice(0, 44)}`
+    : `✉ ${n} messages waiting`;
+  toggle.addEventListener('click', () => { mailExpanded = !mailExpanded; renderMailBar(); });
+  head.appendChild(toggle);
+  const spacer = document.createElement('span');
+  spacer.className = 'mb-spacer';
+  head.appendChild(spacer);
+
+  const deliver = document.createElement('button');
+  deliver.className = 'mb-deliver';
+  head.appendChild(deliver);
+  el.appendChild(head);
+
+  const list = document.createElement('div');
+  list.className = 'mb-list';
+  el.classList.toggle('open', mailExpanded);
+  if (!mailExpanded) list.style.display = 'none';
+  for (const e of heldMail) {
+    const row = document.createElement('label');
+    row.className = 'mb-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.id = e.id;
+    cb.checked = isChecked(e.id);
+    cb.addEventListener('change', updateDeliverLabel);
+    const who = document.createElement('span');
+    who.className = 'mb-who';
+    who.textContent = e.fromHandle ? '@' + e.fromHandle : 'peer';
+    const txt = document.createElement('span');
+    txt.className = 'mb-text';
+    txt.textContent = (e.text || '').replace(/^\[[^\]]+\]\s*/, '').slice(0, 90);
+    const drop = document.createElement('button');
+    drop.className = 'mb-drop';
+    drop.textContent = '✕';
+    drop.title = 'Discard without delivering';
+    drop.addEventListener('click', async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      await mailPost({ action: 'discard', entryId: e.id });
+    });
+    row.appendChild(cb); row.appendChild(who); row.appendChild(txt); row.appendChild(drop);
+    list.appendChild(row);
+  }
+  el.appendChild(list);
+
+  function updateDeliverLabel() {
+    const k = el.querySelectorAll('.mb-row input:checked').length;
+    deliver.textContent = k === n ? (n === 1 ? 'Deliver' : `Deliver all ${n}`) : `Deliver ${k}`;
+    deliver.disabled = k === 0;
+  }
+  updateDeliverLabel();
+  deliver.addEventListener('click', async () => {
+    const ids = [...el.querySelectorAll('.mb-row input:checked')].map((c) => c.dataset.id);
+    if (!ids.length) return;
+    deliver.disabled = true;
+    await mailPost({ action: 'deliver', sessionId: currentSessionId, entryIds: ids });
+  });
+
+  placeMailBar(el);
+}
+
+async function mailPost(body) {
+  try {
+    await fetch(`${driverBase}/inbox-action`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch { /* a failed action must not take the feed down */ }
+  await refreshMail();
+}
+
+// ── MD1/MD7: viewing, not presence ──────────────────────────────────────
+// This REPLACES the old presence ping. That one fired on any keydown,
+// mousedown or focus and reset the autonomy counter — the weakest available
+// signal doing nearly all the work, so a stray trackpad brush silently
+// re-armed twenty autonomous turns. The driver now infers presence from the
+// requests that represent the user actually DIRECTING it (MD7), and nothing
+// about presence is reported from here at all.
+//
+// What IS reported is visibility, per session: "a human is looking at this
+// conversation", which is what decides whether an arriving message waits
+// (MD1). Deliberately a heartbeat rather than a one-shot flag, so a tab that
+// crashes or is closed releases its hold on the driver's TTL instead of
+// stranding mail forever (MD3).
+const VIEWING_HEARTBEAT_MS = 20000;
+let viewingTimer = null;
+let lastViewingKey = '';
+
+function viewingIsVisible() {
+  return document.visibilityState === 'visible';
+}
+
+// `force` bypasses the de-dup so a session switch or a visibility flip is
+// reported immediately rather than waiting for the next heartbeat.
+function reportViewing(force = false) {
+  if (!driverBase || !currentSessionId) return;
+  const visible = viewingIsVisible();
+  const key = `${currentSessionId}:${visible}`;
+  if (!force && key === lastViewingKey) return;
+  lastViewingKey = key;
+  fetch(`${driverBase}/viewing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: currentSessionId, visible }),
+  }).then(() => refreshMail()).catch(() => {});
+}
+
+// Hidden is debounced; visible is not. Glancing at another tab for two
+// seconds should not fire off a delivery, but coming back must take effect
+// at once (MD3).
+let hiddenTimer = null;
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(hiddenTimer);
+  if (viewingIsVisible()) reportViewing(true);
+  else hiddenTimer = setTimeout(() => reportViewing(true), 4000);
+});
+
+function startViewingHeartbeat() {
+  clearInterval(viewingTimer);
+  viewingTimer = setInterval(() => { if (viewingIsVisible()) reportViewing(true); }, VIEWING_HEARTBEAT_MS);
 }
 
 // ── Continue after a turn that ended badly ──────────────────────────────
@@ -3697,7 +3910,14 @@ const RESUME_WORDING = {
 // keeps it as the last thing in the conversation, which is the only position
 // that reads correctly ("...and that is where it stopped").
 function placeResumeBar() {
-  if (resumeBar.parentElement !== feed || feed.lastElementChild !== resumeBar) {
+  const mail = document.getElementById('mail-bar');
+  const anchorEl = (mail && mail.classList.contains('show')) ? mail : null;
+  // MD4: the mail bar anchors the bottom, so Continue sits just above it.
+  // A standing control that hops position as a transient one comes and goes
+  // is worse than the reverse.
+  if (anchorEl) {
+    if (resumeBar.nextElementSibling !== anchorEl) feed.insertBefore(resumeBar, anchorEl);
+  } else if (resumeBar.parentElement !== feed || feed.lastElementChild !== resumeBar) {
     feed.appendChild(resumeBar);
   }
   // Only when already following along. Yanking the view down on someone who
@@ -4679,6 +4899,10 @@ async function loadDriverConfig() {
     // own deadline with nobody watching.
     refreshAutonomy();
     setInterval(refreshAutonomy, 20000);
+    // MD1: tell the driver what this tab is looking at, and keep saying so.
+    reportViewing(true);
+    startViewingHeartbeat();
+    refreshMail();
     loadDeepHistorySetting();
     // The restart case is precisely when the page has just been reloaded,
     // so this has to be correct from first paint rather than only after

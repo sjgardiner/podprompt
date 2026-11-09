@@ -1165,7 +1165,7 @@ function composeDelivery(entries) {
   return `You have ${entries.length} messages waiting.\n\n${parts.join("\n\n---\n\n")}`;
 }
 
-function maybeDrainInbox(sessionId) {
+function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   if (!sessionIsIdle(sessionId)) return false;
   // Everything pending, not a per-chain slice. nextDrainGroup existed solely
   // so one chain's budget could not pay for another's work; with a single
@@ -1173,10 +1173,20 @@ function maybeDrainInbox(sessionId) {
   // the lot into one turn is strictly cheaper than one turn per sender.
   const group = inbox.pendingFor(sessionId);
   if (!group.length) return false;
+  // MD1: the user is looking at this conversation, so this message would
+  // spend the turn they were about to use. Held for them to decide.
+  // Checked BEFORE the gate because it is the more specific condition —
+  // and skipped entirely for a delivery the user explicitly asked for,
+  // which is the whole point of the button.
+  if (!userDirected && isWatched(sessionId)) {
+    for (const e of group) inbox.park(e.id, "watched");
+    broadcastStatus(sessionId, { type: "inbox_changed" });
+    return false;
+  }
   // Parked rather than left queued, so the strip can show it as stuck. A
   // queued message is merely waiting its turn; a parked one is waiting on
   // the USER, and those must not look alike.
-  if (autonomy.status().paused) {
+  if (!userDirected && autonomy.status().paused) {
     for (const e of group) inbox.park(e.id, "autonomy");
     broadcastStatus(sessionId, { type: "inbox_changed" });
     return false;
@@ -1190,6 +1200,7 @@ function maybeDrainInbox(sessionId) {
   const started = startTurn(sessionId, composeDelivery(group), {
     source: "peer",
     origin: originLabel,
+    userDirected,
   });
   console.log(`[driver] drain -> ${sessionId}: ${group.length} msg(s), startTurn=${JSON.stringify(started)}`);
   if (!started.ok) {
@@ -1304,6 +1315,68 @@ function autonomySnapshot() {
     parkedSessions: [...new Set(stuck.map((e) => e.to?.id).filter(Boolean))].length,
   };
 }
+
+// ── MD1: which sessions a human is LOOKING at ───────────────────────────
+// Reported by the browser per session, not inferred. Deliberately a
+// heartbeat with a TTL rather than a sticky flag: a tab that crashes, is
+// closed, or loses its network must not be able to hold a session's mail
+// hostage forever. If the reports stop, the hold lapses and delivery
+// resumes — holding is a deferral, never a state mail can die in.
+//
+// NOT the same thing as §10 presence, and deliberately not wired to it
+// (MD2). Visibility answers "is the user looking at THIS conversation";
+// the gate answers "has the user been steering anything at all". Letting a
+// visible tab reset the autonomy counter would gut the gate in exactly the
+// case it exists for — a browser left open on a second monitor.
+const VIEWING_TTL_MS = 45 * 1000;
+const viewingUntil = new Map(); // sessionId -> epoch ms
+
+function noteViewing(sessionId, visible) {
+  if (!sessionId) return;
+  if (visible) viewingUntil.set(sessionId, Date.now() + VIEWING_TTL_MS);
+  else viewingUntil.delete(sessionId);
+}
+
+function isWatched(sessionId) {
+  const until = viewingUntil.get(sessionId);
+  if (!until) return false;
+  if (Date.now() > until) { viewingUntil.delete(sessionId); return false; }
+  return true;
+}
+
+// MD7: the complete list of things that count as the user DIRECTING the
+// system. Everything here is an action with intent behind it; scrolling,
+// expanding a bubble and alt-tabbing are deliberately absent. Replaces the
+// old blanket keydown/mousedown/focus ping, which was the weakest possible
+// signal doing nearly all the work.
+function noteUserDirectedAction() {
+  autonomy.noteHumanAction();
+  return releaseAutonomyParked();
+}
+
+// MD3. Mail held for a watcher that has gone away must move on its own —
+// a closed tab or a crashed browser cannot be allowed to strand it.
+function releaseWatchedFor(sessionId) {
+  const released = [];
+  for (const e of inbox.stuck()) {
+    if (e.parkedReason !== "watched") continue;
+    if (sessionId && e.to?.id !== sessionId) continue;
+    if (inbox.release(e.id).ok) released.push(e.id);
+  }
+  if (released.length) {
+    for (const id of new Set(inbox.open().map((e) => e.to?.id).filter(Boolean))) maybeDrainInbox(id);
+  }
+  return released;
+}
+
+// The TTL half of the same rule: a tab that simply stops reporting (closed,
+// asleep, network gone) releases its hold when the heartbeat lapses. Cheap
+// and only does work when something is actually held.
+setInterval(() => {
+  for (const [sessionId] of viewingUntil) {
+    if (!isWatched(sessionId)) releaseWatchedFor(sessionId);
+  }
+}, 15 * 1000).unref?.();
 
 // ── Tool logic, shared by both backends ──────────────────────────────────
 // ONE implementation. Claude Code reaches these through an in-process SDK
@@ -2534,7 +2607,7 @@ reportAbandonedApprovals();
 // and the copies would drift. `source` rides through to the user bubble's
 // `origin` so a transcript can say who actually asked.
 function startTurn(sessionId, promptText, {
-  source = "human", explicitCwd, backendId, origin = null,
+  source = "human", explicitCwd, backendId, origin = null, userDirected = false,
 } = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
   if (state.turnInFlight) {
@@ -2563,6 +2636,11 @@ function startTurn(sessionId, promptText, {
     // is what the family-delete dialog pre-checks on. Must be persisted —
     // state.turnOrigin is in-memory and would be gone after a restart.
     noteUserTurn(sessionId);
+  } else if (userDirected) {
+    // MD8: the user clicked Deliver. That is not autonomous work, so it
+    // neither needs the gate open nor counts against it. Turns this message
+    // then provokes ARE automatic and do count, so the cascade it starts
+    // stays bounded exactly as before.
   } else {
     const charged = autonomy.chargeAutomaticTurn();
     if (!charged.ok) {
@@ -3568,26 +3646,17 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // The presence ping. Deliberately NOT inferred from any other request:
-  // the viewer polls /sessions on a timer, so treating "a request arrived"
-  // as presence would mean a laptop left open with the tab up resets the
-  // counter forever and the gate is purely decorative. The browser sends
-  // this only on debounced INPUT events — keydown, click, focus.
-  if (req.method === "POST" && path === "/presence") {
-    requireControl(req);
-    autonomy.noteHumanAction();
-    // Being here is also the moment parked mail should move: the user is
-    // back, which is the entire condition the gate was waiting on.
-    const released = releaseAutonomyParked();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, released: released.length, ...autonomySnapshot() }));
-    return;
-  }
-
-  // Lift the cap, or put it back. One route, because they are one decision.
-  // `until` is EPOCH MS resolved by the browser (AD5) — this process is
-  // almost certainly on UTC and must never interpret a wall-clock time.
-  if (req.method === "POST" && path === "/autonomy-cap") {
+  // MD1: a tab telling the driver which session it is LOOKING at. Sent on
+  // session switch, on visibilitychange, and as a heartbeat while visible.
+  //
+  // This REPLACES the old POST /presence. That route reset the autonomy
+  // counter on any keydown/mousedown/focus — the weakest available signal
+  // doing nearly all the work, so a stray trackpad brush silently re-armed
+  // twenty autonomous turns. Presence is now inferred from the requests
+  // that represent the user actually directing the system (MD7), which also
+  // retires the polling trap AD1 had to warn about: nothing about presence
+  // is reported by the browser any more.
+  if (req.method === "POST" && path === "/viewing") {
     requireControl(req);
     let body;
     try {
@@ -3597,8 +3666,46 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"invalid json"}');
       return;
     }
+    const sessionId = body.sessionId;
+    const wasWatched = sessionId ? isWatched(sessionId) : false;
+    noteViewing(sessionId, !!body.visible);
+    // Stopped watching => the hold lapses and whatever it was holding goes
+    // now. MD3: release is the same condition evaluated continuously, not a
+    // separate timer.
+    let released = 0;
+    if (wasWatched && !body.visible && sessionId) {
+      released = releaseWatchedFor(sessionId).length;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, watching: isWatched(sessionId), released }));
+    return;
+  }
+
+  // Lift the cap, or put it back. One route, because they are one decision.
+  // `until` is EPOCH MS resolved by the browser (AD5) — this process is
+  // almost certainly on UTC and must never interpret a wall-clock time.
+  if (req.method === "POST" && path === "/autonomy-cap") {
+    requireControl(req);
+    // MD7: a cap action is the user directing the system. The counter reset
+    // lives here; the release of parked mail is done explicitly below so its
+    // count can be reported back, rather than twice via the helper.
+    autonomy.noteHumanAction();
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end('{"error":"invalid json"}');
+      return;
+    }
     let result;
-    if (body.lift) {
+    if (body.allow) {
+      // "Allow N more". The counter reset already happened above (MD7: this
+      // is the user directing the system); there is nothing else to do, and
+      // saying so explicitly beats leaning on capNow()'s side effect, which
+      // would ALSO clear an uncapped override the user had deliberately set.
+      result = { ok: true };
+    } else if (body.lift) {
       result = autonomy.liftCap({ until: body.until === null || body.until === undefined ? null : Number(body.until) });
     } else if (body.pauseAfter !== undefined) {
       result = autonomy.setPauseAfter(Number(body.pauseAfter));
@@ -3627,6 +3734,7 @@ const server = createServer(async (req, res) => {
   // running a turn it did not start.
   if (req.method === "POST" && path === "/stop-all") {
     requireControl(req);
+    noteUserDirectedAction();   // MD7
     let stopped = 0;
     for (const [sessionId, state] of sessions) {
       if (!state.turnInFlight) continue;
@@ -3713,15 +3821,33 @@ const server = createServer(async (req, res) => {
       const entry = inbox.byId(entryId);
       if (!entry) result = { ok: false, reason: "no-such-entry" };
       else {
-        // A deliberate user override: it lets ONE message through without
-        // lifting the cap for everything else. Nothing is charged here —
-        // the turn this releases is charged by startTurn when it actually
-        // drains, which is the single charge point §10 relies on. Clicking
-        // a button is also a human action, so the drain below will not be
-        // re-blocked by the very gate the user just overrode.
-        autonomy.noteHumanAction();
+        // MD8: a delivery the user explicitly clicked is NOT autonomous
+        // work. It bypasses the gate, is not charged, and — unlike every
+        // earlier version of this code — does not reset the counter, so it
+        // cannot release other sessions' parked mail as a side effect. That
+        // only became possible once MD7 removed the blanket mousedown
+        // listener, which used to fire before any handler here could run.
         result = inbox.release(entryId);
-        if (result.ok) maybeDrainInbox(entry.to?.id);
+        if (result.ok) maybeDrainInbox(entry.to?.id, { userDirected: true });
+      }
+    } else if (body.action === "deliver") {
+      // MD5: deliver the CHECKED subset as one coalesced turn. Unchecked
+      // entries are simply not released, so they stay held and the bar
+      // keeps showing them. One delivery action is one turn whatever it
+      // carries, which is what makes picking a subset cheap rather than
+      // costing a turn per message.
+      const ids = Array.isArray(body.entryIds) ? body.entryIds : [];
+      const target = body.sessionId || inbox.byId(ids[0])?.to?.id || null;
+      let released = 0;
+      for (const id of ids) {
+        const e = inbox.byId(id);
+        if (!e || (target && e.to?.id !== target)) continue;
+        if (inbox.release(id).ok) released++;
+      }
+      if (!released) result = { ok: false, reason: "nothing-to-deliver" };
+      else {
+        maybeDrainInbox(target, { userDirected: true });
+        result = { ok: true, delivered: released };
       }
     } else result = { ok: false, reason: "unknown-action" };
     if (!result.ok) {
@@ -4238,6 +4364,8 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && path === "/permission-response") {
+    // MD7: answering a card is the user directing the system.
+    noteUserDirectedAction();
     let body;
     try {
       body = await readBody(req);
@@ -4328,6 +4456,7 @@ const server = createServer(async (req, res) => {
   // possible.
   if (req.method === "POST" && path === "/stop-subtree") {
     requireControl(req);
+    noteUserDirectedAction();   // MD7
     let body;
     try {
       body = await readBody(req);
@@ -4373,6 +4502,7 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && path === "/abort") {
+    noteUserDirectedAction();   // MD7
     let body;
     try {
       body = await readBody(req);

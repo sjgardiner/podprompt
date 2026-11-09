@@ -163,12 +163,26 @@ function card(id, externalId, sessionId = "sess-1", extra = {}) {
     (oc.match(/externalId:/g) || []).length);
   check("a retracted card is not answered",
     /cancelled \? undefined :/.test(oc) || /if \(decision\?\.cancelled\) return undefined;/.test(oc));
-  check("a 404 on reply retracts the card instead of logging",
-    /NotFoundError\|-> 404/.test(oc));
-  check("the reconnect reconciler exists", /async function reconcilePermissions\(\)/.test(oc));
-  check("...and uses the /api prefix the list route actually needs",
-    /\/api\/session\/\$\{realId\}\/permission/.test(oc));
-  check("...and runs when the stream comes back", /reconcilePermissions\(\)\.catch/.test(oc));
+  // Replies MUST go to the session-scoped route. The bare one is silently
+  // directory-scoped and resolves against the server's default directory,
+  // so every answer to a session outside it returned PermissionNotFound.
+  check("permission replies use the session-scoped route",
+    /\/api\/session\/\$\{realId\}\/permission\/\$\{requestID\}\/reply/.test(oc));
+  check("question replies use the session-scoped route",
+    /\/api\/session\/\$\{realId\}\/question\/\$\{requestID\}\/reply/.test(oc));
+  check("the bare directory-scoped reply routes are gone",
+    !/api\(`\/permission\/\$\{requestID\}\/reply`/.test(oc)
+    && !/api\(`\/question\/\$\{requestID\}\/reply`/.test(oc));
+  // A 404 must NOT retract: an earlier version assumed "not found" meant
+  // the request had died, when it meant we were asking the wrong place, so
+  // it destroyed live requests and reported them as expired.
+  // Assert on the FUNCTION, not the file: "PermissionNotFoundError" appears
+  // in a comment explaining why the route changed, so a file-wide string
+  // search would fail for the wrong reason.
+  const replyFn = oc.slice(oc.indexOf("async function replyPermission("));
+  const replyBody = replyFn.slice(0, replyFn.indexOf("\n  }") + 4);
+  check("a failed reply does NOT retract the card",
+    !/resolveApprovalExternally/.test(replyBody), replyBody.slice(-260));
   check("answered ids stop being tracked",
     /permissionSessionOf\.delete\(requestID\)/.test(oc));
   check("the driver exposes the retraction hook to backends",

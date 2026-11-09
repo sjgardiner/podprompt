@@ -79,7 +79,14 @@ const TURN_INACTIVITY_POLL_MS = 30 * 1000;
 // "running" exactly as it would for a real twenty-minute command. The
 // threshold is doing that work, which is why recovery is abort-and-resume
 // (cheap, repeatable) rather than ending the turn outright.
-export function classifyIdleTurn(silentMs, lastMessage, thresholdMs = TURN_INACTIVITY_MS) {
+export function classifyIdleTurn({ silentMs, lastMessage, awaitingHuman = false,
+  thresholdMs = TURN_INACTIVITY_MS } = {}) {
+  // A session parked on an approval is silent, its message incomplete and
+  // its tool stuck in "running" — indistinguishable from a stall from the
+  // outside. Treating it as one would abort an agent for the crime of the
+  // user taking more than five minutes to click Allow. Waiting on a human
+  // is not a fault, and has no timeout.
+  if (awaitingHuman) return null;
   if (!(silentMs >= thresholdMs)) return null;
   const info = lastMessage?.info || lastMessage;
   if (info?.role === "assistant" && info?.time?.completed) return "finished";
@@ -439,11 +446,6 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
         const decoder = new TextDecoder();
         let buf = "";
         sseReconnectDelay = 1000; // a fresh live connection resets the backoff
-        // ITEM 4. A dropped stream can swallow the "that request is done"
-        // announcements, which would strand cards exactly as before. The
-        // stream is live again, so ask OpenCode which requests it still
-        // considers outstanding and retract anything it no longer lists.
-        reconcilePermissions().catch(() => {});
         (async function pump() {
           try {
             while (true) {
@@ -1289,7 +1291,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
             const msgs = await api(`/session/${realId}/message`, { timeoutMs: 20000 });
             const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
             const silentMs = Date.now() - lastEventAt;
-            const verdict = classifyIdleTurn(silentMs, last);
+            // permissionSessionOf holds exactly the requests still awaiting
+            // an answer — entries are removed when one is replied to or
+            // retracted — so this is the live "is a human being waited on"
+            // signal, for both permissions and questions.
+            const awaitingHuman = [...permissionSessionOf.values()].includes(realId);
+            const verdict = classifyIdleTurn({ silentMs, lastMessage: last, awaitingHuman });
             if (verdict === "finished") {
               console.error(
                 `[opencode] turn ${sessionId}: silent ${Math.round(silentMs / 1000)}s and`
@@ -1421,36 +1428,6 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // Which permission ids OpenCode still considers live, compared against the
-  // ones we are showing cards for. Anything we show that it no longer lists
-  // is dead, and its card is retracted.
-  //
-  // Note the /api prefix: the bare /session/{id}/permission path is served by
-  // OpenCode's web UI and returns HTML, so the obvious spelling silently
-  // yields garbage rather than an error.
-  async function reconcilePermissions() {
-    const bySession = new Map();
-    for (const [pid, realId] of permissionSessionOf) {
-      if (!bySession.has(realId)) bySession.set(realId, []);
-      bySession.get(realId).push(pid);
-    }
-    for (const [realId, ours] of bySession) {
-      let live;
-      try {
-        const res = await api(`/api/session/${realId}/permission`, { timeoutMs: 8000 });
-        live = new Set((res?.data || res || []).map((x) => x?.id).filter(Boolean));
-      } catch {
-        continue; // unreachable: assume ours are still live rather than retract wrongly
-      }
-      for (const pid of ours) {
-        if (live.has(pid)) continue;
-        permissionSessionOf.delete(pid);
-        resolveApprovalExternally?.(pid,
-          "This request is no longer open in OpenCode (it ended while the connection was down).");
-      }
-    }
-  }
-
   async function replyPermission(requestID, decision) {
     try {
       // OpenCode expresses "always allow" as a reply SCOPE rather than a
@@ -1459,7 +1436,25 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // different word here, and PodPrompt doesn't have to remember a
       // decision the backend would be unaware of.
       const reply = decision?.allow ? (decision.always ? "always" : "once") : "reject";
-      await api(`/permission/${requestID}/reply`, {
+      // SESSION-SCOPED on purpose. The bare /permission/{id}/reply route
+      // takes an optional ?directory= and, without it, resolves the request
+      // against the server's DEFAULT directory — so a permission belonging
+      // to a session in /workspace/podprompt was never found and every
+      // answer came back PermissionNotFoundError. Proven directly:
+      // GET /permission returned [] while
+      // GET /permission?directory=/workspace/podprompt returned the very
+      // request the user was trying to approve, still pending.
+      // This is the same class of bug as the session-enumeration one: a bare
+      // route that is silently directory-scoped. Routes that name a session
+      // in the path need no directory, so prefer those wherever they exist.
+      const realId = permissionSessionOf.get(requestID);
+      if (!realId) {
+        console.error(
+          `[opencode] cannot reply to permission ${requestID}: its session is unknown,`
+          + ` so the only available route would be the directory-scoped one that fails.`);
+        return;
+      }
+      await api(`/api/session/${realId}/permission/${requestID}/reply`, {
         method: "POST",
         body: JSON.stringify({ reply }),
         timeoutMs: 5000,
@@ -1468,18 +1463,12 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // reconnect reconciler walks. Left behind, this map only ever grows.
       permissionSessionOf.delete(requestID);
     } catch (e) {
-      // ITEM 2. "Not found" is not a failure to report, it is the answer:
-      // the request died before the user's click reached it. Retract the
-      // card and say so, instead of logging a 404 nobody can interpret.
-      // A safety net for anything the permission.replied handler misses —
-      // a dropped event, or a resolution OpenCode never announced.
-      if (/NotFoundError|-> 404/.test(e.message || "")) {
-        permissionSessionOf.delete(requestID);
-        resolveApprovalExternally?.(requestID,
-          "This request expired before your answer reached OpenCode.");
-        console.log(`[opencode] permission ${requestID} was already gone; card retracted`);
-        return;
-      }
+      // Deliberately does NOT retract the card on a 404. An earlier version
+      // did, on the assumption that "not found" meant the request had died.
+      // It meant we were asking the wrong place (see the route note above),
+      // so that handler destroyed LIVE requests and told the user they had
+      // expired. A failed reply is reported and nothing else: the card stays,
+      // and the user can try again.
       console.error("[opencode] failed to reply to permission:", e.message);
     }
   }
@@ -1514,11 +1503,18 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       });
     }
     try {
-      await api(`/question/${requestID}/reply`, {
+      // Session-scoped for the same reason as permissions above.
+      const realId = permissionSessionOf.get(requestID);
+      if (!realId) {
+        console.error(`[opencode] cannot reply to question ${requestID}: session unknown`);
+        return;
+      }
+      await api(`/api/session/${realId}/question/${requestID}/reply`, {
         method: "POST",
         body: JSON.stringify({ answers }),
         timeoutMs: 5000,
       });
+      permissionSessionOf.delete(requestID);
     } catch (e) {
       console.error("[opencode] failed to reply to question:", e.message);
     }

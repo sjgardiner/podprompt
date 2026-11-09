@@ -307,24 +307,24 @@ const BOTH_PROJECTS = [
   // Too early to judge: this is what holds on every healthy turn, and it is
   // why the probe issues no request and the turn is never disturbed.
   check("below the threshold it declines to judge",
-    classifyIdleTurn(5000, complete, T) === null);
-  check("...even one tick short", classifyIdleTurn(T - 1, complete, T) === null);
+    classifyIdleTurn({ silentMs: 5000, lastMessage: complete, thresholdMs: T }) === null);
+  check("...even one tick short", classifyIdleTurn({ silentMs: T - 1, lastMessage: complete, thresholdMs: T }) === null);
   check("...and that holds for an incomplete message too",
-    classifyIdleTurn(T - 1, midStream, T) === null);
+    classifyIdleTurn({ silentMs: T - 1, lastMessage: midStream, thresholdMs: T }) === null);
 
   check("silent with generation complete means finished",
-    classifyIdleTurn(T, complete, T) === "finished");
+    classifyIdleTurn({ silentMs: T, lastMessage: complete, thresholdMs: T }) === "finished");
 
   // The failure that actually happens: generation stopped part-way.
   check("silent with generation incomplete means stalled",
-    classifyIdleTurn(T, midStream, T) === "stalled");
+    classifyIdleTurn({ silentMs: T, lastMessage: midStream, thresholdMs: T }) === "stalled");
   check("...however long it has been silent",
-    classifyIdleTurn(T * 20, midStream, T) === "stalled");
+    classifyIdleTurn({ silentMs: T * 20, lastMessage: midStream, thresholdMs: T }) === "stalled");
 
   // "Provider accepted the request and never sent a first token" — the
   // assistant message does not exist yet, so the user prompt is last.
   check("a trailing user message means stalled",
-    classifyIdleTurn(T, userLast, T) === "stalled");
+    classifyIdleTurn({ silentMs: T, lastMessage: userLast, thresholdMs: T }) === "stalled");
 
   // Absent or malformed data must read as STALLED, not finished. Stalled is
   // recoverable (abort and resume); wrongly declaring "finished" silently
@@ -335,12 +335,24 @@ const BOTH_PROJECTS = [
     ["completed=0", { info: { role: "assistant", time: { completed: 0 } } }],
   ]) {
     check(`a ${label} last message is treated as stalled`,
-      classifyIdleTurn(T, msg, T) === "stalled");
+      classifyIdleTurn({ silentMs: T, lastMessage: msg, thresholdMs: T }) === "stalled");
   }
 
   // The API has returned both nested and un-nested message shapes.
   check("an un-nested message shape still reads as finished",
-    classifyIdleTurn(T, { role: "assistant", time: { completed: 2 } }, T) === "finished");
+    classifyIdleTurn({ silentMs: T, lastMessage: { role: "assistant", time: { completed: 2 } }, thresholdMs: T }) === "finished");
+
+  // Waiting on a HUMAN is not a stall and must never be treated as one.
+  // A session parked on an approval is silent with an incomplete message —
+  // identical to a stall from outside — so without this an agent would be
+  // aborted for the crime of the user taking five minutes to click Allow.
+  check("an outstanding approval suppresses the stall verdict",
+    classifyIdleTurn({ silentMs: T * 10, lastMessage: midStream, awaitingHuman: true, thresholdMs: T }) === null);
+  check("...and suppresses the finished verdict too",
+    classifyIdleTurn({ silentMs: T * 10, lastMessage: complete, awaitingHuman: true, thresholdMs: T }) === null);
+  check("with no approval outstanding it still judges normally",
+    classifyIdleTurn({ silentMs: T, lastMessage: midStream, awaitingHuman: false, thresholdMs: T }) === "stalled");
+  check("a call with no arguments is safe", classifyIdleTurn() === null);
 
   // The shipped threshold must sit above a stall that was observed to
   // RECOVER on its own (112s) and below every stall that never did (738s+).

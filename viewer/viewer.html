@@ -379,8 +379,17 @@
      body size rather than the small muted treatment a tool one-liner gets:
      this is the substance of the bubble, not a footnote to it. */
   .agent-live { color: var(--muted); }
-  .agent-live .task-open { cursor: pointer; text-decoration: underline; color: var(--accent); }
-  .agent-live .task-open.task-waiting { color: var(--purple); font-weight: 500; }
+  /* Deliberately NOT scoped to .agent-live. These rules were written for the
+     roster's sub-agent bubbles, whose body carries that class — but
+     refreshDelegateBubbles() puts the same .task-open control inside a
+     delegate_session TOOL bubble, which does not. The descendant selector
+     therefore never matched there, and "open session" rendered as plain
+     text: no underline, no accent, not even a pointer cursor. A control
+     that cannot be recognised as clickable is not a link. The class name is
+     specific enough to stand alone; the .agent-live prefix was only ever an
+     accident of where it was first used. */
+  .task-open { cursor: pointer; text-decoration: underline; color: var(--accent); }
+  .task-open.task-waiting { color: var(--purple); font-weight: 500; }
 
   /* Global "something is waiting on you" indicator. Hidden unless there is
      actually something, so the header is unchanged in the normal case. It

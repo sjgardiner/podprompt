@@ -163,19 +163,24 @@ function card(id, externalId, sessionId = "sess-1", extra = {}) {
     (oc.match(/externalId:/g) || []).length);
   check("a retracted card is not answered",
     /cancelled \? undefined :/.test(oc) || /if \(decision\?\.cancelled\) return undefined;/.test(oc));
-  // Replies MUST go to the session-scoped route. The bare one is silently
-  // directory-scoped and resolves against the server's default directory,
-  // so every answer to a session outside it returned PermissionNotFound.
-  check("permission replies use the session-scoped route",
-    /\/api\/session\/\$\{realId\}\/permission\/\$\{requestID\}\/reply/.test(oc));
-  check("question replies use the session-scoped route",
-    /\/api\/session\/\$\{realId\}\/question\/\$\{requestID\}\/reply/.test(oc));
-  check("the bare directory-scoped reply routes are gone",
-    !/api\(`\/permission\/\$\{requestID\}\/reply`/.test(oc)
-    && !/api\(`\/question\/\$\{requestID\}\/reply`/.test(oc));
-  // A 404 must NOT retract: an earlier version assumed "not found" meant
-  // the request had died, when it meant we were asking the wrong place, so
-  // it destroyed live requests and reported them as expired.
+  // Replies MUST carry ?directory=. OpenCode resolves a permission by
+  // DIRECTORY, not by session: without it the lookup happens in the server's
+  // default directory and anything else returns PermissionNotFoundError.
+  // Proven live — the identical request that 404'd on two directory-less
+  // routes answered 200 the moment the directory was supplied. The
+  // session-scoped /api/session/{id}/permission/{id}/reply route exists in
+  // the spec but does NOT derive the directory from the session, so it fails
+  // the same way; it is deliberately not used.
+  check("permission replies carry the directory",
+    /\/permission\/\$\{requestID\}\/reply\?directory=/.test(oc));
+  check("question replies carry the directory",
+    /\/question\/\$\{requestID\}\/reply\?directory=/.test(oc));
+  check("the directory is URI-encoded", /reply\?directory=\$\{encodeURIComponent\(dir\)\}/.test(oc));
+  check("the session-scoped reply routes are NOT used",
+    !/\/api\/session\/\$\{realId\}\/(permission|question)\//.test(oc));
+  check("a session's directory is cached rather than refetched each time",
+    /sessionDirs\.set\(/.test(oc) && /async function directoryForSession/.test(oc));
+
   // Assert on the FUNCTION, not the file: "PermissionNotFoundError" appears
   // in a comment explaining why the route changed, so a file-wide string
   // search would fail for the wrong reason.

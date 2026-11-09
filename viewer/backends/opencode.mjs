@@ -272,6 +272,13 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
   // work, rather than solved with on-disk persistence here.
   const clientToReal = new Map(); // client-minted id -> real ses_... id
   const realToClient = new Map(); // real ses_... id -> client-minted id
+  // real ses_... id -> the directory that session belongs to. Needed because
+  // OpenCode resolves a PERMISSION by directory, not by session: replying
+  // without ?directory= searches the server's default directory and returns
+  // PermissionNotFoundError for anything else. Proven live — the same
+  // request that 404'd on two directory-less routes answered 200 the moment
+  // the directory was supplied.
+  const sessionDirs = new Map();
 
   // ── Sub-agent child sessions ───────────────────────────────────────────
   // OpenCode runs a sub-agent as a real child session with parentID set
@@ -1428,6 +1435,21 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // The directory OpenCode files a session's permissions under. Cached from
+  // session creation and from every /sessions poll; fetched once if neither
+  // has happened yet. Falls back to cwdRoot, which is right for the common
+  // case and no worse than the directory-less call it replaces.
+  async function directoryForSession(realId) {
+    if (!realId) return cwdRoot;
+    const known = sessionDirs.get(realId);
+    if (known) return known;
+    try {
+      const s = await api(`/session/${realId}`, { timeoutMs: 5000 });
+      if (s?.directory) { sessionDirs.set(realId, s.directory); return s.directory; }
+    } catch { /* fall through */ }
+    return cwdRoot;
+  }
+
   async function replyPermission(requestID, decision) {
     try {
       // OpenCode expresses "always allow" as a reply SCOPE rather than a
@@ -1447,14 +1469,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       // This is the same class of bug as the session-enumeration one: a bare
       // route that is silently directory-scoped. Routes that name a session
       // in the path need no directory, so prefer those wherever they exist.
-      const realId = permissionSessionOf.get(requestID);
-      if (!realId) {
-        console.error(
-          `[opencode] cannot reply to permission ${requestID}: its session is unknown,`
-          + ` so the only available route would be the directory-scoped one that fails.`);
-        return;
-      }
-      await api(`/api/session/${realId}/permission/${requestID}/reply`, {
+      const dir = await directoryForSession(permissionSessionOf.get(requestID));
+      await api(`/permission/${requestID}/reply?directory=${encodeURIComponent(dir)}`, {
         method: "POST",
         body: JSON.stringify({ reply }),
         timeoutMs: 5000,
@@ -1503,13 +1519,9 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       });
     }
     try {
-      // Session-scoped for the same reason as permissions above.
-      const realId = permissionSessionOf.get(requestID);
-      if (!realId) {
-        console.error(`[opencode] cannot reply to question ${requestID}: session unknown`);
-        return;
-      }
-      await api(`/api/session/${realId}/question/${requestID}/reply`, {
+      // Directory-scoped for the same reason as permissions above.
+      const dir = await directoryForSession(permissionSessionOf.get(requestID));
+      await api(`/question/${requestID}/reply?directory=${encodeURIComponent(dir)}`, {
         method: "POST",
         body: JSON.stringify({ answers }),
         timeoutMs: 5000,
@@ -1624,6 +1636,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       return sessionId;
     }
     const dir = cwd || cwdRoot;
+    sessionDirs.set(sessionId, dir); // may be a client id; real id set below too
     const created = await api(`/session?directory=${encodeURIComponent(dir)}`, {
       method: "POST",
       body: JSON.stringify({}),
@@ -1631,6 +1644,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     });
     clientToReal.set(sessionId, created.id);
     realToClient.set(created.id, sessionId);
+    sessionDirs.set(created.id, created.directory || dir);
     // Hand the pairing to the driver so it outlives this process. Both maps
     // above are in-memory ONLY, and everything PodPrompt keys off the minted
     // client id — relation rows, turn state, the resumable record behind the
@@ -1836,6 +1850,7 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       const raw = await allSessionsRaw();
       const list = selectVisibleSessions(raw, cwdRoot)
         .map((s) => {
+          if (s.id && s.directory) sessionDirs.set(s.id, s.directory);
           // sessionsIndex/pendingKindForSession are keyed by the client id
           // the driver's own state Map uses, not OpenCode's real ses_...
           // id — translate back via realToClient where a mapping exists

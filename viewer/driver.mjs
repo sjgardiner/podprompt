@@ -1835,7 +1835,15 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
   // every peer stays reachable through `search` or `all` — and the result
   // always says how many were held back. A model that cannot see a peer
   // cannot decide to talk to it, and would have no idea it was missing.
-  const cap = all ? matched.length : Math.max(1, Math.min(limit || PEER_LIST_DEFAULT, PEER_LIST_MAX));
+  // `all` lifts the DEFAULT cap; it does not override a limit the caller
+  // asked for. Previously `all` won outright, so `{all: true, limit: 3}`
+  // returned every peer — which reads as a bug from the caller's side, and
+  // was reported as one. PEER_LIST_MAX is not applied when `all` is set:
+  // the caller has explicitly asked for everything, and a cap they did not
+  // choose silently truncating that is the behaviour being removed.
+  const cap = all
+    ? (limit ? Math.max(1, limit) : matched.length)
+    : Math.max(1, Math.min(limit || PEER_LIST_DEFAULT, PEER_LIST_MAX));
   const shown = matched.slice(0, cap);
   return {
     peers: shown,
@@ -4296,6 +4304,20 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && path === "/inbox") {
+    // The parameter is `session`. Passing `sessionId` — the name every other
+    // route here uses — silently fell through to the unfiltered branch and
+    // returned EVERY session's mail, which is how an agent ended up reading
+    // another session's inbox and believing it was its own. A wrong name is
+    // now an error rather than a different, plausible answer.
+    const unknown = [...url.searchParams.keys()].filter((k) => k !== "session");
+    if (unknown.length) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        error: `unknown query parameter(s): ${unknown.join(", ")}. `
+          + `/inbox takes "session" (not "sessionId"); omit it to list every session's mail.`,
+      }));
+      return;
+    }
     const sessionId = url.searchParams.get("session");
     const entries = (sessionId
       ? inbox.open().filter((e) => e.to?.id === sessionId || e.from?.id === sessionId)

@@ -267,6 +267,45 @@ const file = (n) => nodePath.join(dir, `${n}.json`);
 
 rmSync(dir, { recursive: true, force: true });
 
+// ── Three small sharp edges ──────────────────────────────────────────────
+{
+  const { readFileSync: rf } = await import("node:fs");
+  const drv = rf(new URL("./driver.mjs", import.meta.url), "utf8");
+
+  // /inbox takes `session`. Passing `sessionId` — the name every other route
+  // uses — fell through to the unfiltered branch and returned EVERY
+  // session's mail. That is how an agent read another session's inbox and
+  // believed it was its own: not an error, a different plausible answer.
+  const inboxAt = drv.indexOf('path === "/inbox"');
+  const route = drv.slice(inboxAt, inboxAt + 1400);
+  check("an unknown /inbox parameter is rejected", /unknown query parameter/.test(route));
+  check("...and the message names the right parameter", /not "sessionId"/.test(route));
+  check("...before any entries are read",
+    route.indexOf("unknown") < route.indexOf("inbox.open()"));
+
+  // `all` should lift the DEFAULT cap, not discard a limit the caller chose.
+  // {all:true, limit:3} used to return every peer, which reads as a bug and
+  // was reported as one.
+  const capAt = drv.indexOf("const cap = all");
+  const cap = drv.slice(capAt, capAt + 200);
+  check("all respects an explicit limit", /limit \? Math\.max\(1, limit\)/.test(cap));
+  check("...and still returns everything when no limit is given",
+    /: matched\.length/.test(cap));
+  for (const f of ["./backends/claude-code.mjs", "./opencode-plugin.ts"]) {
+    const t = rf(new URL(f, import.meta.url), "utf8");
+    check(f.split("/").pop() + " documents it",
+      /a limit you pass alongside it is still respected/.test(t));
+  }
+
+  // The comment claimed OpenCode has no per-call id and therefore no anchor.
+  // The first half is still true; the conclusion no longer is.
+  const cc = rf(new URL("./backends/claude-code.mjs", import.meta.url), "utf8");
+  check("the stale 'OpenCode has no equivalent' claim is gone",
+    !/OpenCode has no equivalent/.test(cc));
+  check("...replaced by what actually happens now",
+    /rescans the finished message at turn end/.test(cc));
+}
+
 console.log(`\nmessaging.mjs: ${pass} passed, ${fail} failed`);
 if (failures.length) {
   console.log("\nFailures:");

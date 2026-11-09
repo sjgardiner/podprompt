@@ -1147,7 +1147,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             search: z.string().optional()
               .describe("Only peers whose handle or title contains this text."),
             all: z.boolean().optional()
-              .describe("Return every addressable peer instead of just the most recent."),
+              .describe("Return every addressable peer instead of just the most recent. Lifts the default cap; a limit you pass alongside it is still respected."),
             limit: z.number().optional()
               .describe("How many to return (default 20)."),
           },
@@ -1274,11 +1274,14 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                 // browser needs to attach live status to the right bubble.
                 // Verified against this SDK rather than assumed: the handler
                 // is passed a second argument carrying
-                // _meta["claudecode/toolUseId"]. OpenCode has no equivalent
-                // — its ToolContext exposes sessionID and messageID but no
-                // per-call id — so delegate bubbles there carry no inline
-                // status, and the nested session row (HD5) is the surface
-                // that works on both.
+                // _meta["claudecode/toolUseId"]. OpenCode's ToolContext
+                // still exposes no per-call id, but it is no longer without
+                // an anchor: that backend recovers one by matching the
+                // delegate tool part against the prompt it delegated with,
+                // and rescans the finished message at turn end if the live
+                // frame was missed (§13g). So both backends now reach the
+                // same place by different routes; the nested session row
+                // (HD5) remains the surface that needs neither.
                 toolUseId: extra?._meta?.["claudecode/toolUseId"] || null,
               });
               if (!receipt.ok) {

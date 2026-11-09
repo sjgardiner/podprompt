@@ -109,7 +109,7 @@ export default (async () => {
           search: tool.schema.string().optional()
             .describe("Only peers whose handle or title contains this text."),
           all: tool.schema.boolean().optional()
-            .describe("Return every addressable peer instead of just the most recent."),
+            .describe("Return every addressable peer instead of just the most recent. Lifts the default cap; a limit you pass alongside it is still respected."),
           limit: tool.schema.number().optional()
             .describe("How many to return (default 20)."),
         },

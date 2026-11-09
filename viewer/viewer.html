@@ -461,12 +461,34 @@
      behind the PEER label that no other bubble has, while `border-color`
      did nothing at all because .msg has no border-width or border-style.
      Tinting the body is what every other bubble variant does. */
+  /* Collapsible, same mechanism as Thinking and Tool: the body is hidden
+     unless .expanded is on the wrapper. Unlike those two, .expanded is added
+     by default (see applyOrigin) — a peer message is content, not detail. */
   .msg.user.from-peer .msg-body {
+    display: none;
     background: var(--surface);
     border-color: var(--accent);
   }
   .msg.user.from-peer .msg-label .role-name { color: var(--accent); }
   .msg.user.from-peer .msg-label .agent-title { color: var(--accent); }
+  .msg.user.from-peer.expanded .msg-body { display: block; }
+  .msg.user.from-peer .msg-label .peer-toggle { cursor: pointer; user-select: none; }
+  .msg.user.from-peer .msg-label .peer-toggle::before { content: '▸ '; }
+  .msg.user.from-peer.expanded .msg-label .peer-toggle::before { content: '▾ '; }
+  .msg.user.from-peer .msg-label .peer-toggle:hover { text-decoration: underline; }
+  /* Underlined so it reads as a link rather than as part of the label.
+     Dotted at rest and solid on hover: a solid underline on an always-
+     present label looks like emphasis, while dotted reads as "actionable"
+     without competing with the body text for attention. */
+  .msg.user.from-peer .msg-label .peer-link {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+  }
+  .msg.user.from-peer .msg-label .peer-link:hover {
+    text-decoration: underline solid;
+    filter: brightness(1.25);
+  }
 
   /* Exists ONLY while paused, which is why it can afford to be loud: it
      costs nothing in the normal case. A forgotten pause means a day spent
@@ -2074,6 +2096,38 @@ function insertFeedItem(wrap, insertTop) {
 // Peer messages and returning delegation results deliberately read the SAME
 // ("Peer"). The distinction is preserved in storage, so splitting them later
 // needs no migration — but in a busy session a second label is just noise.
+
+// Handle -> sessionId, so a PEER bubble's title can open the session it came
+// from. Resolved lazily and cached: origin only ever carries the HANDLE
+// (it has to, because after a reload it is inferred from the transcript's
+// "[message from @x]" text, which is all that text contains), so the id has
+// to be looked up. Refreshed on a miss, since a handle can be minted after
+// this map was first built.
+let peerIdByHandle = new Map();
+let peersFetchedAt = 0;
+async function refreshPeerHandles() {
+  if (!driverBase) return;
+  try {
+    const d = await (await fetch(`${driverBase}/peers?all=1`)).json();
+    const next = new Map();
+    for (const p of d.peers || []) if (p.handle) next.set(p.handle, p.id);
+    peerIdByHandle = next;
+    peersFetchedAt = Date.now();
+  } catch { /* a failed lookup just leaves the title unlinked */ }
+}
+async function openPeerByHandle(handle) {
+  const bare = String(handle || '').replace(/^@/, '');
+  if (!bare) return;
+  let id = peerIdByHandle.get(bare);
+  // One retry on a miss — the handle may post-date our cached map.
+  if (!id && Date.now() - peersFetchedAt > 2000) {
+    await refreshPeerHandles();
+    id = peerIdByHandle.get(bare);
+  }
+  if (id) viewSession(id);
+  else alert(`No session found for @${bare}. It may have been deleted.`);
+}
+
 function applyOrigin(m, origin) {
   if (!m || !origin || m.role !== 'user') return;
   const [kind, who] = String(origin).split(/:(.+)/);
@@ -2093,9 +2147,41 @@ function applyOrigin(m, origin) {
     return;
   }
   if (kind !== 'peer' && kind !== 'result' && kind !== 'delegate') return;
-  if (m.wrap) m.wrap.classList.add('from-peer');
-  if (m.roleNameEl) m.roleNameEl.textContent = kind === 'delegate' ? 'Delegated' : 'Peer';
-  if (m.titleEl && who) m.titleEl.textContent = who;
+  if (m.wrap) {
+    m.wrap.classList.add('from-peer');
+    // OPEN by default, unlike thinking/tool bubbles: a peer message is
+    // content the user asked for, not incidental detail. No setting for it —
+    // one more three-way preference for a bubble type that appears rarely
+    // would cost more to explain than it saves.
+    //
+    // Guarded on first wiring ONLY. applyOrigin runs again whenever the
+    // bubble is re-rendered (a late history batch tops up the same id), and
+    // re-adding `expanded` there would spring open a bubble the user had
+    // just collapsed.
+    if (!m.peerToggleWired) m.wrap.classList.add('expanded');
+  }
+  if (m.roleNameEl && !m.peerToggleWired) {
+    m.roleNameEl.textContent = kind === 'delegate' ? 'Delegated' : 'Peer';
+    // The label itself is the toggle, matching Thinking and Tool. The arrow
+    // is a ::before on this element, so there is no separate hit target to
+    // miss.
+    m.roleNameEl.classList.add('peer-toggle');
+    m.roleNameEl.addEventListener('click', () => m.wrap && m.wrap.classList.toggle('expanded'));
+    m.peerToggleWired = true;
+  }
+  if (m.titleEl && who) {
+    m.titleEl.textContent = who;
+    // Clicking the handle opens that session. Deliberately a separate click
+    // target from the label toggle beside it, with stopPropagation, so
+    // "collapse this" and "go there" can never be confused — the same rule
+    // the session rows' disclosure triangle follows.
+    if (!m.peerLinkWired) {
+      m.titleEl.classList.add('peer-link');
+      m.titleEl.title = `Open ${who}`;
+      m.titleEl.addEventListener('click', (e) => { e.stopPropagation(); openPeerByHandle(who); });
+      m.peerLinkWired = true;
+    }
+  }
   m.fromPeer = true;
   // The "[message from @x]" line exists for the MODEL, which has no label to
   // read. Once the label says it, repeating it in the body is noise.

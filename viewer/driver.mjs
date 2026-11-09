@@ -443,7 +443,8 @@ const backends = {
   // backend is the default — baseUrl here just needs to agree with the port
   // that child is started on (--opencode-port).
   "opencode": createOpenCodeBackend({
-    noteDelegateAnchor, ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
+    noteDelegateAnchor, noteRealSessionId,
+    ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
 };
 
 function getBackend(id) {
@@ -577,6 +578,38 @@ const SESSION_TREE_FILE = nodePath.join(PODPROMPT_STATE_DIR, "viewer-session-tre
 // `rel` is always "parent" today; it exists so a later peer relation can
 // live in the same file without the cascade walkers silently picking it up.
 let sessionRelations = loadSessionRelations();
+
+// OpenCode sessions are keyed throughout PodPrompt by a minted client id
+// ("oc-<uuid>"), while OpenCode itself knows them by a "ses_..." id it
+// assigns at creation. That pairing lives in the backend's in-memory maps
+// and so dies with the process — which is fine for everything EXCEPT a
+// restart, where the session then lists under its real id while its relation
+// row, turn state and resumable record all still sit under the client id.
+// The symptom is a delegated child reappearing detached from its parent with
+// no Continue bar, which is exactly the state a crashed session must not be
+// in. Seeded here, before the first listSessions, from the durable index.
+function seedOpenCodeRealIds() {
+  const pairs = [];
+  for (const [clientId, rel] of Object.entries(sessionRelations)) {
+    if (rel?.native?.realSessionId) pairs.push([clientId, rel.native.realSessionId]);
+  }
+  const n = backends.opencode?.seedRealIds?.(pairs) || 0;
+  if (n) console.log(`[driver] restored ${n} opencode session id mapping(s) from the relation index`);
+}
+seedOpenCodeRealIds();
+
+// Durable half of the pairing above: called by the opencode backend the
+// moment it creates a real session for a minted id. Only sessions with a
+// relation row are recorded — a plain top-level session has nothing keyed to
+// its client id worth preserving, and reappearing under its real id after a
+// restart costs it nothing.
+function noteRealSessionId(clientId, realId) {
+  if (!clientId || !realId) return;
+  const rel = sessionRelations[clientId];
+  if (!rel || rel.native?.realSessionId === realId) return;
+  rel.native = { ...(rel.native || {}), realSessionId: realId };
+  saveSessionRelations();
+}
 
 function loadSessionRelations() {
   try {

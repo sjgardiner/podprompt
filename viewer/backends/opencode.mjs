@@ -39,7 +39,37 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
-export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor }) {
+// Same string-based boundary check backends/claude-code.mjs's
+// discoverProjects() uses for its own subproject filter. Lives at module
+// scope (rather than inside the factory, where it used to) only so the
+// session-selection logic below can be unit-tested without standing up a
+// whole backend — see opencode-sessions.test.mjs.
+export function isUnderRoot(candidate, root) {
+  if (!candidate || !root) return false;
+  return candidate === root || candidate.startsWith(root + nodePath.sep);
+}
+
+// Which of OpenCode's sessions become top-level rows in the sessions panel.
+//
+// Both filters are load-bearing and neither is about the listing bug this
+// sits next to:
+//   - parentID: subtask/child sessions are shown nested by the driver, not
+//     as their own top-level entry.
+//   - isUnderRoot: OPENCODE_DATA_DIR is a single global-per-user directory
+//     (see podprompt.sh), not scoped per project, so GET /session can return
+//     sessions recorded under a directory with nothing to do with this
+//     launch's root at all — an unrelated repo that happened to be mounted
+//     at the same container path on an earlier run. Claude Code's own
+//     discoverProjects() filters exactly this way.
+//
+// This was never the cause of sessions going missing; it was being handed an
+// incomplete list. See allSessionsRaw().
+export function selectVisibleSessions(raw, cwdRoot) {
+  return (raw || []).filter(
+    (s) => s && !s.parentID && s.directory && isUnderRoot(s.directory, cwdRoot));
+}
+
+export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, requestApproval, baseUrl, registerChild, autoApproveForSession, updateSubAgent, noteDelegateAnchor, noteRealSessionId }) {
   const BASE = baseUrl || "http://127.0.0.1:7845";
   let knownCommandsCache = null;
   let knownCommandsFetchStarted = false;
@@ -1347,15 +1377,72 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     });
     clientToReal.set(sessionId, created.id);
     realToClient.set(created.id, sessionId);
+    // Hand the pairing to the driver so it outlives this process. Both maps
+    // above are in-memory ONLY, and everything PodPrompt keys off the minted
+    // client id — relation rows, turn state, the resumable record behind the
+    // Continue bar. Without a durable copy, a restart leaves the session
+    // listed under its real ses_... id (see allSessionsRaw) while its
+    // resumable record sits under an id nothing lists any more: the session
+    // comes back detached from its parent and with no way to continue it.
+    // ensureSession already accepts nativeSessionId for exactly this
+    // restore; nothing was ever writing it for PodPrompt-minted sessions.
+    try { noteRealSessionId?.(sessionId, created.id); } catch { /* best effort */ }
     return created.id;
   }
 
-  // Same string-based boundary check backends/claude-code.mjs's
-  // discoverProjects() uses for its own subproject filter — duplicated
-  // rather than shared for the same "not worth a cross-backend helper yet"
-  // reason resolveValidCwd's own comment gives.
-  function isUnderRoot(candidate, root) {
-    return candidate === root || candidate.startsWith(root + nodePath.sep);
+  // Every OpenCode session this server knows about, across all projects.
+  //
+  // The plain GET /session is NOT a complete listing: it returns only the
+  // sessions of the single project OpenCode resolves its own cwd to, and it
+  // silently IGNORES ?project= (passing any of the three real project ids
+  // returned byte-identical results). Only ?directory= narrows it, and the
+  // /project registry cannot be used to enumerate directories either —
+  // it reports project 407cf…'s worktree as /workspace, yet
+  // ?directory=/workspace returns a DIFFERENT project's sessions, so the
+  // worktree field does not round-trip.
+  //
+  // Measured against the running server when this was written: GET /session
+  // returned 22 sessions; /experimental/session returned 47. Twenty-five
+  // were invisible, including nineteen in the root directory itself — this
+  // was never specific to delegated children, they just finally made
+  // somebody notice. See §13 of the design record.
+  //
+  // archived=true is INCLUSIVE, not exclusive (47 without it, 52 with, the
+  // 47 a strict subset). It is required: the driver reads s.time.archived
+  // off each row to populate the Archived tab, and plain GET /session
+  // included archived sessions, so omitting it would silently drop them.
+  //
+  // NOT paged, deliberately. The endpoint advertises limit/cursor/start;
+  // limit works, but cursor=<last id> returns the SAME page again and start
+  // is inert, so a paging loop would have quietly truncated to page one —
+  // the identical failure mode to the bug being fixed here. No default cap
+  // exists either (no limit and limit=10000 both returned everything), so
+  // there is nothing to page around. The guard below exists to make a future
+  // cap loud instead of silent.
+  async function allSessionsRaw() {
+    try {
+      const rows = await api("/experimental/session?archived=true", { timeoutMs: 8000 });
+      if (!Array.isArray(rows)) throw new Error(`unexpected shape: ${typeof rows}`);
+      if (rows.length >= 1000) {
+        console.error(
+          `[opencode] /experimental/session returned ${rows.length} sessions — if OpenCode has`
+          + ` introduced a result cap, this list is now silently truncated and needs paging.`);
+      }
+      return rows;
+    } catch (e) {
+      // /experimental/ is explicitly unstable, so assume it can vanish in an
+      // upgrade. Degrade to the stable route — incomplete, but exactly the
+      // behaviour that shipped before this fix, rather than an empty list.
+      // Deliberately does NOT catch the fallback's own failure: a genuinely
+      // unreachable `opencode serve` must keep propagating to the driver's
+      // backend-failure tracking, which is what tells the UI the backend is
+      // down instead of empty.
+      console.error(
+        `[opencode] /experimental/session unavailable (${e.message}); falling back to`
+        + ` GET /session, which is project-scoped and WILL omit sessions.`);
+      const rows = await api("/session", { timeoutMs: 8000 });
+      return Array.isArray(rows) ? rows : [];
+    }
   }
 
   return {
@@ -1371,6 +1458,22 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     clientIdForReal(realId) {
       if (!realId) return null;
       return realToClient.get(realId) || childRealToPod.get(realId) || null;
+    },
+
+    // Re-establish client-id <-> real-id pairings at startup from the
+    // driver's durable relation index, before anything lists sessions.
+    // Without this the restore is lazy — getSessionHistory re-learns the
+    // mapping, but only once you OPEN the session, so listSessions has
+    // already shown it under the wrong id by then.
+    seedRealIds(pairs) {
+      let n = 0;
+      for (const [clientId, realId] of pairs || []) {
+        if (!clientId || !realId || clientToReal.has(clientId)) continue;
+        clientToReal.set(clientId, realId);
+        realToClient.set(realId, clientId);
+        n++;
+      }
+      return n;
     },
 
     async runTurn(sessionId, promptText, state) {
@@ -1439,7 +1542,11 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
       const fallback = { projects: [{ cwd: cwdRoot, label: "(root)" }], root: cwdRoot };
       let raw;
       try {
-        raw = await api("/session", { timeoutMs: 8000 });
+        // allSessionsRaw(), not GET /session: the bare route only ever saw
+        // one project, so the new-chat picker could not offer a directory
+        // whose sessions all lived in a different one — /workspace/podprompt
+        // and /workspace/geant4 were both undiscoverable here.
+        raw = await allSessionsRaw();
       } catch (e) {
         // `opencode serve` unreachable or still on its several-second cold
         // start after a container restart — degrade to the root-only view
@@ -1472,17 +1579,8 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     },
 
     async listSessions({ includeUnreachable }, sessionsIndex, pendingKindForSession) {
-      const raw = await api("/session", { timeoutMs: 8000 });
-      const list = (raw || [])
-        .filter((s) => !s.parentID) // subtask/child sessions aren't shown as their own top-level entry
-        // OPENCODE_DATA_DIR is a single, global-per-user host directory (see
-        // podprompt.sh), not scoped per project — GET /session can return
-        // sessions recorded under a directory with nothing to do with this
-        // launch's root at all (an unrelated repo mounted at this same
-        // container path on some earlier run). Claude Code's own
-        // discoverProjects() already filters exactly this way; this backend
-        // never did, so a foreign session could leak straight into the list.
-        .filter((s) => s.directory && isUnderRoot(s.directory, cwdRoot))
+      const raw = await allSessionsRaw();
+      const list = selectVisibleSessions(raw, cwdRoot)
         .map((s) => {
           // sessionsIndex/pendingKindForSession are keyed by the client id
           // the driver's own state Map uses, not OpenCode's real ses_...

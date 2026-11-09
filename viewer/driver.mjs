@@ -3264,12 +3264,32 @@ const server = createServer(async (req, res) => {
     // Re-attach provenance the transcript still evidences but the converted
     // history has dropped. Only ever ADDS an origin — an entry that already
     // has one (a backend that learns to carry it) is left alone.
+    //
+    // A DELEGATED child's opening prompt is the one case the text cannot
+    // speak for: peer mail carries "[message from @x]" and a resume carries
+    // fixed wording, but a delegation prompt is just the work, written by
+    // whatever model asked for it. So it is recovered from the relation row
+    // instead — that row is the record of who created this session, which is
+    // exactly the question. Without it the bubble claimed the USER had typed
+    // a prompt no human ever wrote.
+    const delRel = sessionRelations[sessionId];
+    const delegationOrigin = (delRel && delRel.childKind === "delegated")
+      ? `delegate:@${peers.get(delRel.createdBy || delRel.parent)?.handle || ""}`.replace(/@$/, "")
+      : null;
+    let seenUser = false;
     if (Array.isArray(history)) {
       for (const h of history) {
-        if (h && !h.origin) {
+        if (!h) continue;
+        const isUser = h.role === "user";
+        if (!h.origin) {
           const inferred = inferOriginFromText(h.role, h.text);
+          // Only the FIRST user entry: that is the delegation. Anything
+          // later is peer mail (which carries its own marker) or something
+          // the user really did type, now that HD1 makes these promptable.
           if (inferred) h.origin = inferred;
+          else if (isUser && !seenUser && delegationOrigin) h.origin = delegationOrigin;
         }
+        if (isUser) seenUser = true;
       }
     }
     res.writeHead(200, { "Content-Type": "application/json" });

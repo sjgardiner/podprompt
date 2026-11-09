@@ -31,12 +31,22 @@
   --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
-  /* Two measures, deliberately. Prose stays at a readable line length;
-     tables, diagrams and figures are allowed the full content width.
-     Before this split, main's own cap silently overrode every
-     `max-width: none` further down the file. */
-  --prose-width: 68ch;
-  --content-width: 1120px;
+  /* Three tiers, deliberately. A single cap on main used to override every
+     `max-width: none` further down the file, squeezing diagrams into the text
+     measure; widening the headings' rules to the figure width then left those
+     rules stretching far past the prose they were meant to frame. Text,
+     framing and figures each get their own width instead. */
+  /* In px, not ch, on purpose: `ch` resolves against each element's own font
+     size, so the same `74ch` made an h2's rule far wider than the paragraph
+     beneath it — which is the overhang these tiers exist to remove. */
+  --prose-width: 648px;     /* body text — about 85 characters at 15px, the
+                               top of the comfortable range, so it does not
+                               get any wider */
+  --text-column: 704px;     /* headings and their rules: a little past the
+                               text, so a rule frames the prose instead of
+                               trailing off into empty space */
+  --content-width: 1040px;  /* figures and wide tables, which are expected to
+                               break out past the text */
   --sidebar-width: 220px;
 
   --app-radius: 10px;      /* the app's corner radius, for diagrams */
@@ -56,7 +66,12 @@ body {
 
 .layout {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
+  /* minmax(0, 1fr), not 1fr: a grid track defaults to min-width:auto and so
+     refuses to shrink below its contents' min-content width. The diagrams
+     carry a min-width so their labels stay legible, which without this would
+     push the whole page wider than the viewport and produce a horizontal
+     scrollbar on the document instead of inside the figure. */
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -151,7 +166,7 @@ main {
 /* ── Page header ────────────────────────────────────────────── */
 
 .page-header {
-  max-width: var(--content-width);
+  max-width: var(--text-column);
   margin-bottom: 3rem;
   padding-bottom: 2rem;
   border-bottom: 1px solid var(--border);
@@ -186,7 +201,7 @@ main {
 section { margin-bottom: 3rem; }
 
 section h2 {
-  max-width: var(--content-width);
+  max-width: var(--text-column);
   font-size: 1.1rem;
   font-weight: 600;
   color: var(--heading);
@@ -525,7 +540,7 @@ section h2 .badge, section h3 .badge, section h4 .badge { margin-left: .1rem; }
   margin-top: 4rem;
   padding-top: 1.5rem;
   border-top: 1px solid var(--border);
-  max-width: var(--content-width);
+  max-width: var(--text-column);
   font-size: .875rem;
 }
 
@@ -645,6 +660,8 @@ figcaption {
   color: var(--text-muted);
   margin-top: .45rem;
   line-height: 1.5;
+  /* A caption is prose, even under a figure that is wider than the prose. */
+  max-width: var(--prose-width);
 }
 
 /* ── Responsive ─────────────────────────────────────────────── */

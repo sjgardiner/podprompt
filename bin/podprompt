@@ -598,11 +598,13 @@ deploy_viewer() {
         exit 1
     fi
 
-    # This list is both the preflight check AND the copy manifest below, so a
-    # new driver module that is not named here is silently never deployed —
-    # the driver then dies on import at startup, in the container, with the
-    # repo looking perfectly fine.
-    local required=(server.py viewer.html start-viewer.sh driver.mjs autonomy.mjs messaging.mjs limits.mjs opencode-plugin.ts backends)
+    # A sanity check on the CHECKOUT, not the copy manifest — see the derived
+    # manifest below for what actually gets deployed. These are the files whose
+    # absence means you are pointed at something that is not a viewer/, and
+    # saying so here beats a confusing failure inside the container later. It
+    # does not need to be exhaustive and must never be used to decide what to
+    # copy.
+    local required=(server.py viewer.html start-viewer.sh driver.mjs backends)
     local missing=()
     local f
     for f in "${required[@]}"; do
@@ -616,6 +618,39 @@ deploy_viewer() {
 
     mkdir -p "$target_dir"
 
+    # WHAT GETS COPIED: everything in viewer/, minus a short skip list.
+    #
+    # This used to be the hand-written `required` list above, and the cost of
+    # that showed up the first time someone split a module out: the new file
+    # was not named here, so it was never deployed, so the driver died on
+    # import inside the container while the repo looked perfectly fine. The
+    # viewer came up with no sessions at all and the only evidence was an
+    # ERR_MODULE_NOT_FOUND buried in the driver log.
+    #
+    # Deriving the manifest flips which way a mistake fails. Forgetting to add
+    # something to an allow-list breaks the deployment; forgetting to add
+    # something to the skip list below deploys one harmless extra file. Only
+    # one of those is worth a debugging session.
+    #
+    # Skipped on purpose:
+    #   *.test.mjs      tests; nothing at runtime imports them
+    #   package*.json   dependencies are baked into the image, not deployed
+    #                   here (see this function's header)
+    #   node_modules    same
+    #   __pycache__     build droppings
+    # Dotfiles are skipped too, by the glob rather than by name.
+    local manifest=()
+    local entry name
+    for entry in "$src_dir"/*; do
+        [ -e "$entry" ] || continue          # unmatched glob stays literal
+        name="$(basename "$entry")"
+        case "$name" in
+            *.test.mjs|package.json|package-lock.json|node_modules|__pycache__)
+                continue ;;
+        esac
+        manifest+=("$name")
+    done
+
     # Copying never removes, so a module renamed or deleted in the repo stays
     # in the deployed copy. Harmless for something nothing imports — chains.mjs
     # sat here long after it was deleted — but a RENAME leaves both the old and
@@ -626,13 +661,13 @@ deploy_viewer() {
     # just as likely to be something put there deliberately to patch a running
     # deployment, and silently deleting that would cost far more than the
     # clutter does. Whether a stray is stale or load-bearing is the user's call.
-    local entry name known strays
+    local known strays
     strays=0
     for entry in "$target_dir"/*; do
         [ -e "$entry" ] || continue          # unmatched glob stays literal
         name="$(basename "$entry")"
         known=0
-        for f in "${required[@]}"; do
+        for f in "${manifest[@]}"; do
             if [ "$name" = "$f" ]; then
                 known=1
                 break
@@ -647,7 +682,7 @@ deploy_viewer() {
         fi
     done
 
-    for f in "${required[@]}"; do
+    for f in "${manifest[@]}"; do
         cp -r "$src_dir/$f" "$target_dir/"
     done
     chmod +x "$target_dir/start-viewer.sh"

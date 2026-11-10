@@ -1235,7 +1235,14 @@ export function createOpenCodeBackend({ cwdRoot, broadcast, broadcastStatus, req
     }
 
     function onPermission(perm) {
-      if (state.autoApprove) {
+      // Inherited down the tree, matching what claude-code.mjs does in its own
+      // canUseTool path. This used to read `state.autoApprove` alone, so a
+      // session's OWN tool calls never inherited the flag from its parent —
+      // while childPermission() below DID inherit it, for OpenCode's native
+      // sub-agents. The asymmetry meant every delegated OpenCode session
+      // parked on its first write and sat there until someone ticked its box
+      // by hand, which made unattended delegation to this backend impossible.
+      if (state.autoApprove || autoApproveForSession?.(sessionId)) {
         pendingApprovalPromises.push(replyPermission(perm.id, { allow: true }));
         return;
       }

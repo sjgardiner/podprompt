@@ -3433,6 +3433,24 @@ function startTurn(sessionId, promptText, {
   if (state.turnInFlight) {
     return { ok: false, reason: "busy" };
   }
+  // Reserve the session SYNCHRONOUSLY, here, before anything can await.
+  //
+  // This used to be set only by the backend's runTurn (claude-code.mjs /
+  // opencode.mjs), which is reached via this function's un-awaited runTurn()
+  // call -- and runTurn awaits buildPromotedSeed() before it gets there. That
+  // await yields the event loop with turnInFlight still false, so the check
+  // above was a check-then-act race: two inputs arriving inside that window
+  // both passed the guard and both started a backend turn for the SAME
+  // session. The second query's control channel supersedes the first, and the
+  // first turn -- still streaming -- then fails every permission request with
+  // "AbortError: Stream closed" while remaining able to run auto-permitted
+  // read-only tools. Observed 2026-11-10: a task notification and a mail
+  // delivery landed 70ms apart and left the session unable to write anything
+  // for the rest of its turn, with auto-approve on and the driver healthy.
+  //
+  // Setting it here closes the window. The backends still set it themselves,
+  // which is now a harmless no-op, and runTurn's finally clears it.
+  state.turnInFlight = true;
   // §10 — the whole of the autonomy gate, in one place, precisely BECAUSE
   // this is the single entry point. The chain machinery this replaced needed
   // a mint path, a lookup path, a status check and a chainId threaded through
@@ -3591,6 +3609,12 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     console.error(`[driver] runTurn failed for session ${sessionId}:`, e.message);
     if (!state.turnOutcome) state.turnOutcome = { reason: "error", error: e.message };
   } finally {
+    // Release the reservation startTurn made before any await. The backends
+    // clear this too, in their own finally, but only once they have been
+    // reached -- and anything that throws before `backend.runTurn` above
+    // (buildPromotedSeed, stampSessionHost) would otherwise leave the session
+    // permanently "busy" and silently refuse every later turn. Idempotent.
+    state.turnInFlight = false;
     // Ordering matters: this runs after the backend's own finally has
     // finalized any still-streaming bubbles and cleared turnInFlight, so
     // turn_end is the last word on the turn rather than racing that cleanup.

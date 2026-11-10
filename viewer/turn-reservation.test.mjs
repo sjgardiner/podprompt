@@ -13,11 +13,12 @@
 // HONESTY ABOUT SCOPE. This was found while investigating a real failure --
 // sessions losing the ability to get any permission decision, while still able
 // to run auto-permitted read-only tools -- and it was initially believed to be
-// the cause. It is not established as the cause. Applying this fix did not stop
-// that failure recurring, and no log has ever shown two turns starting for one
-// session. The race is real as a matter of code reading, and closing it is
-// cheap and correct, but it should not be credited with fixing anything until
-// something actually demonstrates it firing. The real failure is still open.
+// the cause. It is not. Applying this fix did not stop that failure recurring,
+// and no log has ever shown two turns starting for one session. That failure
+// was later traced to something else entirely -- see permission-channel.mjs --
+// so this change is credited with nothing but itself. The race is real as a
+// matter of code reading, and closing it is cheap and correct, but it stays on
+// those merits alone unless something actually demonstrates it firing.
 //
 // WHY THIS TEST IS SHAPED LIKE THIS
 // ---------------------------------

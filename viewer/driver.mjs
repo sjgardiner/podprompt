@@ -3468,6 +3468,12 @@ function startTurnInner(sessionId, promptText, {
   //
   // Setting it here closes the window. The backends still set it themselves,
   // which is now a harmless no-op, and runTurn's finally clears it.
+  //
+  // NO TEST GUARDS THIS. There was one; it scraped this file as text to assert
+  // that no await appears between the guard above and this line, because
+  // driver.mjs has no exports and the race cannot be driven directly. It was
+  // deleted as more brittle than the thing it protected. So: if you move this
+  // assignment, or introduce an await above it, nothing will tell you.
   state.turnInFlight = true;
   // §10 — the whole of the autonomy gate, in one place, precisely BECAUSE
   // this is the single entry point. The chain machinery this replaced needed

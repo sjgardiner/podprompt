@@ -27,6 +27,9 @@ import {
   createSdkMcpServer, tool,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+// Pure, dependency-free so it can be unit-tested without the SDK; see that
+// module's header for what the failure is and why it is invisible otherwise.
+import { countPermissionChannelFailures } from "../permission-channel.mjs";
 
 // Why this exists: Claude Code ships its own always-present SendMessage and
 // ListAgents, which address the HARNESS's agent sessions rather than
@@ -1118,6 +1121,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // Host-path stamping now happens generically in driver.mjs's own
     // runTurn() wrapper, once for every backend — see its comment.
     state.turnInFlight = true;
+    // Per-turn, because the condition it counts is per-turn: see the
+    // permission-channel detector in the message loop below.
+    state.permChannelFailures = 0;
     // `backend` here lets server.py's /status handler seed this session's
     // history from disk (if it hasn't already) before this turn's own
     // broadcasts start landing — see the comment on server.py's turn_start
@@ -1618,6 +1624,46 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     async function consumeMessages(q) {
       const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
+        // ── Permission-channel failure detector ──────────────────────────
+        // A turn can lose its ability to get ANY permission decision while
+        // otherwise appearing healthy: the CLI keeps running the tools it
+        // permits internally (ls, grep, pwd) and keeps streaming text, so the
+        // turn ends outcome=completed and nothing anywhere records that the
+        // agent spent the whole turn unable to write a file or reach an MCP
+        // tool. That is exactly how it went unnoticed for a day.
+        //
+        // Reproducible trigger, 2026-11-10: start a background Bash task that
+        // outlives its turn. The task is a child of that turn's CLI process,
+        // so ending the turn orphans it; the NEXT turn is handed a "stopped"
+        // task-notification and that turn -- only that turn -- cannot reach
+        // canUseTool. Confirmed deliberately with a single orphaned task and
+        // no other input, so it is not a concurrency effect.
+        //
+        // The cause is inside Claude Code's own background-task handling and
+        // is not podprompt's to fix -- note this is claude-code-specific;
+        // OpenCode has no background-task mechanism at all. What podprompt
+        // CAN do is refuse to let it be invisible. Detection only: no
+        // retrying, no aborting, nothing that could loop.
+        {
+          const lost = countPermissionChannelFailures(msg);
+          if (lost) {
+            const was = state.permChannelFailures || 0;
+            state.permChannelFailures = was + lost;
+            if (was === 0) {
+              console.error(`[claude-code] PERMISSION CHANNEL LOST for session ${sessionId}:`
+                + ` a tool failed with "Tool permission request failed". Every tool needing a`
+                + ` permission decision will fail for the REST OF THIS TURN; tools the CLI`
+                + ` permits internally will keep working, so this turn will still look healthy.`
+                + ` Known trigger: a background task that outlived its turn. The next turn`
+                + ` recovers on its own.`);
+              broadcast(sessionId, "tool",
+                "*(permission channel lost — tools needing approval will fail until this turn"
+                + " ends; usually caused by a background task left running across a turn"
+                + " boundary)*",
+                randomUUID(), null, null);
+            }
+          }
+        }
         if (msg.type === "system" && msg.subtype === "init") {
           // sessionId is always chosen by the browser up front (create-mode
           // explicitly passes it), never left for the SDK to generate — so

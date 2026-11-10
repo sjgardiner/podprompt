@@ -3634,7 +3634,11 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // turn that misbehaved had already finished or was still running.
     console.log(`[driver] turnEnd ${sessionId}: source=${source}`
       + ` outcome=${state.turnOutcome ? state.turnOutcome.reason : "completed"}`
-      + `${state.abortRequested ? " abortRequested" : ""}`);
+      + `${state.abortRequested ? " abortRequested" : ""}`
+      // A turn can complete "successfully" having been unable to obtain a
+      // single permission decision. Recording the count here means the log
+      // says so instead of reading as a clean turn.
+      + `${state.permChannelFailures ? ` permissionFailures=${state.permChannelFailures}` : ""}`);
     // Ordering matters: this runs after the backend's own finally has
     // finalized any still-streaming bubbles and cleared turnInFlight, so
     // turn_end is the last word on the turn rather than racing that cleanup.

@@ -1,4 +1,9 @@
-// Detecting a turn that has lost its permission channel — pure, no deps.
+// The alarm for a turn that has lost its permission channel — pure, no deps.
+//
+// THIS IS NOT THE FIX. The cause was found and closed off in
+// claude-code.mjs — read turn-binding.mjs for the mechanism. This module is
+// what stays behind to tell us if it ever happens again, for a reason we have
+// not characterised.
 //
 // THE FAILURE. A turn can lose the ability to obtain ANY permission decision
 // while continuing to look completely healthy. Tools the CLI permits
@@ -10,22 +15,16 @@
 // It also impersonates a settings problem, which is what makes it expensive:
 // auto-approve is evaluated driver-side inside canUseTool, so when the channel
 // carrying that question is the broken thing, every visible setting is correct
-// and auto-approve cannot be seen to have failed.
+// and auto-approve cannot be seen to have failed. That combination cost a day
+// on 2026-11-10.
 //
-// THE TRIGGER, reproduced deliberately 2026-11-10: a background Bash task that
-// outlives the turn that started it. The task is a child of that turn's CLI
-// process, so ending the turn orphans it; the harness later notices there is
-// no completion record and the NEXT turn opens with a task-notification of
-// status=stopped. That turn, and only that turn, cannot reach canUseTool.
-// Reproduced with a single orphaned task and no other concurrent input, so the
-// concurrency present in the original occurrences was incidental.
+// WHY IT IS STILL HERE. Of the 33 failures recorded that day, the mechanism we
+// found and fixed accounts for the three sustained outages. Seven others have
+// no explanation: no orphaned task, no identified trigger. They may share the
+// same cause, or not. Until something proves otherwise this alarm is how we
+// would find out, and it costs one substring check per message.
 //
-// WHOSE BUG. Claude Code's background-task handling, not podprompt's — and
-// claude-code-only, since OpenCode has no background-task mechanism. The
-// driver is doing nothing wrong, which is exactly why detection has to be
-// explicit rather than falling out of normal error handling.
-//
-// SCOPE. Detection only. No retry, no abort, no recovery attempt: a turn that
+// SCOPE. Alarm only. No retry, no abort, no recovery attempt: a turn that
 // cannot ask permission also cannot be meaningfully repaired from here, and
 // anything automatic risks a loop. The value is that the outage gets named
 // while it is happening instead of being reconstructed from transcripts

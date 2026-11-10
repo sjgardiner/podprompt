@@ -12,13 +12,16 @@
 //
 // HONESTY ABOUT SCOPE. This was found while investigating a real failure --
 // sessions losing the ability to get any permission decision, while still able
-// to run auto-permitted read-only tools -- and it was initially believed to be
-// the cause. It is not. Applying this fix did not stop that failure recurring,
-// and no log has ever shown two turns starting for one session. That failure
-// was later traced to something else entirely -- see permission-channel.mjs --
-// so this change is credited with nothing but itself. The race is real as a
-// matter of code reading, and closing it is cheap and correct, but it stays on
-// those merits alone unless something actually demonstrates it firing.
+// to run auto-permitted read-only tools -- and was written up as its cause,
+// with a confident explanation about one query's control channel superseding
+// the other's. That explanation was never demonstrated and the fix did not
+// stop the failure recurring. The real cause was found later and is something
+// else entirely: see turn-binding.mjs.
+//
+// So this change is credited with nothing but itself. No log has ever shown
+// two turns starting for one session. The race is real as a matter of code
+// reading, and closing it is cheap and correct, but it stays on those merits
+// alone unless something actually demonstrates it firing.
 //
 // WHY THIS TEST IS SHAPED LIKE THIS
 // ---------------------------------

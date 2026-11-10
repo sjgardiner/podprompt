@@ -1,11 +1,12 @@
-// Tests for the permission-channel failure detector; see
-// permission-channel.mjs for what the failure is and how it was reproduced.
+// Tests for the permission-channel alarm; see permission-channel.mjs for what
+// the failure is and why the alarm outlived the fix for it.
 //
-// The detector is worth testing properly rather than trusting in place: it is
-// a substring match buried in a stream loop, it fires on a condition that is
-// rare and hard to stage on demand, and both ways of getting it wrong are
-// bad. Too eager and it cries outage during ordinary denials; too narrow and
-// it stays silent through the exact event it exists to catch.
+// Worth testing properly rather than trusting in place: it is a substring
+// match buried in a stream loop, it now fires on a condition that should never
+// occur, and both ways of getting it wrong are bad. Too eager and it cries
+// outage during ordinary denials; too narrow and it stays silent through the
+// exact event it exists to catch — and since the expected number of real
+// firings is now zero, nothing else would reveal that it had stopped working.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { countPermissionChannelFailures } from "./permission-channel.mjs";

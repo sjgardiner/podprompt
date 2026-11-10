@@ -501,12 +501,7 @@ const backendHooks = {
     delegate: (fromSessionId, args) => toolDelegate(fromSessionId, args),
     describeReceipt,
     backendIds: () => Object.keys(backends),
-    // Only claude-code consumes this hook (opencode's plugin fetches
-    // /system-prompt instead), and only claude-code can background a task —
-    // hence the flag is set here and nowhere else.
-    systemPrompt: () => messagingSystemPrompt({
-      prefix: "mcp__podprompt__", backgroundTasks: true,
-    }),
+    systemPrompt: () => messagingSystemPrompt({ prefix: "mcp__podprompt__" }),
     readSession: (fromSessionId, args) => toolReadSession(fromSessionId, args),
     renderReadSession,
   },
@@ -2243,11 +2238,7 @@ function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false })
 // search, so without this the model never saw ours to choose them. OpenCode
 // has no such competitor and its tools are always visible, but it gets the
 // same text for symmetry and for the delegate_session steer.
-//
-// `backgroundTasks` adds one paragraph that only applies where a runtime can
-// start a task in the background — i.e. Claude Code. See where it is appended
-// for what it is defending against.
-function messagingSystemPrompt({ prefix = "", backgroundTasks = false } = {}) {
+function messagingSystemPrompt({ prefix = "" } = {}) {
   const t = (name) => `${prefix}${name}`;
   return [
     "PodPrompt environment.",
@@ -2296,34 +2287,6 @@ function messagingSystemPrompt({ prefix = "", backgroundTasks = false } = {}) {
     `${t("read_session")} also reads THIS session: if you need something said earlier that you`
     + " no longer have — because the conversation is long or was compacted — read your own"
     + ' transcript with session="me" and a search term rather than guessing or asking again.',
-    // ── Background tasks, Claude Code only ───────────────────────────────
-    //
-    // WHAT GOES WRONG. PodPrompt runs each turn as its own CLI process, so a
-    // backgrounded task is a child of THAT process and dies with it. The
-    // harness then finds no completion record and opens the NEXT turn with a
-    // status=stopped task-notification — and that turn cannot reach
-    // canUseTool at all. Every tool needing approval fails for its whole
-    // duration while the internally-permitted ones (ls, grep, reads) keep
-    // working, so it reads as a settings problem rather than a failure, and
-    // the turn still ends outcome=completed. Reproduced deliberately
-    // 2026-11-10 with a single orphaned task and no other input.
-    //
-    // The detector in backends/claude-code.mjs catches this after the fact.
-    // This paragraph is the half that can prevent it, which is worth far more
-    // than naming it afterwards — the outage lasts a full turn either way.
-    //
-    // Phrased as a fact about the environment, like everything above it: the
-    // note on baseOpts in claude-code.mjs records a probe model stopping to
-    // flag an imperative version as a suspicious injected instruction.
-    ...(backgroundTasks ? ["",
-      "Each turn here runs in its own process, so a task started in the background does not"
-      + " survive the end of the turn that started it — it cannot carry on into your next"
-      + " turn, and one left running when a turn ends can cost the FOLLOWING turn its ability"
-      + " to obtain tool permissions, which looks like a settings problem rather than a"
-      + " failure. Background work whose result you want should finish inside the turn that"
-      + " started it. Waiting or pacing yourself is best done in the foreground, within a"
-      + " single turn, where it costs nothing and strands nothing.",
-    ] : []),
   ].join("\n");
 }
 
@@ -3492,12 +3455,16 @@ function startTurnInner(sessionId, promptText, {
   // await yields the event loop with turnInFlight still false, so the check
   // above was a check-then-act race: two inputs arriving inside that window
   // both passed the guard and both started a backend turn for the SAME
-  // session. The second query's control channel supersedes the first, and the
-  // first turn -- still streaming -- then fails every permission request with
-  // "AbortError: Stream closed" while remaining able to run auto-permitted
-  // read-only tools. Observed 2026-11-10: a task notification and a mail
-  // delivery landed 70ms apart and left the session unable to write anything
-  // for the rest of its turn, with auto-approve on and the driver healthy.
+  // session. Two live queries on one conversation is incoherent regardless of
+  // what exactly goes wrong first, which is reason enough to close it.
+  //
+  // HONESTY ABOUT PROVENANCE. This was found while chasing a different bug --
+  // turns that could read anything and write nothing -- and was written up as
+  // its cause, including a confident story about one query's control channel
+  // superseding the other's. That story was never demonstrated. The real cause
+  // was elsewhere (see turn-binding.mjs), and no log has ever shown two turns
+  // starting for one session. The race is real by inspection; it has never
+  // been observed, and nothing here should be credited with fixing anything.
   //
   // Setting it here closes the window. The backends still set it themselves,
   // which is now a harmless no-op, and runTurn's finally clears it.

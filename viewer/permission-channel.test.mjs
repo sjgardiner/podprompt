@@ -11,9 +11,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { countPermissionChannelFailures } from "./permission-channel.mjs";
 
-const toolResult = (text) => ({
+const toolResult = (text, is_error = true) => ({
   type: "user",
-  message: { content: [{ type: "tool_result", content: text }] },
+  message: { content: [{ type: "tool_result", content: text, is_error }] },
 });
 
 test("detects the real failure text the CLI emits", () => {
@@ -29,13 +29,47 @@ test("counts every failing result in one message", () => {
     type: "user",
     message: {
       content: [
-        { type: "tool_result", content: "Tool permission request failed: AbortError: Stream closed" },
+        { type: "tool_result", is_error: true, content: "Tool permission request failed: AbortError: Stream closed" },
         { type: "tool_result", content: "ok" },
-        { type: "tool_result", content: "Tool permission request failed: AbortError: Stream closed" },
+        { type: "tool_result", is_error: true, content: "Tool permission request failed: AbortError: Stream closed" },
       ],
     },
   };
   assert.equal(countPermissionChannelFailures(msg), 2);
+});
+
+test("the exact shape observed in real transcripts", () => {
+  // Pinned verbatim. If the CLI ever changes this shape the alarm goes quiet,
+  // and silence is indistinguishable from health -- so this test is the only
+  // thing that would notice.
+  const msg = {
+    type: "user",
+    message: {
+      content: [{
+        type: "tool_result",
+        content: "Tool permission request failed: AbortError: Stream closed",
+        is_error: true,
+        tool_use_id: "toolu_01Qvn5HzpBpwBLdLbuW2HxRZ",
+      }],
+    },
+  };
+  assert.equal(countPermissionChannelFailures(msg), 1);
+});
+
+test("does not fire when a tool merely READS text containing the marker", () => {
+  // Not hypothetical: an `includes` version reported three outages during a
+  // code review, because reading this module returns its own source and the
+  // marker is defined in it. An alarm that fires when somebody investigates
+  // it is worse than no alarm.
+  const fileRead = "     1\t// The alarm for a turn that has lost its permission channel\n"
+    + "     2\tconst FAILURE_MARKER = \"Tool permission request failed\";\n";
+  assert.equal(countPermissionChannelFailures(toolResult(fileRead, false)), 0);
+  // ...and not even if the read somehow came back flagged as an error.
+  assert.equal(countPermissionChannelFailures(toolResult(fileRead, true)), 0);
+  // A grep whose output happens to lead with the phrase is still not a failure,
+  // because a successful grep is not an errored tool result.
+  assert.equal(countPermissionChannelFailures(
+    toolResult("Tool permission request failed: AbortError: Stream closed", false)), 0);
 });
 
 test("does not fire on ordinary tool failures", () => {
@@ -51,17 +85,22 @@ test("does not fire on ordinary tool failures", () => {
   }
 });
 
-test("handles structured (non-string) tool_result content", () => {
+test("ignores structured (non-string) tool_result content", () => {
+  // The real shape is a plain string. A JSON-serialised array starts with "[",
+  // so it cannot lead with the marker -- deliberately not special-cased: every
+  // observed failure is a string, and loosening this is how the false-positive
+  // bug got in.
   const msg = {
     type: "user",
     message: {
       content: [{
         type: "tool_result",
+        is_error: true,
         content: [{ type: "text", text: "Tool permission request failed: AbortError: Stream closed" }],
       }],
     },
   };
-  assert.equal(countPermissionChannelFailures(msg), 1);
+  assert.equal(countPermissionChannelFailures(msg), 0);
 });
 
 test("ignores everything that is not a user message with tool results", () => {

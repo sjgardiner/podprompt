@@ -30,32 +30,53 @@
 // while it is happening instead of being reconstructed from transcripts
 // afterwards.
 
-// The CLI surfaces an undeliverable request as a tool_result whose text begins
-// "Tool permission request failed", usually "...: AbortError: Stream closed".
+// The CLI surfaces an undeliverable request as an ERRORED tool_result whose
+// text begins with this, usually "...: AbortError: Stream closed". Verified
+// against real records: { type: "tool_result", is_error: true,
+// content: "Tool permission request failed: AbortError: Stream closed" }.
 const FAILURE_MARKER = "Tool permission request failed";
 
 // How many tool results in this message report that the permission request
 // itself could not be delivered.
 //
-// Deliberately narrow. This must NOT fire on a tool that ran and failed, nor
-// on a permission that was legitimately DENIED — both are normal. Only a
-// request that never reached whoever decides counts, because only that leaves
-// the agent unable to get an answer at all.
+// Deliberately narrow, in three separate ways. Each one is load-bearing.
 //
-// It also only inspects tool_result blocks, never assistant text. Matching
-// prose would mean that discussing this bug triggers it, which is not a
-// hypothetical: the session that found it did exactly that for hours.
+// 1. tool_result blocks only, never assistant text. Matching prose would mean
+//    that discussing this bug triggers it.
+//
+// 2. is_error must be true. A successful tool result that merely CONTAINS the
+//    phrase is not a failure.
+//
+// 3. The text must START with the marker, not contain it.
+//
+// Rules 2 and 3 exist because the obvious `includes` version was wrong, and
+// wrong in the least convenient way: it reported three "permission channel
+// lost" events during a code review of this very file. Reading
+// permission-channel.mjs returns its source — which contains the marker,
+// because the marker is defined here — and grepping for the phrase returns
+// matching lines. Every such read was counted as an outage. An alarm that
+// fires when somebody investigates it is worse than no alarm.
+//
+// It must also NOT fire on a tool that ran and failed, nor on a permission
+// that was legitimately DENIED — both are normal. Only a request that never
+// reached whoever decides counts, because only that leaves the agent unable to
+// get an answer at all.
+//
+// Known limitation, stated rather than papered over: if a future CLI stops
+// setting is_error on these, this goes quiet. Since the expected firing count
+// is already zero, silence would look identical to health. The tests pin the
+// exact observed shape so a change to it shows up there first.
 export function countPermissionChannelFailures(msg) {
   if (!msg || msg.type !== "user") return 0;
   const content = msg.message?.content;
   if (!Array.isArray(content)) return 0;
   let n = 0;
   for (const block of content) {
-    if (!block || block.type !== "tool_result") continue;
+    if (!block || block.type !== "tool_result" || block.is_error !== true) continue;
     const text = typeof block.content === "string"
       ? block.content
       : JSON.stringify(block.content ?? "");
-    if (text.includes(FAILURE_MARKER)) n++;
+    if (text.trimStart().startsWith(FAILURE_MARKER)) n++;
   }
   return n;
 }

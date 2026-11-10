@@ -27,9 +27,19 @@ import {
   createSdkMcpServer, tool,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-// Pure, dependency-free so it can be unit-tested without the SDK; see that
-// module's header for what the failure is and why it is invisible otherwise.
+// Both pure and dependency-free so they can be unit-tested without the SDK.
+// turn-binding decides which `result` ends our turn — read its header first,
+// it explains the failure this whole arrangement exists to prevent.
+// permission-channel is the alarm for that failure happening anyway.
+import { resultBelongsToTurn } from "../turn-binding.mjs";
 import { countPermissionChannelFailures } from "../permission-channel.mjs";
+
+// How long a turn keeps listening after a result that is not its own before
+// giving up. Generous on purpose: in every observed case the next message
+// arrived within 6ms, and this only runs when something is already wrong. The
+// value matches the opencode backend's inactivity window so the two backends
+// give up on a wedged turn on the same timescale.
+const FOREIGN_RESULT_GRACE_MS = 5 * 60 * 1000;
 
 // Why this exists: Claude Code ships its own always-present SendMessage and
 // ListAgents, which address the HARNESS's agent sessions rather than
@@ -450,9 +460,15 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           console.error("[claude-code] model warm-up interrupt failed:", e.message);
         }
         // interrupt() ends the TURN; close() ends the PROCESS. This probe's
-        // prompt generator never completes by design, so without this its
-        // child lives until the SDK's 10-minute ceiling — which is why two
-        // of them were present before any prompt had been sent.
+        // prompt generator never completes by design, so nothing else will
+        // ever end its child — which is why two of them were once found
+        // resident before any prompt had been sent.
+        //
+        // (An earlier note here blamed a 600s `runEndCeilingMs` timer in the
+        // SDK. No such symbol exists in the installed version; today the SDK
+        // closes the child's stdin once the prompt generator finishes and the
+        // first result arrives. For a generator that never finishes, that
+        // moment never comes — same conclusion, correct reason.)
         try { q.close(); } catch { /* already closed */ }
       }
     })().catch((e) => {
@@ -1091,15 +1107,21 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   }
 
   // ── Drive one turn ───────────────────────────────────────────────────────
-  // The prompt is wrapped in a one-item async generator (still fully
-  // spawn-per-turn — this doesn't reintroduce a persistent process) rather than
-  // passed as a bare string, specifically so we can supply our own uuid for the
-  // user's message. That uuid lands unchanged as the transcript entry's own
-  // `uuid` for this turn (same property already confirmed for assistant
-  // messages) — so broadcasting it immediately, before query() even starts,
-  // gives correct chronological ordering with no risk of a mismatched-id
-  // duplicate, now that nothing else will ever independently
-  // re-emit this same content.
+  // The prompt is wrapped in an async generator rather than passed as a bare
+  // string, specifically so we can supply our own uuid for the user's message.
+  // That uuid lands unchanged as the transcript entry's own `uuid` for this
+  // turn (same property already confirmed for assistant messages) — so
+  // broadcasting it immediately, before query() even starts, gives correct
+  // chronological ordering with no risk of a mismatched-id duplicate, now that
+  // nothing else will ever independently re-emit this same content.
+  //
+  // That uuid earns a second job below: the CLI echoes it back on the `result`
+  // for whichever turn consumed the prompt, which is how this turn recognises
+  // its OWN ending. See onePrompt and turn-binding.mjs — getting that wrong is
+  // what broke permissions for whole turns before 2026-11-10.
+  //
+  // Still spawn-per-turn: the generator parks until the turn ends and the
+  // query is closed right after, so no process outlives its turn.
   //
   // Bootstrap ambiguity: the first time this process is asked to run a turn
   // in a given session id, it doesn't know whether that id is brand new
@@ -1132,7 +1154,9 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     broadcastStatus(sessionId, { type: "turn_start", backend: "claude-code" });
 
     const streamTracker = makeStreamTracker(sessionId);
-    const canUseTool = makeCanUseTool(sessionId, state);
+    // Wrapped below, once pendingPermissionCount exists, so the safety net can
+    // tell "stalled" from "waiting for a human to click approve".
+    const decidePermission = makeCanUseTool(sessionId, state);
 
     const userMsgUuid = randomUUID();
     // The bubble shows what the user actually typed. state.pendingSeed (set
@@ -1145,19 +1169,72 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     const modelPrompt = seed ? `${seed}\n\n${promptText}` : promptText;
     broadcastUserPrompt(sessionId, promptText, userMsgUuid, state.turnOrigin);
 
-    function onePrompt() {
+    // THE GENERATOR MUST NOT FINISH UNTIL THE TURN DOES.
+    //
+    // When this generator returns, the SDK waits for the first `result` and
+    // then closes stdin to the CLI — its own debug line says so: "Calling
+    // transport.endInput() to close stdin to CLI process". canUseTool answers
+    // travel over that stdin, so the first result silently ends this turn's
+    // ability to obtain ANY permission decision.
+    //
+    // That is harmless when the first result is also the last, which is the
+    // usual case and why this went unnoticed. It is not harmless when Claude
+    // Code emits one early — clearing a background task orphaned by a previous
+    // turn produces a complete result about a millisecond after init. The rest
+    // of the turn then runs with a dead permission channel while looking
+    // entirely healthy: internally-permitted tools still work, text still
+    // streams, and the turn still ends "successfully".
+    //
+    // So the generator parks on `gate` instead, and the message loop opens it
+    // on the result that is actually ours (see resultBelongsToTurn). Reproduced
+    // and fixed under test 2026-11-10; see turn-binding.mjs.
+    function onePrompt(gate) {
       // A fresh async generator per attempt: once iterated (even partially,
       // even to a thrown error), a JS generator is exhausted and can't be
-      // replayed — the resume-retry below needs its own.
+      // replayed — the resume-retry below needs its own. Each attempt gets its
+      // own gate for the same reason.
       return (async function* () {
         yield {
           type: "user",
           message: { role: "user", content: modelPrompt },
           parent_tool_use_id: null,
+          // Also what binds this turn's result back to this turn. The CLI
+          // echoes it on the result for whichever turn consumed the prompt.
           uuid: userMsgUuid,
         };
+        await gate.promise;
       })();
     }
+
+    // Resolve-once, never rejects: a gate that throws would surface as an
+    // error from deep inside the SDK's input pump rather than as this turn's
+    // outcome. Ending the turn is always done by opening it.
+    function makeGate() {
+      let open;
+      const promise = new Promise((resolve) => { open = resolve; });
+      return { promise, open: () => open() };
+    }
+
+    // Turn-scoped so consume()'s finally can clear it no matter how the turn
+    // ends — a stray timer outliving its turn could close the NEXT query to
+    // land on state.liveQuery.
+    let foreignResultTimer = null;
+    function disarmSafetyNet() {
+      if (foreignResultTimer) { clearTimeout(foreignResultTimer); foreignResultTimer = null; }
+    }
+
+    // How many permission decisions this turn is currently waiting on. Only
+    // used to hold off the safety net: a human taking their time over an
+    // approval card is not a stall.
+    let pendingPermissionCount = 0;
+    const canUseTool = async (...args) => {
+      pendingPermissionCount++;
+      try {
+        return await decidePermission(...args);
+      } finally {
+        pendingPermissionCount--;
+      }
+    };
 
     const abortController = new AbortController();
     state.abortController = abortController;
@@ -1587,7 +1664,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     }
 
     async function consume(opts) {
-      const q = query({ prompt: onePrompt(), options: opts });
+      const gate = makeGate();
+      const q = query({ prompt: onePrompt(gate), options: opts });
       // Held for the life of the turn so a per-sub-agent stop can reach it:
       // stopTask is a control request on the live Query, and a sub-agent has
       // no process or abortController of its own to target. The bootstrap
@@ -1600,50 +1678,49 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       // overwrites state.liveQuery, so closing the survivor out there would
       // abandon the first one.
       //
-      // Draining the generator is NOT enough, and neither is q.return() nor
-      // aborting — both were measured and both left the child alive. The
-      // SDK defers closing the child's stdin whenever hasBidirectionalNeeds()
-      // is true, which it is for us twice over (canUseTool is set, and so is
-      // an SDK MCP server). It then only closes on an internal
-      // runEndCeilingMs timer — 600000 ms, not configurable and not exposed
-      // as an option or env var. So the children are not immortal; they sit
-      // on a ten-minute fuse that any normal turn rate outruns. Measured: 81
-      // of them, ~7 GB, in 3.4 hours.
-      //
-      // close() is the documented escape (present since 0.2.15): it ends
-      // stdin, then SIGTERM after 2s, then SIGKILL 5s later.
+      // close() is what ends the CHILD PROCESS, and it is mandatory. Draining
+      // the generator is not enough, and neither is q.return() nor aborting —
+      // both were measured and both left the child alive, because the SDK
+      // holds the child's stdin open while hasBidirectionalNeeds() is true,
+      // which it is for us twice over (canUseTool is set, and so is an SDK MCP
+      // server). Measured when this was missing: 81 live children, ~7 GB, in
+      // 3.4 hours. close() is the documented escape (present since 0.2.15):
+      // it ends stdin, then SIGTERM after 2s, then SIGKILL 5s later.
       try {
-        await consumeMessages(q);
+        await consumeMessages(q, gate);
       } finally {
+        // Opened unconditionally. On the normal path the message loop has
+        // already done it; on a throw or an abort it has not, and a prompt
+        // generator parked forever would keep the SDK's input pump alive.
+        gate.open();
+        disarmSafetyNet();
         // Synchronous and idempotent. Guarded anyway so a cleanup failure
         // can never mask the turn's own outcome.
         try { q.close(); } catch { /* already closed */ }
       }
     }
 
-    async function consumeMessages(q) {
+    async function consumeMessages(q, gate) {
       const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
-        // ── Permission-channel failure detector ──────────────────────────
-        // A turn can lose its ability to get ANY permission decision while
-        // otherwise appearing healthy: the CLI keeps running the tools it
-        // permits internally (ls, grep, pwd) and keeps streaming text, so the
-        // turn ends outcome=completed and nothing anywhere records that the
-        // agent spent the whole turn unable to write a file or reach an MCP
-        // tool. That is exactly how it went unnoticed for a day.
+        // Any traffic at all means the turn is alive; only silence after an
+        // unmatched result is suspicious.
+        disarmSafetyNet();
+        // ── Permission-channel alarm ──────────────────────────────────────
+        // Kept as an alarm, not a fix. The known cause is closed off above
+        // (the prompt generator no longer lets the SDK close stdin early), so
+        // this should now never fire; if it does, something we have not
+        // characterised has taken the channel down and we want to hear about
+        // it the same day rather than a day later.
         //
-        // Reproducible trigger, 2026-11-10: start a background Bash task that
-        // outlives its turn. The task is a child of that turn's CLI process,
-        // so ending the turn orphans it; the NEXT turn is handed a "stopped"
-        // task-notification and that turn -- only that turn -- cannot reach
-        // canUseTool. Confirmed deliberately with a single orphaned task and
-        // no other input, so it is not a concurrency effect.
+        // Why it is hard to notice without this: the CLI keeps running the
+        // tools it permits internally (ls, grep, reads) and keeps streaming
+        // text, so a turn that could not write a single file still ends
+        // outcome=completed. Seven failures from 2026-11-10 remain
+        // unexplained by the mechanism we did find; this is how we would
+        // learn they still happen.
         //
-        // The cause is inside Claude Code's own background-task handling and
-        // is not podprompt's to fix -- note this is claude-code-specific;
-        // OpenCode has no background-task mechanism at all. What podprompt
-        // CAN do is refuse to let it be invisible. Detection only: no
-        // retrying, no aborting, nothing that could loop.
+        // Alarm only: no retrying, no aborting, nothing that could loop.
         {
           const lost = countPermissionChannelFailures(msg);
           if (lost) {
@@ -1654,14 +1731,50 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                 + ` a tool failed with "Tool permission request failed". Every tool needing a`
                 + ` permission decision will fail for the REST OF THIS TURN; tools the CLI`
                 + ` permits internally will keep working, so this turn will still look healthy.`
-                + ` Known trigger: a background task that outlived its turn. The next turn`
-                + ` recovers on its own.`);
+                + ` This should be impossible since the turn-binding fix — please report it`
+                + ` with the driver log for this turn.`);
               broadcast(sessionId, "tool",
                 "*(permission channel lost — tools needing approval will fail until this turn"
-                + " ends; usually caused by a background task left running across a turn"
-                + " boundary)*",
+                + " ends)*",
                 randomUUID(), null, null);
             }
+          }
+        }
+        // ── Is this result the end of OUR turn? ───────────────────────────
+        // Opening the gate lets the prompt generator finish, which is what
+        // tells the SDK to close stdin and wind the turn down. Doing it on a
+        // result that is not ours is precisely the original bug, so the test
+        // is a structural one: does the result carry the uuid we sent?
+        if (msg.type === "result") {
+          if (resultBelongsToTurn(msg, userMsgUuid)) {
+            gate.open();
+          } else {
+            // SAFETY NET, and the only new way this turn can hang. Before the
+            // fix, an unmatched result ended the turn (wrongly, but it ended).
+            // Now we keep listening — so if nothing ever follows, say so and
+            // stop rather than waiting forever. In every observed case the
+            // next message arrived 3-6ms later, so this fires only when
+            // something is genuinely wrong.
+            //
+            // Not armed while a permission card is outstanding: a human may
+            // take any amount of time to answer, and waiting on a person is
+            // not a fault. Same rule, and the same reasoning, as the opencode
+            // backend's inactivity probe.
+            console.warn(`[claude-code] session ${sessionId}: ignoring a result that is not`
+              + ` this turn's (no matching user-message uuid) — Claude Code ran queued work`
+              + ` of its own. Still waiting for our own result.`);
+            foreignResultTimer = setTimeout(() => {
+              if (pendingPermissionCount > 0) return;   // see above
+              console.error(`[claude-code] session ${sessionId}: no result for this turn`
+                + ` ${FOREIGN_RESULT_GRACE_MS}ms after an unrelated one, and nothing else`
+                + ` arrived. Ending the turn.`);
+              state.turnOutcome = state.turnOutcome || {
+                reason: "error",
+                error: "turn produced no result of its own (stalled after unrelated result)",
+              };
+              gate.open();
+              try { q.close(); } catch { /* already closed */ }
+            }, FOREIGN_RESULT_GRACE_MS);
           }
         }
         if (msg.type === "system" && msg.subtype === "init") {

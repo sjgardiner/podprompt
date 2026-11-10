@@ -49,7 +49,55 @@
 # of which user the image defines, so this stays correct across that kind of
 # rename with no edit needed here.
 
-python3 "$HOME/.local/share/podprompt/viewer/server.py" --port "${VIEWER_PORT:-7843}" --driver-port "${VIEWER_DRIVER_PORT:-7844}" &
+# ── persistent logs ────────────────────────────────────────────────────────
+# Until 2026-11-10 both services wrote only to the container's terminal and
+# nowhere else, so when something went wrong during an unattended overnight run
+# the only record was host scrollback: easy to lose, impossible to grep, and
+# gone entirely once the container restarts. Diagnosing the turn-reservation
+# race that day had to be done from Claude Code's own transcripts instead,
+# which happen to timestamp tool errors — luck, not design.
+#
+# Both streams are timestamped and tee'd, so the terminal behaves exactly as
+# before while a durable copy accumulates. One previous run is kept (.log.1),
+# because the failure you want to read about is usually the one that made you
+# restart.
+# Logging must never be able to take a service down with it. If the directory
+# cannot be created or written, `tee` would exit immediately and the service
+# would take SIGPIPE on its next line of output — turning a diagnostics problem
+# into an outage, which is precisely the wrong trade. So writability is probed
+# up front and logging degrades to a plain pass-through if it fails.
+PODPROMPT_LOG_DIR="$HOME/.local/state/podprompt/logs"
+PODPROMPT_LOGGING=0
+if mkdir -p "$PODPROMPT_LOG_DIR" 2>/dev/null \
+   && : > "$PODPROMPT_LOG_DIR/.probe" 2>/dev/null; then
+    rm -f "$PODPROMPT_LOG_DIR/.probe"
+    PODPROMPT_LOGGING=1
+    for _f in driver server; do
+        if [ -f "$PODPROMPT_LOG_DIR/$_f.log" ]; then
+            mv -f "$PODPROMPT_LOG_DIR/$_f.log" "$PODPROMPT_LOG_DIR/$_f.log.1"
+        fi
+    done
+else
+    echo "[start-viewer] $PODPROMPT_LOG_DIR is not writable; continuing without file logs" >&2
+fi
+
+# tee to the file when logging is available, otherwise just pass the stream
+# through untouched. Keeps the pipeline shape identical either way.
+logto() {
+    if [ "$PODPROMPT_LOGGING" = 1 ]; then tee -a "$1"; else cat; fi
+}
+
+# Prefix every line with a UTC timestamp. python3 is already a hard dependency
+# here (it runs server.py), whereas Debian's default awk is mawk, which has no
+# strftime() — so this is the portable choice inside this image. -u keeps it
+# unbuffered so a crash does not swallow the last few lines.
+stamp() {
+    python3 -u -c 'import sys,datetime
+for line in sys.stdin:
+    sys.stdout.write(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]+"Z "+line)'
+}
+
+python3 "$HOME/.local/share/podprompt/viewer/server.py" --port "${VIEWER_PORT:-7843}" --driver-port "${VIEWER_DRIVER_PORT:-7844}" 2>&1 | stamp | logto "$PODPROMPT_LOG_DIR/server.log" &
 
 # driver.mjs no longer takes a pinned session id at all: it creates
 # per-session state lazily the first time a prompt actually arrives for a
@@ -75,7 +123,7 @@ node "$HOME/.local/share/podprompt/viewer/driver.mjs" \
     --port "${VIEWER_DRIVER_PORT:-7844}" \
     --viewer-port "${VIEWER_PORT:-7843}" \
     --cwd "$(pwd)" \
-    --opencode-port "${OPENCODE_PORT:-7845}" &
+    --opencode-port "${OPENCODE_PORT:-7845}" 2>&1 | stamp | logto "$PODPROMPT_LOG_DIR/driver.log" &
 
 # Foreground is a plain `wait` on both background jobs, so the container's
 # lifetime tracks the actual services. (The opencode serve child lives under

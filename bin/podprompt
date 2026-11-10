@@ -186,6 +186,21 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   --viewer (always) or under a plain --opencode launch.
                   Default: 7845.
 
+  --image NAME    Run a different image instead of 'podprompt'. For a local
+                  variant built on the base — a Dockerfile starting
+                  `FROM podprompt` that adds tooling you need for one kind of
+                  work. The image must carry the org.podprompt.base label,
+                  which anything built FROM podprompt inherits automatically;
+                  anything without it is refused.
+
+                  One container runs at a time, so this changes which image
+                  that container uses rather than running two at once. Every
+                  bit of podprompt state lives in host mounts, so switching
+                  images keeps your sessions, credentials and settings.
+
+                  Cannot be combined with --build, which always builds this
+                  checkout's Dockerfile and tags it 'podprompt'.
+
   --host-network  Launch the container with Docker host networking
                   (--network host), sharing the host's network stack
                   instead of the default bridge network. Lets the
@@ -520,17 +535,34 @@ build_image() {
     echo "Image built. Deploy the viewer app with 'podprompt --deploy-viewer' if you have not already."
 }
 
-image_exists() {
-    docker image inspect podprompt >/dev/null 2>&1
-}
-
 require_image() {
     # Checked before anything slow or stateful happens. The raw Docker error
     # for a missing image says nothing about how to fix it, and now that this
     # command runs from anywhere the user may be nowhere near the checkout.
-    if ! image_exists; then
-        echo "Error: the 'podprompt' Docker image does not exist yet." >&2
-        echo "Build it with:  podprompt --build" >&2
+    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        if [ "$IMAGE_EXPLICIT" = 1 ]; then
+            echo "Error: no Docker image named '$IMAGE_NAME'." >&2
+        else
+            echo "Error: the 'podprompt' Docker image does not exist yet." >&2
+            echo "Build it with:  podprompt --build" >&2
+        fi
+        exit 1
+    fi
+
+    # The image has to say it is one of ours. This is what makes --image safe
+    # to aim at a local variant rather than a leap of faith: labels are
+    # inherited through FROM, so an image built `FROM podprompt` carries this
+    # one already and passes without its author doing anything.
+    if [ "$(docker image inspect -f '{{index .Config.Labels "org.podprompt.base"}}' \
+            "$IMAGE_NAME" 2>/dev/null)" != 1 ]; then
+        if [ "$IMAGE_EXPLICIT" = 1 ]; then
+            echo "Error: '$IMAGE_NAME' has no org.podprompt.base label, so it was not run." >&2
+        else
+            # An image built before the label existed. Telling someone their
+            # podprompt image is not a podprompt image would read as nonsense.
+            echo "Error: the 'podprompt' image predates the org.podprompt.base label." >&2
+            echo "Rebuild it with:  podprompt --build" >&2
+        fi
         exit 1
     fi
 }
@@ -753,6 +785,9 @@ TUI_BACKEND=""      # "" (viewer, the default), "claude-code", or "opencode"
 VIEWER_ENABLED=1    # the viewer is now the default interface; --claude/--opencode flip this off below
 VIEWER_EXPLICIT=0   # did the user actually type --viewer, vs it just being the default
 OPENCODE_PORT=7845
+IMAGE_NAME="podprompt"   # which image to run; --image overrides
+IMAGE_EXPLICIT=0         # did the user name one, vs it just being the default
+DO_BUILD=0               # --build, deferred until every argument is known
 HOST_NETWORK=0
 PASSTHROUGH_ARGS=()
 while [ $# -gt 0 ]; do
@@ -770,8 +805,17 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         --build)
-            build_image
-            exit 0
+            DO_BUILD=1
+            shift
+            ;;
+        --image)
+            if [ -z "$2" ]; then
+                echo "Error: --image needs an image name." >&2
+                exit 1
+            fi
+            IMAGE_NAME="$2"
+            IMAGE_EXPLICIT=1
+            shift 2
             ;;
         --direct)
             PROVIDER="direct"
@@ -833,6 +877,20 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+# Run deferred actions now that every argument has been seen. --build cannot
+# act inside the parse loop: `podprompt --build --image foo` would build and
+# exit before --image was ever read, and silently ignoring it is exactly the
+# kind of thing this refuses to do.
+if [ "$DO_BUILD" = 1 ]; then
+    if [ "$IMAGE_EXPLICIT" = 1 ]; then
+        echo "Error: --build always builds this checkout's Dockerfile and tags it 'podprompt'." >&2
+        echo "--image selects an image to RUN, so the two cannot be combined." >&2
+        exit 1
+    fi
+    build_image
+    exit 0
+fi
 
 # --viewer and --claude/--claude-code/--opencode are two different launch
 # modes entirely — the browser viewer, with both backends live per session,
@@ -1203,5 +1261,5 @@ docker run -it --rm \
   -v "${CONNECT_CONFIG}" \
   "${OPENCODE_MOUNT_FLAGS[@]}" \
   "${PODPROMPT_MOUNT_FLAGS[@]}" \
-  podprompt \
+  "$IMAGE_NAME" \
   "${RUN_CMD[@]}"

@@ -45,5 +45,11 @@ RUN cd /home/agent/.local/share/podprompt && npm install
 
 RUN chmod -R 777 /home/agent
 
+# Marks this as an image podprompt can run. The launcher refuses anything
+# without it, which is what makes `--image` safe to point at a local variant:
+# labels are inherited through FROM, so an image built `FROM podprompt` carries
+# this automatically and passes the check without its author doing anything.
+LABEL org.podprompt.base=1
+
 USER agent
 WORKDIR /workspace

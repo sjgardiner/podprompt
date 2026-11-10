@@ -36,6 +36,7 @@
       <a class="nav-link sub" href="#terminal">Terminal instead</a>
       <a class="nav-link sub" href="#litellm">Using a LiteLLM proxy</a>
       <a class="nav-link sub" href="#network">Reaching host services</a>
+      <a class="nav-link sub" href="#custom-image">A custom image</a>
       <a class="nav-link sub" href="#trouble">When it won't start</a>
     </div>
 
@@ -505,12 +506,106 @@ podprompt</pre>
       </div>
     </section>
 
+    <section id="custom-image">
+      <h2>A custom image</h2>
+
+      <p>
+        Some work needs tooling the standard image does not carry — a headless
+        browser, a language toolchain, a particular CLI. Build your own image on
+        top of PodPrompt's, and point at it when you need it.
+      </p>
+
+      <h3>Write a Dockerfile starting from the base</h3>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">Dockerfile.mytools — this can live anywhere</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>FROM podprompt
+
+# Install as root, then switch back.
+USER root
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+        graphviz \
+    &amp;&amp; rm -rf /var/lib/apt/lists/*
+USER agent</pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · The base leaves you as a non-root user</div>
+        <p>
+          It ends with <code>USER agent</code>, so <code>apt-get</code> fails on
+          permissions unless you switch to root first. Switch back at the end,
+          or your agents will run as root.
+        </p>
+      </div>
+
+      <h3>Build it with your own tag</h3>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">a plain docker build</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>docker build -t podprompt-mytools -f Dockerfile.mytools .</pre>
+      </div>
+
+      <p>
+        <code>podprompt --build</code> will not do this — it always builds the
+        checkout's own <code>Dockerfile</code> and tags it <code>podprompt</code>.
+        Passing <code>--build</code> and <code>--image</code> together is an error.
+      </p>
+
+      <h3>Run it</h3>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-label">from the project you want to work on</span>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+<pre>podprompt --image podprompt-mytools</pre>
+      </div>
+
+      <p>
+        Only one container runs at a time, so this swaps which image it uses
+        rather than running two side by side. Your sessions, credentials and
+        settings live on your machine rather than in the image, so switching
+        keeps all of them. Leave the flag off to go back.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Nothing to add for the label</div>
+        <p>
+          PodPrompt only runs images labelled <code>org.podprompt.base</code>.
+          Docker passes labels down through <code>FROM</code>, so an image built
+          on the base already has it.
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · Rebuilding the base does not update yours</div>
+        <p>
+          After a <code>podprompt --build</code>, rebuild your own image too, or
+          it is still sitting on the previous base.
+        </p>
+      </div>
+    </section>
+
     <section id="trouble">
       <h2>When it won't start</h2>
 
       <table class="data-table">
         <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
         <tbody>
+          <tr>
+            <td>An image was refused for having no label</td>
+            <td>It does not descend from the PodPrompt base. Rebuild it <code>FROM podprompt</code>; see <a href="#custom-image">A custom image</a>.</td>
+          </tr>
+          <tr>
+            <td>Told the image predates the label</td>
+            <td>Your <code>podprompt</code> image is older than your checkout. Rebuild it with <code>podprompt --build</code>.</td>
+          </tr>
           <tr>
             <td><code>podprompt: command not found</code></td>
             <td>The checkout's <code>bin/</code> is not on your <code>PATH</code> in this shell. If you sourced <code>activate.sh</code>, that only applied to the shell you ran it in — add the line to your shell profile to keep it. See <a href="#path">step 1</a>.</td>

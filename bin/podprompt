@@ -212,6 +212,11 @@ UTILITY OPTIONS:
                   viewer/package-lock.json changes — those are build inputs,
                   and --deploy-viewer alone will not pick them up.
 
+                  Rebuilding moves the 'podprompt' tag to the new image and
+                  leaves the old one untagged. That superseded image is
+                  removed, so rebuilds do not accumulate; one still in use by
+                  a container is kept, and said so.
+
   --list-models   Print all models currently available on the LiteLLM instance
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
@@ -487,8 +492,31 @@ build_image() {
         echo "Error: no Dockerfile in this checkout (${REPO_DIR})." >&2
         exit 1
     fi
+    # Rebuilding with the same tag MOVES the tag and leaves the previous image
+    # behind, untagged, holding every layer the new build did not reuse. Nothing
+    # tells you that, and it accumulates one superseded image per rebuild. So
+    # note which image the tag pointed at, and clean it up afterwards.
+    local before after
+    before="$(docker image inspect -f '{{.Id}}' podprompt 2>/dev/null)" || before=""
+
     echo "Building the podprompt image from ${REPO_DIR}..."
     docker build -t podprompt "$REPO_DIR" || exit 1
+
+    after="$(docker image inspect -f '{{.Id}}' podprompt 2>/dev/null)" || after=""
+
+    if [ -n "$before" ] && [ "$before" != "$after" ]; then
+        # A container still referencing the image pins it, and that is reason
+        # enough to leave it alone. Not forced: -f would untag an image out
+        # from under something that is using it. Reported either way, in our
+        # own words rather than docker's.
+        if docker image rm "$before" >/dev/null 2>&1; then
+            echo "Removed the image this one replaced."
+        else
+            echo "The image this replaced is still in use, so it was kept:" \
+                 "${before#sha256:} (now untagged)."
+        fi
+    fi
+
     echo "Image built. Deploy the viewer app with 'podprompt --deploy-viewer' if you have not already."
 }
 
@@ -555,6 +583,37 @@ deploy_viewer() {
     fi
 
     mkdir -p "$target_dir"
+
+    # Copying never removes, so a module renamed or deleted in the repo stays
+    # in the deployed copy. Harmless for something nothing imports — chains.mjs
+    # sat here long after it was deleted — but a RENAME leaves both the old and
+    # the new file present, and which one wins is then down to whatever still
+    # references the old name.
+    #
+    # Reported, never removed. A file here that this deploy does not manage is
+    # just as likely to be something put there deliberately to patch a running
+    # deployment, and silently deleting that would cost far more than the
+    # clutter does. Whether a stray is stale or load-bearing is the user's call.
+    local entry name known strays
+    strays=0
+    for entry in "$target_dir"/*; do
+        [ -e "$entry" ] || continue          # unmatched glob stays literal
+        name="$(basename "$entry")"
+        known=0
+        for f in "${required[@]}"; do
+            if [ "$name" = "$f" ]; then
+                known=1
+                break
+            fi
+        done
+        if [ "$known" = 0 ]; then
+            if [ "$strays" = 0 ]; then
+                echo "Note: $target_dir holds files this deploy does not manage:"
+                strays=1
+            fi
+            echo "    $name"
+        fi
+    done
 
     for f in "${required[@]}"; do
         cp -r "$src_dir/$f" "$target_dir/"

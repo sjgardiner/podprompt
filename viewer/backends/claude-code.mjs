@@ -1716,9 +1716,17 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // Why it is hard to notice without this: the CLI keeps running the
         // tools it permits internally (ls, grep, reads) and keeps streaming
         // text, so a turn that could not write a single file still ends
-        // outcome=completed. Seven failures from 2026-11-10 remain
-        // unexplained by the mechanism we did find; this is how we would
-        // learn they still happen.
+        // outcome=completed. One failure from 2026-11-10 remains unexplained
+        // by the mechanism we did find; this is how we would learn it still
+        // happens.
+        //
+        // LOG ONLY — deliberately nothing in the session feed. An earlier
+        // version also posted a line into the chat, which was the wrong place
+        // for it twice over: the expected firing count is zero, so anything it
+        // says is either a false alarm or a bug report, and neither belongs in
+        // the user's conversation. It also made its own false positives
+        // conspicuous and alarming rather than merely wrong. The driver's
+        // turnEnd line carries the count; this names it once.
         //
         // Alarm only: no retrying, no aborting, nothing that could loop.
         {
@@ -1733,10 +1741,6 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
                 + ` permits internally will keep working, so this turn will still look healthy.`
                 + ` This should be impossible since the turn-binding fix — please report it`
                 + ` with the driver log for this turn.`);
-              broadcast(sessionId, "tool",
-                "*(permission channel lost — tools needing approval will fail until this turn"
-                + " ends)*",
-                randomUUID(), null, null);
             }
           }
         }

@@ -7,8 +7,8 @@
 // downstream: startTurn calls driver runTurn un-awaited, and that function
 // awaits buildPromotedSeed() before it ever reaches backend.runTurn. The await
 // yields the event loop with turnInFlight still false, so two inputs arriving
-// inside that window would both pass the guard and both start a backend turn
-// for the same session.
+// inside that window both passed the guard and both started a backend turn for
+// the same session.
 //
 // HONESTY ABOUT SCOPE. This was found while investigating a real failure --
 // sessions losing the ability to get any permission decision, while still able
@@ -66,7 +66,9 @@ function functionBody(source, declaration) {
 }
 
 test("startTurn reserves the session before it can yield the event loop", () => {
-  const body = functionBody(src, "function startTurn(");
+  // startTurn itself is a thin logging wrapper; the guard and the reservation
+  // live in startTurnInner, which is what this invariant is about.
+  const body = functionBody(src, "function startTurnInner(");
 
   const guard = body.indexOf("state.turnInFlight");
   assert.notEqual(guard, -1, "startTurn must still check turnInFlight");

@@ -3426,7 +3426,21 @@ reportAbandonedApprovals();
 // own copy of the in-flight check, the host stamp and the broadcast order,
 // and the copies would drift. `source` rides through to the user bubble's
 // `origin` so a transcript can say who actually asked.
-function startTurn(sessionId, promptText, {
+// Wrapper purely for observability. Only the mail drain used to log that it
+// had started a turn, which made the log blind to turns begun by a human
+// prompt, a task notification or a delegation — and therefore unable to answer
+// the one question that matters when a session's permission channel dies:
+// did something start a SECOND turn for this session? Every entry point is
+// recorded here, in one line, including refusals and their reason.
+function startTurn(sessionId, promptText, opts = {}) {
+  const result = startTurnInner(sessionId, promptText, opts);
+  const len = promptText == null ? 0 : String(promptText).length;
+  console.log(`[driver] startTurn ${sessionId}: source=${opts.source || "human"}`
+    + ` origin=${opts.origin || "-"} promptChars=${len} -> ${JSON.stringify(result)}`);
+  return result;
+}
+
+function startTurnInner(sessionId, promptText, {
   source = "human", explicitCwd, backendId, origin = null, userDirected = false,
 } = {}) {
   const state = getSessionState(sessionId, explicitCwd, backendId);
@@ -3615,6 +3629,12 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // (buildPromotedSeed, stampSessionHost) would otherwise leave the session
     // permanently "busy" and silently refuse every later turn. Idempotent.
     state.turnInFlight = false;
+    // Paired with startTurn's line, so the log shows a turn's whole lifetime.
+    // Without an end marker there is no way to tell, after the fact, whether a
+    // turn that misbehaved had already finished or was still running.
+    console.log(`[driver] turnEnd ${sessionId}: source=${source}`
+      + ` outcome=${state.turnOutcome ? state.turnOutcome.reason : "completed"}`
+      + `${state.abortRequested ? " abortRequested" : ""}`);
     // Ordering matters: this runs after the backend's own finally has
     // finalized any still-streaming bubbles and cleared turnInFlight, so
     // turn_end is the last word on the turn rather than racing that cleanup.

@@ -218,6 +218,44 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   browser) can be unreliable there; that direction works
                   fine on Linux. Default is off (bridged container).
 
+  --env NAME      Pass an extra environment variable into the container,
+  --env NAME=VALUE
+                  forwarded as `docker run -e NAME` or `-e NAME=VALUE`
+                  respectively — same two forms `docker run -e` itself
+                  accepts. The bare NAME form inherits the current value of
+                  $NAME from your own shell; NAME=VALUE sets it inline.
+                  Repeatable.
+
+                  Mainly for a custom OpenCode provider you've hand-written
+                  into opencode.jsonc that needs a credential OpenCode's own
+                  config substitution can read via {env:NAME} — the same
+                  role LITELLM_URL/LITELLM_API_KEY already play for
+                  --litellm above, generalized to any provider and any
+                  variable name.
+
+                  The container's env is captured once, at container launch
+                  — nothing exported into a shell afterward (even one
+                  inside the container) reaches an already-running session.
+                  So for a credential that expires, "relaunch podprompt
+                  with a freshly minted value" is the refresh step, not
+                  something this flag does on its own. That is safe to lean
+                  on here specifically because all of PodPrompt's own state
+                  lives in host mounts (see PERSISTENT STATE below) — a
+                  relaunch is cheap and loses nothing.
+
+                  Prefer the bare NAME form for secrets: NAME=VALUE makes
+                  the value briefly visible in `ps` output on the host and,
+                  unless you're careful to use command substitution instead
+                  of a literal, in your shell history. Either form still
+                  lands in the container's env broadly — visible to both
+                  backends, to driver.mjs, and to any shell command either
+                  agent runs inside the container, same as any other -e var
+                  already passed today (e.g. LITELLM_API_KEY).
+
+                  Out of scope for now: a --env-file passthrough for
+                  batching multiple variables from a file instead of
+                  repeating this flag.
+
 UTILITY OPTIONS:
 
   --build         Build the 'podprompt' Docker image from this checkout and
@@ -362,6 +400,12 @@ EXAMPLES:
 
   # Pass a flag through to claude (only meaningful with --claude)
   podprompt --claude --dangerously-skip-permissions
+
+  # Pass a one-off credential through to a custom opencode.jsonc provider,
+  # e.g. one using {env:ALCF_AI_TOKEN} for its apiKey. The bare NAME form
+  # inherits the value from your own shell rather than putting it on this
+  # command line.
+  ALCF_AI_TOKEN=$(alcf-ai auth get-access-token) podprompt --opencode --env ALCF_AI_TOKEN
 USAGE
 }
 
@@ -825,6 +869,7 @@ IMAGE_EXPLICIT=0         # did the user name one, vs it just being the default
 DO_BUILD=0               # --build, deferred until every argument is known
 HOST_NETWORK=0
 PASSTHROUGH_ARGS=()
+EXTRA_ENV_ARGS=()   # built from repeated --env NAME / --env NAME=VALUE flags
 while [ $# -gt 0 ]; do
     case "$1" in
         --help|-h)
@@ -905,6 +950,26 @@ while [ $# -gt 0 ]; do
         --host-network)
             HOST_NETWORK=1
             shift
+            ;;
+        --env)
+            if [ -z "$2" ]; then
+                echo "Error: --env needs a NAME or NAME=VALUE argument." >&2
+                exit 1
+            fi
+            # Catches the likely mistake (the next flag got swallowed as
+            # this one's argument, e.g. a forgotten value before
+            # --host-network) rather than silently forwarding garbage to
+            # docker run. Not a full env-var-name validator — docker's own
+            # -e will reject whatever it doesn't like.
+            case "$2" in
+                [A-Za-z_]*) ;;
+                *)
+                    echo "Error: --env argument '$2' doesn't look like NAME or NAME=VALUE (must start with a letter or underscore)." >&2
+                    exit 1
+                    ;;
+            esac
+            EXTRA_ENV_ARGS+=(-e "$2")
+            shift 2
             ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
@@ -1290,6 +1355,7 @@ docker run -it --rm \
   ${EFFECTIVE_MODEL:+-e ANTHROPIC_MODEL="$EFFECTIVE_MODEL"} \
   "${LITELLM_ENV_FLAGS[@]}" \
   "${OPENCODE_LITELLM_ENV_FLAGS[@]}" \
+  "${EXTRA_ENV_ARGS[@]}" \
   "${VIEWER_PORT_FLAGS[@]}" \
   -v "$WORKSPACE_PATH:/workspace:z" \
   --workdir /workspace \

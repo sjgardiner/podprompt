@@ -49,13 +49,27 @@ export function resultBelongsToTurn(msg, uuid) {
   return msg.user_message_uuid === uuid;
 }
 
-// Is this a result that is NOT ours?
+// What the turn's safety net should do on one tick. Pulled out here because
+// the policy is the part worth pinning down, and a decision buried in a timer
+// callback cannot be tested at all.
 //
-// Called out separately because it is the condition the turn's safety net
-// arms on, and "result that isn't ours" reads better at the call site than a
-// negated binding check. See the safety net in claude-code.mjs for why only
-// this case needs one: an unmatched result is the single situation where we
-// now keep listening where the old code would have stopped.
-export function isForeignResult(msg, uuid) {
-  return !!msg && msg.type === "result" && !resultBelongsToTurn(msg, uuid);
+// The net watches the silence after a result that was not ours, and gives up
+// if that silence runs long. Three outcomes:
+//
+//   "defer"    a permission card is waiting on a human. Not a stall at any
+//              duration — and the caller restarts the clock, so answering
+//              after an hour still leaves the full grace for whatever the
+//              turn does next.
+//   "wait"     silent, but not for long enough yet.
+//   "give-up"  silent past the grace with nobody to blame. End the turn.
+//
+// "defer" outranks "give-up" deliberately. The first draft of the net was a
+// one-shot timer that simply returned when a human was pending, which retired
+// it for the rest of the turn — and since the unmatched result arrives about a
+// millisecond in, its window lines up precisely with the moment an unanswered
+// card is most likely. A genuinely wedged turn would then never end.
+export function safetyNetAction({ msSinceLastMessage, pendingPermissions, graceMs }) {
+  if (pendingPermissions > 0) return "defer";
+  if (msSinceLastMessage < graceMs) return "wait";
+  return "give-up";
 }

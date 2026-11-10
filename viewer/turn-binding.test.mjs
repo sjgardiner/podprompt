@@ -8,7 +8,7 @@
 // original bug), too reluctant and the turn never ends.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resultBelongsToTurn, isForeignResult } from "./turn-binding.mjs";
+import { resultBelongsToTurn, safetyNetAction } from "./turn-binding.mjs";
 
 const MINE = "57fba329-b833-47d4-9abd-746db12312fd";
 const OTHER = "a47ac131-42fc-42a1-a9ae-b5c5fd0e3e84";
@@ -16,7 +16,6 @@ const OTHER = "a47ac131-42fc-42a1-a9ae-b5c5fd0e3e84";
 test("binds a result carrying our uuid in the list", () => {
   const msg = { type: "result", subtype: "success", user_message_uuid: MINE, user_message_uuids: [MINE] };
   assert.equal(resultBelongsToTurn(msg, MINE), true);
-  assert.equal(isForeignResult(msg, MINE), false);
 });
 
 test("the early result observed in the wild carries no uuid at all", () => {
@@ -25,13 +24,11 @@ test("the early result observed in the wild carries no uuid at all", () => {
   // fields absent because no user message caused it.
   const msg = { type: "result", subtype: "success", queued_turn_count: 0 };
   assert.equal(resultBelongsToTurn(msg, MINE), false);
-  assert.equal(isForeignResult(msg, MINE), true);
 });
 
 test("a result for somebody else's prompt is not ours", () => {
   const msg = { type: "result", user_message_uuid: OTHER, user_message_uuids: [OTHER] };
   assert.equal(resultBelongsToTurn(msg, MINE), false);
-  assert.equal(isForeignResult(msg, MINE), true);
 });
 
 test("finds our uuid anywhere in a merged batch", () => {
@@ -63,7 +60,6 @@ test("ignores every message that is not a result", () => {
     { type: "system", subtype: "init", user_message_uuid: MINE },
   ]) {
     assert.equal(resultBelongsToTurn(msg, MINE), false);
-    assert.equal(isForeignResult(msg, MINE), false);
   }
 });
 
@@ -73,4 +69,34 @@ test("without a uuid of our own, nothing binds", () => {
   const msg = { type: "result", user_message_uuid: undefined };
   assert.equal(resultBelongsToTurn(msg, undefined), false);
   assert.equal(resultBelongsToTurn(msg, null), false);
+});
+
+// ── the safety net's policy ────────────────────────────────────────────────
+
+test("safety net waits while the silence is short", () => {
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 1_000, pendingPermissions: 0, graceMs: 300_000 }), "wait");
+});
+
+test("safety net gives up once the silence passes the grace", () => {
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 300_000, pendingPermissions: 0, graceMs: 300_000 }), "give-up");
+});
+
+test("a pending permission defers, no matter how long the silence", () => {
+  // THE BUG THIS PINS: the first draft returned early here and never re-armed,
+  // retiring the net for the rest of the turn. Waiting on a human must defer,
+  // and deferring must outrank giving up at every duration.
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 60 * 60 * 1000, pendingPermissions: 1, graceMs: 300_000 }), "defer");
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 0, pendingPermissions: 3, graceMs: 300_000 }), "defer");
+});
+
+test("exactly at the grace boundary, give up", () => {
+  // Stated so the boundary is a decision rather than an accident.
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 299_999, pendingPermissions: 0, graceMs: 300_000 }), "wait");
+  assert.equal(safetyNetAction(
+    { msSinceLastMessage: 300_001, pendingPermissions: 0, graceMs: 300_000 }), "give-up");
 });

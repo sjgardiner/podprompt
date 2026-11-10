@@ -31,7 +31,7 @@ import { z } from "zod";
 // turn-binding decides which `result` ends our turn — read its header first,
 // it explains the failure this whole arrangement exists to prevent.
 // permission-channel is the alarm for that failure happening anyway.
-import { resultBelongsToTurn } from "../turn-binding.mjs";
+import { resultBelongsToTurn, safetyNetAction } from "../turn-binding.mjs";
 import { countPermissionChannelFailures } from "../permission-channel.mjs";
 
 // How long a turn keeps listening after a result that is not its own before
@@ -40,6 +40,11 @@ import { countPermissionChannelFailures } from "../permission-channel.mjs";
 // value matches the opencode backend's inactivity window so the two backends
 // give up on a wedged turn on the same timescale.
 const FOREIGN_RESULT_GRACE_MS = 5 * 60 * 1000;
+// How often that grace is re-evaluated. Matches the opencode backend's
+// inactivity poll. The net must TICK rather than fire once, so that a
+// condition which makes it stand down (a permission card awaiting a human)
+// cannot retire it permanently.
+const SAFETY_NET_POLL_MS = 30 * 1000;
 
 // Why this exists: Claude Code ships its own always-present SendMessage and
 // ListAgents, which address the HARNESS's agent sessions rather than
@@ -1144,7 +1149,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // runTurn() wrapper, once for every backend — see its comment.
     state.turnInFlight = true;
     // Per-turn, because the condition it counts is per-turn: see the
-    // permission-channel detector in the message loop below.
+    // permission-channel alarm in the message loop below.
     state.permChannelFailures = 0;
     // `backend` here lets server.py's /status handler seed this session's
     // history from disk (if it hasn't already) before this turn's own
@@ -1219,8 +1224,13 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // ends — a stray timer outliving its turn could close the NEXT query to
     // land on state.liveQuery.
     let foreignResultTimer = null;
+    let lastMessageAt = Date.now();
+    // Set when the safety net, not the turn itself, decided to stop. The
+    // catch below needs to know, because closing the query makes the iterator
+    // throw and the net's diagnostic is the one worth keeping.
+    let endedBySafetyNet = false;
     function disarmSafetyNet() {
-      if (foreignResultTimer) { clearTimeout(foreignResultTimer); foreignResultTimer = null; }
+      if (foreignResultTimer) { clearInterval(foreignResultTimer); foreignResultTimer = null; }
     }
 
     // How many permission decisions this turn is currently waiting on. Only
@@ -1704,8 +1714,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       const modelByUuid = new Map(); // uuid -> model display name
       for await (const msg of q) {
         // Any traffic at all means the turn is alive; only silence after an
-        // unmatched result is suspicious.
-        disarmSafetyNet();
+        // unmatched result is suspicious. See the safety net below.
+        lastMessageAt = Date.now();
         // ── Permission-channel alarm ──────────────────────────────────────
         // Kept as an alarm, not a fix. The known cause is closed off above
         // (the prompt generator no longer lets the SDK close stdin early), so
@@ -1760,25 +1770,53 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             // next message arrived 3-6ms later, so this fires only when
             // something is genuinely wrong.
             //
-            // Not armed while a permission card is outstanding: a human may
-            // take any amount of time to answer, and waiting on a person is
-            // not a fault. Same rule, and the same reasoning, as the opencode
-            // backend's inactivity probe.
+            // A REPEATING check, not a one-shot, and that is the whole point.
+            // The first draft was a single setTimeout that returned early
+            // when a permission card was outstanding — which silently
+            // disarmed the net for the rest of the turn, since nothing ever
+            // re-armed it. The unmatched result lands ~1ms into the turn, so
+            // its window covers exactly when an unanswered card is most
+            // likely. A genuinely wedged turn would then hang forever with
+            // turnInFlight stuck true. Ticking and re-evaluating is what the
+            // opencode backend's inactivity probe does, and why.
+            //
+            // Waiting on a human counts as activity rather than as a reason
+            // to skip a tick: the clock restarts once the card is answered,
+            // so a slow human cannot shorten the grace of whatever follows.
+            //
+            // SCOPE, deliberately narrow: this only ever watches the silence
+            // that follows an unmatched result. A turn that goes quiet later
+            // gets no protection, because there was no protection there
+            // before either — a general per-turn timeout is a separate
+            // decision affecting every turn, not something to smuggle in
+            // here.
             console.warn(`[claude-code] session ${sessionId}: ignoring a result that is not`
               + ` this turn's (no matching user-message uuid) — Claude Code ran queued work`
               + ` of its own. Still waiting for our own result.`);
-            foreignResultTimer = setTimeout(() => {
-              if (pendingPermissionCount > 0) return;   // see above
-              console.error(`[claude-code] session ${sessionId}: no result for this turn`
-                + ` ${FOREIGN_RESULT_GRACE_MS}ms after an unrelated one, and nothing else`
-                + ` arrived. Ending the turn.`);
-              state.turnOutcome = state.turnOutcome || {
-                reason: "error",
-                error: "turn produced no result of its own (stalled after unrelated result)",
-              };
-              gate.open();
-              try { q.close(); } catch { /* already closed */ }
-            }, FOREIGN_RESULT_GRACE_MS);
+            if (!foreignResultTimer) {
+              foreignResultTimer = setInterval(() => {
+                const action = safetyNetAction({
+                  msSinceLastMessage: Date.now() - lastMessageAt,
+                  pendingPermissions: pendingPermissionCount,
+                  graceMs: FOREIGN_RESULT_GRACE_MS,
+                });
+                // Restarting the clock is what makes a slow human cost
+                // whatever the turn does next nothing.
+                if (action === "defer") { lastMessageAt = Date.now(); return; }
+                if (action === "wait") return;
+                console.error(`[claude-code] session ${sessionId}: no result for this turn`
+                  + ` ${FOREIGN_RESULT_GRACE_MS}ms after an unrelated one, and nothing else`
+                  + ` arrived. Ending the turn.`);
+                endedBySafetyNet = true;
+                state.turnOutcome = state.turnOutcome || {
+                  reason: "error",
+                  error: "turn produced no result of its own (stalled after unrelated result)",
+                };
+                disarmSafetyNet();
+                gate.open();
+                try { q.close(); } catch { /* already closed */ }
+              }, SAFETY_NET_POLL_MS);
+            }
           }
         }
         if (msg.type === "system" && msg.subtype === "init") {
@@ -1934,9 +1972,20 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // subtype:"success" + is_error:true + terminal_reason:
           // "blocking_limit". Switching on subtype alone passes every test
           // that does not involve a real limit and catches none of them.
-          const failed = msg.is_error === true
-            || (msg.subtype && msg.subtype !== "success")
-            || BAD_TERMINAL_REASONS.has(msg.terminal_reason);
+          //
+          // OURS ONLY. A query can carry results for work we did not ask for
+          // — Claude Code runs its own queued chores as complete turns, and
+          // clearing an orphaned background task is one of them. Those can
+          // end badly on their own account, and without this guard a chore's
+          // error status is recorded as THIS turn's outcome, which
+          // driver.mjs then classifies as a failed turn and the keep-alive
+          // supervisor may auto-resume — re-running a turn that in fact
+          // succeeded. The uuid test is the same one that decides when the
+          // turn ends; see turn-binding.mjs.
+          const failed = resultBelongsToTurn(msg, userMsgUuid)
+            && (msg.is_error === true
+              || (msg.subtype && msg.subtype !== "success")
+              || BAD_TERMINAL_REASONS.has(msg.terminal_reason));
           if (failed && !state.abortRequested) {
             // Does not overwrite an outcome the turn already recorded: a
             // thrown error carries a real message, whereas by this point the
@@ -2081,7 +2130,14 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       } else {
         console.error(`[claude-code] error during turn for session ${sessionId}:`, e.message);
         broadcast(sessionId, "tool", `*(error: ${e.message})*`, randomUUID(), null, null);
-        state.turnOutcome = { reason: "error", error: e.message };
+        // Normally the thrown error is the better description, so it wins.
+        // The one exception is the safety net: it closed the query itself,
+        // which is WHY this threw, and it already recorded the only message
+        // that identifies that failure mode. Letting the SDK's generic error
+        // overwrite it would erase the single line worth reading.
+        state.turnOutcome = endedBySafetyNet
+          ? state.turnOutcome
+          : { reason: "error", error: e.message };
       }
     } finally {
       if (state.abortController === abortController) state.abortController = null;

@@ -79,6 +79,11 @@ function fresh(state, { startOk = true, idle = true, backend = "claude-code", li
     ${bodyOf("resolvedBackendId")}
     const AUTO_RESUME_REASONS = new Set(["restart", "stalled", "error"]);
     const AUTO_RESUME_MAX_STRIKES = 3;
+    // The sweep's own "will this ever run again?" test. Shared with the
+    // delegated-work reporter so the two cannot disagree about whether a
+    // child is finished — which is precisely how a child being retried came
+    // to be reported to its parent as failed.
+    ${bodyOf("willAutoResume")}
     ${bodyOf("plannedWakeFor")}
     ${bodyOf("autoResumeSweep")}
     ${bodyOf("describeWake")}

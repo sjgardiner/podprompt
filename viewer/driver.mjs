@@ -76,6 +76,7 @@ import {
   createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
 } from "./autonomy.mjs";
 import { createPeers, createInbox, LOCAL_REALM } from "./messaging.mjs";
+import { createExpectations } from "./expectations.mjs";
 import {
   CATEGORY, NO_RETRY, classifyFailure, nextAttemptAt, createLimitRegistry,
 } from "./limits.mjs";
@@ -1367,6 +1368,31 @@ function describeTurnHealth(sessionId) {
   };
 }
 
+// WILL the sweep below ever try this session again? The WHETHER half of its
+// own gating, factored out so that nothing else has to re-derive it.
+//
+// This exists because something did re-derive it, wrongly. The delegated-work
+// reporter used to fire on a child's FIRST turn end, whatever ended it — so a
+// child that hit a rate limit was reported to its parent as "ended with no
+// output (error)" while this sweep was, correctly, about to retry it. The
+// child then succeeded and the real answer had nowhere to go, because the
+// one-shot waiter was already spent. The parent was not stalled; it had been
+// told the opposite of the truth, and no crash was needed to provoke it — an
+// ordinary 429 was enough.
+//
+// Two readers of one question must share one answer. The TIMING half
+// (plannedWakeFor, sessionIsIdle, a resolvable backend) stays in the sweep,
+// because "not yet" and "not ever" are different claims and only the latter
+// means a child is finished.
+function willAutoResume(sessionId, rec = turnState[sessionId]) {
+  const resumable = rec?.resumable;
+  if (!resumable) return false;                                  // ended clean
+  if (!AUTO_RESUME_REASONS.has(resumable.reason)) return false;  // e.g. aborted by a human
+  if (NO_RETRY.has(resumable.category)) return false;            // KD2: hopeless without a human
+  if ((rec.autoResume?.strikes || 0) >= AUTO_RESUME_MAX_STRIKES) return false; // spent
+  return true;
+}
+
 // Spacing is no longer a single ladder. §15/KD3: the wait belongs to the
 // CATEGORY of failure, and when a backend tells us when service resumes we
 // wait until then instead of guessing. Both live in limits.mjs; what remains
@@ -1376,12 +1402,11 @@ function autoResumeSweep() {
   for (const [sessionId, rec] of Object.entries(turnState)) {
     const resumable = rec?.resumable;
     if (!resumable || rec.inFlight) continue;
-    if (!AUTO_RESUME_REASONS.has(resumable.reason)) continue;
-
-    // KD2. A wall that cannot move until a human buys credits or an org
-    // lifts a block: every attempt is waste, and retrying merely decides how
-    // much. Left for a human, exactly like a spent strike count.
-    if (NO_RETRY.has(resumable.category)) continue;
+    // Reason, category (KD2: a wall that cannot move until a human buys
+    // credits is pure waste to retry) and a spent strike count are all one
+    // question — "will this ever run again?" — and are answered in one place
+    // so the delegated-work reporter cannot disagree with us about it.
+    if (!willAutoResume(sessionId, rec)) continue;
 
     // Never GUESS a backend for an unattended resume. defaultBackendId() is
     // a reasonable fallback for a human starting a brand-new chat — they can
@@ -1401,9 +1426,11 @@ function autoResumeSweep() {
     }
     unresolvedBackendWarned.delete(sessionId);
 
+    // The poison-pill check (strikes >= AUTO_RESUME_MAX_STRIKES) now lives in
+    // willAutoResume() above; these two are still needed for the wake plan and
+    // for carrying the count across the turn this is about to start.
     const prior = rec.autoResume || null;
     const strikes = prior?.strikes || 0;
-    if (strikes >= AUTO_RESUME_MAX_STRIKES) continue; // poison pill: leave it for a human
 
     // Computed fresh each sweep rather than stored, so that a limit learned
     // AFTER this turn died (from some other session on the same backend)
@@ -1497,6 +1524,13 @@ const peers = createPeers({
 const inbox = createInbox({
   file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-inbox.json"),
   onError: (e) => console.error("[driver] failed to write inbox file:", e.message),
+});
+// One row per in-flight async delegation: "this parent is waiting on this
+// child, since this time". On disk, because the watcher this replaces was a
+// bare in-memory Map that a restart dropped silently.
+const expectations = createExpectations({
+  file: nodePath.join(PODPROMPT_STATE_DIR, "viewer-expectations.json"),
+  onError: (e) => console.error("[driver] failed to write expectations file:", e.message),
 });
 
 // Who the driver believes the caller is. Local shims supply an identity
@@ -2468,14 +2502,24 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
 
   const handle = `@${peers.get(childId)?.handle || childId}`;
   if (!awaitResult) {
-    // Async: the parent's turn ends now and the child's report arrives later
-    // as an ordinary inbox delivery. This costs almost nothing because peer
-    // messaging already built that wake path.
-    watchDelegateForReport(waiter, childId, fromSessionId);
+    // Async: the child's report arrives later as an ordinary inbox delivery.
+    // This costs almost nothing because peer messaging already built that
+    // wake path.
+    //
+    // Recorded ON DISK rather than held as a promise. The promise version
+    // was lost outright by a restart, and fired on the wrong turn when a
+    // child was merely being retried. A row that outlives both the turn and
+    // the process can be reconciled by whoever is running later.
+    expectations.record(childId, fromSessionId);
     return { ok: true, handle, childId, awaited: false, remaining: autonomy.status().remaining };
   }
 
-  const outcome = await waiter;
+  // Blocking: the parent's turn is held open until the child is FINISHED,
+  // not merely until some turn of its ended. Same distinction as the async
+  // path -- returning "error" to a caller that is still going to be retried
+  // hands it the opposite of the truth. Bounded by AUTO_RESUME_MAX_STRIKES,
+  // so this cannot wait forever on a child that keeps failing.
+  const outcome = await awaitTerminalTurnEnd(childId, waiter);
   const text = await finalAssistantText(childId);
   return {
     ok: true, handle, childId, awaited: true,
@@ -2507,26 +2551,149 @@ async function finalAssistantText(childId) {
 // Async delegation: when the child finishes, its report is delivered to the
 // parent as an ordinary inbox entry — kind "result" rather than "peer", so
 // the two stay distinguishable in storage even though they render alike.
-function watchDelegateForReport(waiter, childId, parentId) {
-  waiter.then(async (outcome) => {
-    const text = await finalAssistantText(childId);
-    const handle = peers.get(childId)?.handle || childId;
-    // Advertises read_session exactly where it becomes relevant: the parent
-    // has just received a summary and may want the working that produced it.
-    // Cheaper and better targeted than a system-prompt clause.
-    const body = (text
-      ? `Delegated work finished (${outcome?.reason || "completed"}):\n\n${text}`
-      : `Delegated work ended with no output (${outcome?.reason || "completed"}).`)
-      + `\n\n(For detail it left out, read its transcript: read_session session="@${handle}",`
-      + ` search="...".)`;
-    const receipt = deliver(parentId, body, {
-      from: localPrincipal(childId),
+async function deliverDelegateReport(childId, parentId, reason) {
+  const text = await finalAssistantText(childId);
+  const handle = peers.get(childId)?.handle || childId;
+  // Advertises read_session exactly where it becomes relevant: the parent
+  // has just received a summary and may want the working that produced it.
+  // Cheaper and better targeted than a system-prompt clause.
+  const body = (text
+    ? `Delegated work finished (${reason || "completed"}):\n\n${text}`
+    : `Delegated work ended with no output (${reason || "completed"}).`)
+    + `\n\n(For detail it left out, read its transcript: read_session session="@${handle}",`
+    + ` search="...".)`;
+  const receipt = deliver(parentId, body, {
+    from: localPrincipal(childId),
+    kind: "result",
+  });
+  if (!receipt.ok) {
+    console.error(`[driver] delegated report from @${handle} not delivered: ${receipt.reason}`);
+  }
+  return receipt;
+}
+
+// Called after EVERY turn end, for every session. Reports only when the child
+// is actually finished.
+//
+// "Finished" is not "a turn ended" — that conflation is the bug this replaces.
+// A child whose turn died on a 429 has ended a turn and is about to be retried
+// by autoResumeSweep; reporting then tells the parent the work failed, and the
+// retry's real answer arrives to a spent one-shot waiter and is dropped. So the
+// question asked here is the sweep's own: willAutoResume(). If it says yes, we
+// say nothing and wait for the next ending. If it says no, this is the last
+// word there will ever be and the parent gets it.
+//
+// Reporting CLEARS the expectation. Nudging does not (see the sweep below):
+// a nudge means "still waiting", a report means "done waiting".
+async function reportDelegateIfTerminal(sessionId, outcome) {
+  const exp = expectations.get(sessionId);
+  if (!exp) return false;
+  if (willAutoResume(sessionId)) {
+    console.log(`[driver] delegate report for ${sessionId} held:`
+      + ` reason=${outcome?.reason} will auto-resume`
+      + ` (strike ${(turnState[sessionId]?.autoResume?.strikes || 0)}/${AUTO_RESUME_MAX_STRIKES})`);
+    return false;
+  }
+  expectations.clear(sessionId);
+  await deliverDelegateReport(sessionId, exp.parentId, outcome?.reason);
+  return true;
+}
+
+// ── The watchdog ─────────────────────────────────────────────────────────
+//
+// Everything above reports when a child FINISHES. This is for the child that
+// never does.
+//
+// Note what is already covered without it: a child that DIES is handled by
+// terminal-only reporting, because autoResumeSweep burns its three strikes,
+// willAutoResume() goes false, and the last ending is reported like any
+// other. The residual is narrower — a child that never ends a turn at all.
+// There are two ways that happens and only one is a malfunction:
+//
+//   * BLOCKED ON A HUMAN. The backend safety net deliberately distinguishes
+//     "stalled" (which it ends, and we retry) from "waiting for a human to
+//     click approve" (which it leaves alone, correctly). So an unanswered
+//     permission card parks a child indefinitely, and its parent with it.
+//     This is the likeliest trigger in practice, and it is not a fault: it
+//     is a question nobody answered. The nudge says so, because "has not
+//     reported in 30 minutes" would read as a malfunction and send the
+//     parent looking for a bug that is not there.
+//
+//   * GENUINELY WEDGED, with no turn end and no card.
+//
+// A child that is WORKING is never stale, at any age. The threshold measures
+// "quiet without having reported", not "taking too long" — delegated work can
+// legitimately run for hours, and a watchdog that interrupted it for that
+// would be worse than no watchdog.
+//
+// Fires at most ONCE per expectation. The parent then knows and can act;
+// repeating would burn budget and risk a nudge loop against a parent that is
+// deliberately waiting. One delegation buys one send, one report, and at most
+// one nudge — bounded by construction.
+const EXPECTATION_STALE_MS = 30 * 60 * 1000;
+const EXPECTATION_SWEEP_MS = 10 * 60 * 1000;
+
+function expectationSweep(now = Date.now()) {
+  const fired = [];
+  for (const exp of expectations.all()) {
+    if (exp.notified) continue;
+    const age = now - exp.since;
+    if (age < EXPECTATION_STALE_MS) continue;
+
+    const child = sessions.get(exp.childId);
+    // Still working, or about to be retried: not stale, whatever the clock
+    // says. These are the cases the age test must not be allowed to catch.
+    if (child?.turnInFlight) continue;
+    if (willAutoResume(exp.childId)) continue;
+
+    const mins = Math.round(age / 60000);
+    const handle = `@${peers.get(exp.childId)?.handle || exp.childId}`;
+    const blockedOn = pendingKindForSession(exp.childId);
+    const body = blockedOn
+      ? `${handle} is waiting for a human to answer a ${blockedOn === "question" ? "question" : "permission request"}`
+        + ` and cannot continue until someone does. It has been ${mins} minutes.`
+        + ` Nothing is broken — but the work you delegated is not going to arrive on its own.`
+      : `${handle} has not reported back in ${mins} minutes and is not currently running.`
+        + ` It may have stopped without producing a result.`
+        + ` (Check with read_session session="${handle}".)`;
+
+    // Marked, not cleared: the parent still has not had its answer, so the
+    // row must survive to deliver one if the child ever does finish.
+    expectations.markNotified(exp.childId);
+    const receipt = deliver(exp.parentId, body, {
+      from: localPrincipal(exp.childId),
       kind: "result",
     });
-    if (!receipt.ok) {
-      console.error(`[driver] delegated report from @${handle} not delivered: ${receipt.reason}`);
-    }
-  }).catch((e) => console.error(`[driver] delegate watcher failed for ${childId}:`, e.message));
+    console.log(`[driver] expectation stale: ${handle} -> ${exp.parentId}`
+      + ` age=${mins}m blocked=${blockedOn || "no"} delivered=${receipt.ok}`);
+    fired.push(exp.childId);
+  }
+  return fired;
+}
+
+setInterval(() => {
+  try { expectationSweep(); } catch (e) {
+    console.error("[driver] expectation sweep failed:", e.message);
+  }
+}, EXPECTATION_SWEEP_MS).unref?.();
+
+// A restart is the other half of the defect this module replaces: the old
+// in-memory watcher simply vanished, so a child that finished while we were
+// down was never reported at all. The rows are on disk now, so the first
+// thing a new process can do is ask, of each one, the same question the
+// turn-end path asks: is this child finished? Children still mid-flight or
+// pending a retry are left alone — reconcileTurnStateOnStartup() has already
+// promoted them to resumable, so willAutoResume() correctly says "wait".
+function reconcileExpectationsOnStartup() {
+  const rows = expectations.all();
+  if (!rows.length) return;
+  console.log(`[driver] reconciling ${rows.length} pending delegation(s) after restart`);
+  for (const exp of rows) {
+    if (turnState[exp.childId]?.inFlight) continue;
+    if (willAutoResume(exp.childId)) continue;
+    reportDelegateIfTerminal(exp.childId, turnState[exp.childId]?.resumable || { reason: "completed" })
+      .catch((e) => console.error(`[driver] startup reconcile failed for ${exp.childId}:`, e.message));
+  }
 }
 
 // read_session: retrospective access to a session's transcript, including
@@ -2987,6 +3154,19 @@ process.on("exit", () => {
 // with it. Promote those to resumable BEFORE anything can start a new turn
 // and overwrite the marker.
 reconcileTurnStateOnStartup();
+
+// Then settle any delegation the previous process was holding. Deferred
+// rather than immediate: reporting reads the child's transcript through its
+// backend, and at this instant the opencode child has not been spawned and no
+// session has been polled, so an immediate pass would report every pending
+// delegation as "no output" — turning a restart into exactly the false
+// failure this whole mechanism exists to stop sending. One cold-start window
+// is cheap; the rows are durable and nothing else races them.
+setTimeout(() => {
+  try { reconcileExpectationsOnStartup(); } catch (e) {
+    console.error("[driver] expectation reconcile failed:", e.message);
+  }
+}, 20000).unref?.();
 
 // Ensure the opencode serve child is up before firing warm-up fetches at it,
 // then start the liveness poll that catches a wedged-but-running process.
@@ -3734,6 +3914,12 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // quietly passed null and un-bound every waiter, restoring exactly the
     // behaviour HD3 exists to remove.
     resolveTurnWaiters(sessionId, outcome, sessions.get(sessionId)?.turnId || null);
+    // A delegated child may have just finished for good. Deliberately LAST
+    // and deliberately not awaited: delivering a report can start a turn in
+    // the parent, and nothing about this turn's own completion should wait
+    // on that.
+    reportDelegateIfTerminal(sessionId, outcome).catch((e) =>
+      console.error(`[driver] delegate report failed for ${sessionId}:`, e.message));
   }
 }
 
@@ -3754,6 +3940,26 @@ function awaitTurnEnd(sessionId, turnId = null) {
     list.push({ turnId, resolve });
     turnWaiters.set(sessionId, list);
   });
+}
+
+// Resolve only when a session is FINISHED, not merely when a turn of its
+// ended — re-arming across every ending that willAutoResume() says is about
+// to be retried.
+//
+// `first` exists because toolDelegate must register its waiter BEFORE
+// startTurn (attaching afterwards races a child that finishes fast), so the
+// first arming is not ours to make; every later one is.
+//
+// The re-arm cannot miss an ending. resolveTurnWaiters() resolves our
+// promise, our continuation runs as a microtask, and the earliest a retry
+// can begin is the next autoResumeSweep tick — a minute away, and gated on
+// the session being idle besides.
+async function awaitTerminalTurnEnd(sessionId, first = null) {
+  let outcome = await (first || awaitTurnEnd(sessionId));
+  while (willAutoResume(sessionId)) {
+    outcome = await awaitTurnEnd(sessionId);
+  }
+  return outcome;
 }
 
 function resolveTurnWaiters(sessionId, outcome, turnId = null) {

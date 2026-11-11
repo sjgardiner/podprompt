@@ -137,7 +137,15 @@ const server = createServer((req, res) => {
         { id: "beam-1.0-bf16", providerID: "alcf-minerva", name: "Beam 1.0", enabled: true },
       ] });
     }
-    if (p === "/api/project") return send(200, { data: [{ id: "p1", directory: "/tmp", name: "tmp" }] });
+    if (p === "/api/project") return send(200, { data: [
+      // A project's directory is `canonical`. There is no `directory` field;
+      // reading one yields an empty path for every row.
+      { id: "p1", canonical: "/tmp/sub" },
+      { id: "p2", canonical: "/tmp" },                 // the root itself
+      { id: "p3", canonical: "/elsewhere/other" },     // outside the root
+      { id: "p4", canonical: "/tmp-other/x" },         // sibling, not a child
+      { id: "p5", canonical: "/tmp/sub" },             // duplicate
+    ] });
     return send(404, { error: "not found" });
   });
 });
@@ -183,6 +191,44 @@ function make(extra = {}) {
   // session. A second backend over the same file must see it.
   const { b: b2 } = make({ stateFile: MAP });
   check("the map survives a restart", b2._ids.toReal(cid) === real);
+}
+
+// ── the project picker ────────────────────────────────────────────────────
+//
+// THE SHAPE IS THE CONTRACT, for the third time in this backend. viewer.html
+// reads data.projects, each row's `cwd` and `label`, and data.root to decide
+// which entry means "no cwd at all". Handed a bare array it finds `projects`
+// undefined and renders NOTHING -- not even the root, so there is no way to
+// start a session in the workspace itself. Reported from a real session.
+{
+  const { b } = make({ stateFile: MAP });
+  const r = await b.listProjects();
+  check("listProjects returns an ENVELOPE, not a bare array",
+    !Array.isArray(r) && Array.isArray(r.projects), r);
+  check("...naming the root, which the picker needs to mean 'no cwd'",
+    r.root === "/tmp", r.root);
+  check("rows are keyed `cwd`, which is what the picker reads",
+    r.projects.every((p) => typeof p.cwd === "string" && p.cwd), r.projects);
+  check("the root is always offered, even before anything has run there",
+    r.projects.some((p) => p.cwd === "/tmp" && p.label === "(root)"), r.projects);
+  check("...exactly once, not duplicated by the server's own row for it",
+    r.projects.filter((p) => p.cwd === "/tmp").length === 1, r.projects);
+  check("a subdirectory is labelled relative to the root",
+    r.projects.some((p) => p.cwd === "/tmp/sub" && p.label === "sub"), r.projects);
+  check("duplicates are collapsed", r.projects.filter((p) => p.cwd === "/tmp/sub").length === 1);
+  check("a directory outside the root is not offered",
+    !r.projects.some((p) => p.cwd === "/elsewhere/other"), r.projects);
+  // The startsWith trap again, in a second place.
+  check("a sibling sharing the root's prefix is not offered",
+    !r.projects.some((p) => p.cwd === "/tmp-other/x"), r.projects);
+}
+{
+  // An unreachable server must still offer the root, or a cold start leaves
+  // the picker empty and nothing can be created at all.
+  const { b } = make({ stateFile: MAP, baseUrl: "http://127.0.0.1:1" });
+  const r = await b.listProjects();
+  check("an unreachable server still offers the root",
+    r.projects.length === 1 && r.projects[0].cwd === "/tmp", r);
 }
 
 // ── the driver's sender translation ───────────────────────────────────────

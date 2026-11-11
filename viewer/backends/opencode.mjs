@@ -615,11 +615,36 @@ export function createOpenCodeBackend({
       return abs === base || abs.startsWith(`${base}/`) ? abs : null;
     },
 
+    // THE SHAPE IS THE CONTRACT, the third time in this file. The picker reads
+    // `data.projects`, each row's `cwd` and `label`, and `data.root` to decide
+    // which entry means "no cwd at all". Handed a bare array of {id, path} it
+    // finds `projects` undefined and renders NOTHING -- not even the root, so
+    // there is no way to start a session in the workspace itself.
+    //
+    // A project's directory is `canonical`. There is no `directory` or
+    // `worktree` field, so reading those produced an empty path for every row
+    // on top of the wrong container.
     async listProjects() {
+      const base = cwdRoot || process.cwd();
+      const label = (cwd) => (cwd === base ? "(root)" : (cwd.startsWith(`${base}/`) ? cwd.slice(base.length + 1) : cwd));
+      // The root is offered UNCONDITIONALLY. The server only knows about a
+      // directory once something has run there, so on a fresh install the
+      // workspace itself is absent from this list -- which would leave the
+      // picker unable to offer the one directory that always exists.
+      const projects = [{ cwd: base, label: "(root)" }];
+      const seen = new Set([base]);
       try {
-        const rows = await api("/api/project", { timeoutMs: 8000 });
-        return (rows || []).map((p) => ({ id: p.id, path: p.directory || p.worktree || "", label: p.name || p.id }));
-      } catch { return []; }
+        for (const p of (await api("/api/project", { timeoutMs: 8000 })) || []) {
+          const cwd = p.canonical || "";
+          // Under the root only: resolveValidCwd refuses anything else, so
+          // offering it would produce a menu entry that cannot be chosen.
+          // That also keeps other clients' projects (and "/") out.
+          if (!cwd || seen.has(cwd) || !cwd.startsWith(`${base}/`)) continue;
+          seen.add(cwd);
+          projects.push({ cwd, label: label(cwd) });
+        }
+      } catch { /* an unreachable server still offers the root */ }
+      return { projects, root: base };
     },
 
     // RETURNS AN ENVELOPE, not a bare array. gatherAllSessions() does

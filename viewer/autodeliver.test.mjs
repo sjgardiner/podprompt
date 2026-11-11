@@ -236,7 +236,7 @@ const NATIVE = { kid: { childKind: "native-task" } };
   // The fold's answer is load-bearing: a refusal must leave the mail QUEUED,
   // never marked delivered, or the message is lost outright.
   check("mail is only marked delivered when the fold is actually taken",
-    /if \(foldIntoRunningTurn\([^)]*\)\) \{\s*\n\s*inbox\.markDelivered/.test(drain),
+    /if \(await foldIntoRunningTurn\([^)]*\)\) \{\s*\n\s*inbox\.markDelivered/.test(drain),
     drain.slice(foldAt - 40, foldAt + 200));
 
   // And the browser has to be able to see the resolved value, because it is

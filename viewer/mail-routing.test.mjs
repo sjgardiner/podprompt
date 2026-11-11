@@ -113,8 +113,12 @@ function bodyOf(name) {
     /typeof backend\?\.injectIntoTurn !== "function"/.test(fold));
   check("...and a backend throwing is treated as a refusal, not a crash",
     /catch \(e\) \{[\s\S]*?return false;/.test(fold));
-  check("the backend's answer must be exactly true to count",
-    /injectIntoTurn\(sessionId, state, body\) === true/.test(fold));
+  // Awaited, because a backend may answer over HTTP (opencode v2 posts a
+  // steer). Still compared with === true: a promise, a truthy string or an
+  // undefined from a backend that does not implement it must all read as
+  // "not taken", or mail would be marked delivered on a guess.
+  check("the backend's answer is awaited and must be exactly true to count",
+    /\(await backend\.injectIntoTurn\(sessionId, state, body\)\) === true/.test(fold), fold.slice(0, 400));
 
   // C10: the transcript must never be ambiguous about who said something.
   check("a folded message still produces a user bubble",

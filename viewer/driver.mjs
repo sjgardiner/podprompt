@@ -1741,13 +1741,13 @@ function parkUnapproved(sessionId, group, reason, approved) {
 // deliberate and visible rather than papered over: v1 is on a deprecation
 // path, and pretending otherwise would mean the same action silently
 // behaving differently depending on a backend the sender cannot see.
-function foldIntoRunningTurn(sessionId, body, originLabel) {
+async function foldIntoRunningTurn(sessionId, body, originLabel) {
   const state = sessions.get(sessionId);
   const backend = state?.backend;
   if (typeof backend?.injectIntoTurn !== "function") return false;
   let taken = false;
   try {
-    taken = backend.injectIntoTurn(sessionId, state, body) === true;
+    taken = (await backend.injectIntoTurn(sessionId, state, body)) === true;
   } catch (e) {
     console.error(`[driver] injectIntoTurn failed for ${sessionId}:`, e.message);
     return false;
@@ -1761,7 +1761,7 @@ function foldIntoRunningTurn(sessionId, body, originLabel) {
   return true;
 }
 
-function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
+async function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Everything pending, not a per-chain slice. nextDrainGroup existed solely
   // so one chain's budget could not pay for another's work; with a single
   // global counter (AD2) there is nothing left to keep apart, and coalescing
@@ -1856,7 +1856,7 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // is the step that used to leave a parent idle and waiting on a child that
   // never came back.
   if (running) {
-    if (foldIntoRunningTurn(sessionId, body, originLabel)) {
+    if (await foldIntoRunningTurn(sessionId, body, originLabel)) {
       inbox.markDelivered(group.map((e) => e.id));
       console.log(`[driver] fold -> ${sessionId}: ${group.length} msg(s) into the running turn`);
       broadcastStatus(sessionId, { type: "inbox_changed" });
@@ -1897,7 +1897,13 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
 }
 
 function drainAllInboxes() {
-  for (const sessionId of inbox.sessionsWithPending()) maybeDrainInbox(sessionId);
+  for (const sessionId of inbox.sessionsWithPending()) {
+    // Fire-and-forget: a drain can now await a backend (opencode v2 posts a
+    // steer over HTTP), and nothing here has an answer to wait for. Failures
+    // are logged rather than swallowed -- mail stays queued either way.
+    maybeDrainInbox(sessionId).catch((e) =>
+      console.error(`[driver] drain failed for ${sessionId}:`, e.message));
+  }
 }
 
 // There is now exactly ONE condition a user can lift, so this is a set of
@@ -1934,7 +1940,7 @@ function releaseParkedFor(predicate) {
 // always told what happened, because a silently dropped message is
 // indistinguishable to a model from a peer that chose not to answer, and it
 // responds to that by retrying.
-function deliver(toAddr, text, { from, kind = "peer" }) {
+async function deliver(toAddr, text, { from, kind = "peer" }) {
   const resolved = peers.resolve(toAddr);
   if (!resolved.ok) return { ok: false, reason: resolved.reason, to: toAddr };
   const to = resolved.ref;
@@ -1958,7 +1964,7 @@ function deliver(toAddr, text, { from, kind = "peer" }) {
     broadcastStatus(to.id, { type: "inbox_changed" });
     return { ok: false, reason: "autonomy-paused", parked: true, entryId: entry.id };
   }
-  const deliveredNow = maybeDrainInbox(to.id);
+  const deliveredNow = await maybeDrainInbox(to.id);
   broadcastStatus(to.id, { type: "inbox_changed" });
   return {
     ok: true,
@@ -2135,7 +2141,10 @@ function releaseWatchedFor(sessionId) {
     if (inbox.release(e.id).ok) released.push(e.id);
   }
   if (released.length) {
-    for (const id of new Set(inbox.open().map((e) => e.to?.id).filter(Boolean))) maybeDrainInbox(id);
+    for (const id of new Set(inbox.open().map((e) => e.to?.id).filter(Boolean))) {
+      maybeDrainInbox(id).catch((e) =>
+        console.error(`[driver] drain failed for ${id}:`, e.message));
+    }
   }
   return released;
 }
@@ -2308,7 +2317,7 @@ async function toolListPeers(fromSessionId, { search = null, limit = null, all =
 const PEER_LIST_DEFAULT = 20;
 const PEER_LIST_MAX = 200;
 
-function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false }) {
+async function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false }) {
   const state = sessions.get(fromSessionId);
   // No chain check any more: §10 asks "is this turn allowed to start" in
   // startTurn, once, for every automatic turn however it arises. Guarding
@@ -2352,7 +2361,7 @@ function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false })
     // something the boilerplate does not.
     body = text && text.trim() ? `${canned}\n\n${text}` : canned;
   }
-  return deliver(to, body, {
+  return await deliver(to, body, {
     from: localPrincipal(fromSessionId),
     kind,
   });
@@ -2668,7 +2677,7 @@ async function deliverDelegateReport(childId, parentId, reason) {
     : `Delegated work ended with no output (${reason || "completed"}).`)
     + `\n\n(For detail it left out, read its transcript: read_session session="@${handle}",`
     + ` search="...".)`;
-  const receipt = deliver(parentId, body, {
+  const receipt = await deliver(parentId, body, {
     from: localPrincipal(childId),
     kind: "result",
   });
@@ -2766,12 +2775,18 @@ function expectationSweep(now = Date.now()) {
     // Marked, not cleared: the parent still has not had its answer, so the
     // row must survive to deliver one if the child ever does finish.
     expectations.markNotified(exp.childId);
-    const receipt = deliver(exp.parentId, body, {
+    // Not awaited: this is a timer callback and delivery can now await a
+    // backend. The outcome is logged when it settles rather than guessed at
+    // now -- the row is already marked notified, so a failure here costs the
+    // nudge, never the expectation itself.
+    deliver(exp.parentId, body, {
       from: localPrincipal(exp.childId),
       kind: "result",
-    });
-    console.log(`[driver] expectation stale: ${handle} -> ${exp.parentId}`
-      + ` age=${mins}m blocked=${blockedOn || "no"} delivered=${receipt.ok}`);
+    }).then((receipt) => {
+      console.log(`[driver] expectation stale: ${handle} -> ${exp.parentId}`
+        + ` age=${mins}m blocked=${blockedOn || "no"} delivered=${receipt.ok}`);
+    }).catch((e) =>
+      console.error(`[driver] stale-expectation nudge failed for ${handle}:`, e.message));
     fired.push(exp.childId);
   }
   return fired;
@@ -4035,11 +4050,8 @@ async function runTurn(sessionId, promptText, { source = "human" } = {}) {
     // A session that just went idle is exactly when queued mail can move.
     // Deliberately after turn_end: the browser sees the turn finish, then
     // sees the next one begin, rather than the two racing.
-    try {
-      maybeDrainInbox(sessionId);
-    } catch (e) {
-      console.error(`[driver] inbox drain failed for session ${sessionId}:`, e.message);
-    }
+    await maybeDrainInbox(sessionId).catch((e) =>
+      console.error(`[driver] inbox drain failed for session ${sessionId}:`, e.message));
     // Wake anything blocking on this session's turn — a parent holding a
     // delegate() call open. Resolved AFTER turn_end and the drain, so a
     // waiter never observes a turn that the browser has not been told about
@@ -5211,7 +5223,7 @@ const server = createServer(async (req, res) => {
         // NOT userDirected: approval is carried per entry now, so a
         // call-level override would also sweep up anything else queued —
         // exactly the leak this change exists to close.
-        if (ok) maybeDrainInbox(entry.to?.id);
+        if (ok) await maybeDrainInbox(entry.to?.id);
       }
     } else if (body.action === "deliver") {
       // MD5: deliver the CHECKED subset as one coalesced turn. Unchecked
@@ -5234,7 +5246,7 @@ const server = createServer(async (req, res) => {
         // have therefore never seen. Approval is per message now, so the
         // drain delivers exactly what was approved and gives anything newer
         // its own decision, which the bar then shows as a fresh arrival.
-        maybeDrainInbox(target);
+        await maybeDrainInbox(target);
         result = { ok: true, delivered: approved.length };
       }
     } else result = { ok: false, reason: "unknown-action" };
@@ -5276,7 +5288,7 @@ const server = createServer(async (req, res) => {
     // skipped the fan-out cap and the sender's peer record — which is why
     // a cross-backend message first arrived labelled with a raw session id
     // instead of a handle.
-    const receipt = toolMessage(fromId, {
+    const receipt = await toolMessage(fromId, {
       to: body.to,
       text: body.text || "",
       kind: body.kind === "result" ? "result" : "peer",

@@ -87,7 +87,10 @@ const deps = {
   localPrincipal: (id) => ({ realm: "local", id }),
   pendingKindForSession: (id) => state.pendingKind[id] || null,
   finalAssistantText: async (id) => state.transcripts[id] ?? null,
-  deliver: (to, body, opts) => {
+  // ASYNC, because deliver() is: folding a message into a running turn can
+  // mean an HTTP round trip to a backend. A synchronous stub would let a
+  // missing await pass here and only fail in production.
+  deliver: async (to, body, opts) => {
     state.delivered.push({ to, body, kind: opts?.kind });
     return { ok: true };
   },

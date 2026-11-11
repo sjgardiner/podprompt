@@ -1406,7 +1406,11 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           },
           async (args) => {
             try {
-              const receipt = messaging.message(sessionId, args);
+              // Awaited: delivery can now fold a message into the recipient's
+              // RUNNING turn, and on a backend that does so over HTTP the
+              // answer is a promise. Without the await the receipt would be
+              // the promise itself and every send would report success.
+              const receipt = await messaging.message(sessionId, args);
               return { content: [{ type: "text", text: messaging.describeReceipt(receipt, args.to) }] };
             } catch (e) {
               return { content: [{ type: "text", text: `Message failed: ${e.message}` }] };

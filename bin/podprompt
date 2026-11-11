@@ -707,6 +707,13 @@ deploy_viewer() {
     # clutter does. Whether a stray is stale or load-bearing is the user's call.
     local known strays
     strays=0
+    report_stray() {
+        if [ "$strays" = 0 ]; then
+            echo "Note: $target_dir holds files this deploy does not manage:"
+            strays=1
+        fi
+        echo "    $1"
+    }
     for entry in "$target_dir"/*; do
         [ -e "$entry" ] || continue          # unmatched glob stays literal
         name="$(basename "$entry")"
@@ -718,12 +725,28 @@ deploy_viewer() {
             fi
         done
         if [ "$known" = 0 ]; then
-            if [ "$strays" = 0 ]; then
-                echo "Note: $target_dir holds files this deploy does not manage:"
-                strays=1
-            fi
-            echo "    $name"
+            report_stray "$name"
         fi
+    done
+
+    # ONE LEVEL DOWN, TOO. The manifest names top-level entries, and `backends`
+    # is one of them — so the scan above compares whole directories and never
+    # looks inside. The worked example in the comment above (a RENAME leaving
+    # both names present) is exactly what happened there: backends/opencode-v2.mjs
+    # survived the rename to backends/opencode.mjs, sat in the deployed copy
+    # unreferenced, and this check could not see it because it only ever looked
+    # at the top level.
+    #
+    # Same policy as above, deliberately: reported, never removed.
+    local sub subname
+    for f in "${manifest[@]}"; do
+        [ -d "$src_dir/$f" ] || continue
+        [ -d "$target_dir/$f" ] || continue
+        for sub in "$target_dir/$f"/*; do
+            [ -e "$sub" ] || continue
+            subname="$(basename "$sub")"
+            [ -e "$src_dir/$f/$subname" ] || report_stray "$f/$subname"
+        done
     done
 
     for f in "${manifest[@]}"; do

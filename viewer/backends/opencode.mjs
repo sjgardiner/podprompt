@@ -40,11 +40,20 @@
 // arbitrary ones was the riskier design even if it turns out not to have been
 // the cause.
 //
-// WHAT IS STILL MISSING
-// ---------------------
-// Sub-agent rosters and slash commands are not wired yet. Those are additive
-// and are called out here rather than stubbed silently. Permission prompts
-// and questions ARE wired; see the permissions section below.
+// A SUB-AGENT HERE IS A REAL SESSION
+// ----------------------------------
+// The task tool spawns one by creating a session parented to the caller's,
+// with its own id, its own transcript and its own event stream. Claude Code's
+// sub-agents have none of that -- they exist only as messages inside the
+// parent's stream -- and the difference shapes everything in `onChildEvent`:
+// the roster's live status is relayed, the child's CONTENT is not, because
+// the server is already keeping it.
+//
+// What it is NOT is a session the user addresses. That is a question about
+// its ROLE, answered by the relation row the driver keeps (childKind
+// "native-task"), and it is why `listSessions` filters `parentID` out while
+// the id map still remembers it. See HD1 in driver.mjs, and the note in
+// listSessions on why conflating those two was a real bug.
 
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -53,6 +62,15 @@ export function createOpenCodeBackend({
   cwdRoot, broadcast, broadcastStatus, broadcastUserPrompt,
   messaging, baseUrl, password, stateFile,
   requestApproval, autoApproveForSession, resolveApprovalExternally,
+  // The roster. A sub-agent here is a REAL session the server parents to the
+  // one that spawned it, so these two hooks are all the driver needs: the
+  // relation row says what role it plays, and the live map says what it is
+  // doing right now.
+  registerChild, updateSubAgent,
+  // The durable half of the clientId <-> realId pairing, kept on the relation
+  // row by the driver. The map file below is the primary record; this is what
+  // recovers a pairing the map has lost -- see seedRealIds.
+  noteRealSessionId,
   // How long a finished turn waits for an outstanding approval reply to land
   // before releasing the session anyway. Settable only so the test can prove
   // the bound exists without sleeping for the real one.
@@ -105,6 +123,13 @@ export function createOpenCodeBackend({
     clientToReal.set(clientId, realId);
     realToClient.set(realId, clientId);
     saveMap();
+    // Mirrored onto the relation row for any session that has one. The
+    // driver has always had a place to keep this and a function to read it
+    // back at startup -- it was simply never handed the pairing, so both
+    // halves sat dead and the map file was the only copy. One corrupted or
+    // hand-edited map and every delegated child came back detached from its
+    // parent, which is the exact failure the relation index exists to stop.
+    noteRealSessionId?.(clientId, realId);
   }
 
   const toReal = (clientId) => clientToReal.get(clientId) || null;
@@ -330,7 +355,10 @@ export function createOpenCodeBackend({
   // process. A turn is the only thing that needs it, the server is local, and
   // a per-turn connection cannot leak events from one turn into another's
   // bubbles -- which is a failure the previous backend spent real effort on.
-  async function* sessionEvents(realId, signal) {
+  // `children` is a LIVE set, owned by the turn and mutated by this
+  // generator: a sub-agent's session id is not knowable until the server
+  // announces it, so admission cannot be decided once up front.
+  async function* sessionEvents(realId, signal, children = new Set()) {
     const res = await fetch(`${BASE}/api/event`, {
       headers: { Authorization: AUTH, Accept: "text/event-stream" },
       signal,
@@ -365,7 +393,22 @@ export function createOpenCodeBackend({
         // having no session id at all and is let through to this turn's
         // watch, which would put one session's question on another's screen.
         const sid = ev?.data?.sessionID ?? ev?.data?.form?.sessionID;
-        if (sid && sid !== realId) continue;
+        if (sid && sid !== realId && !children.has(sid)) {
+          // A SUB-AGENT IS A SESSION OF ITS OWN, and that is the whole
+          // difficulty: everything it does arrives under ITS id, which this
+          // filter would discard as "another session's business" -- so the
+          // roster would stay empty no matter how much work ran inside the
+          // turn. It announces itself exactly once, with a session.created
+          // naming this session as its parent, and from that point its
+          // events belong to this turn as surely as the parent's own do.
+          //
+          // The parent's `session.tool.progress` carries the same pairing in
+          // `metadata.sessionID` and is handled below as a BACKSTOP -- that
+          // one arrives under the PARENT's id, so it survives even if the
+          // creation event were ever missed.
+          if (ev.type === "session.created" && ev.data?.parentID === realId) children.add(sid);
+          else continue;
+        }
         yield ev;
       }
     }
@@ -397,6 +440,11 @@ export function createOpenCodeBackend({
     const text = new Map();
     const reasoning = new Map();
 
+    // ── sub-agents ─────────────────────────────────────────────────────────
+    // The real ids of every sub-agent this turn spawns. Also the admission
+    // list for the event stream above; see the comment there.
+    const children = new Set();
+
     // A turn is ended by a terminal EVENT. If the server never sends one --
     // it died, the stream wedged, a new event type we do not know about
     // replaced the ones we do -- nothing else would ever end this turn, and
@@ -415,6 +463,115 @@ export function createOpenCodeBackend({
     // that was waiting for the answer. Counted rather than inferred from the
     // promise array, which keeps its entries after they settle.
     let awaitingHuman = 0;
+
+    // Everything a sub-agent does, in one place. Deliberately NOT the main
+    // switch: a child's events look identical to the parent's, so sharing the
+    // switch would put a sub-agent's reasoning into the parent's transcript
+    // and its token count into the parent's context gauge.
+    //
+    // WHAT IS DELIBERATELY ABSENT: any broadcast of the child's own text. On
+    // Claude Code a sub-agent has no durable transcript, so live broadcast is
+    // the ONLY record and the backend must relay every block. Here the server
+    // keeps the child's transcript, and the two records cannot be reconciled
+    // -- a live block is identified by message+ordinal while the stored one
+    // carries a part id, so relaying would put every block on screen twice,
+    // once per id. The server is the record; the roster carries the live
+    // status; and `flushChildTranscript` below tops the view up when the work
+    // is done.
+    function onChildEvent(childId, type, d) {
+      switch (type) {
+        case "session.created":
+          registerChild?.(childId, {
+            parent: sessionId,
+            backend: "opencode",
+            // The role, not the implementation. This IS a session -- it is
+            // just not one the user addresses, so it belongs in the roster
+            // and nowhere else. See HD1 in driver.mjs.
+            childKind: "native-task",
+            subagentType: d.agent || null,
+            // The server titles a sub-agent session with the calling tool's
+            // `description`, which is exactly the roster's label.
+            description: d.title || null,
+            native: { realSessionId: childId },
+          });
+          // The id map is "ids this backend can resolve", and a child needs
+          // an entry or its transcript cannot be fetched at all. The server
+          // minted this id, so the mapping is the identity.
+          remember(childId, childId);
+          updateSubAgent?.(childId, { status: "running", startedAt: Date.now() });
+          break;
+        case "session.tool.input.started":
+          noteToolName(d);
+          updateSubAgent?.(childId, { status: "running", lastTool: d.name || null });
+          break;
+        case "session.tool.called": {
+          // Never write a NULL over the name input.started already recorded:
+          // upsertSubAgent merges, so a null here would blank the roster's
+          // "last tool" line the moment the call it names actually runs.
+          const named = toolNames.get(d.id);
+          updateSubAgent?.(childId, { status: "running", ...(named ? { lastTool: named } : {}) });
+          break;
+        }
+        case "session.text.ended": {
+          const body = (d.text || "").trim();
+          if (body) updateSubAgent?.(childId, { summary: body.split("\n")[0].slice(0, 200) });
+          break;
+        }
+        case "session.step.ended":
+        case "session.usage.updated":
+          if (d.tokens) updateSubAgent?.(childId, { usage: d.tokens });
+          break;
+        case "session.execution.failed":
+          updateSubAgent?.(childId, {
+            status: "failed",
+            error: d.error?.message || d.error?.type || "execution failed",
+          });
+          flushChildTranscript(childId);
+          break;
+        case "session.execution.interrupted":
+          updateSubAgent?.(childId, { status: "killed" });
+          flushChildTranscript(childId);
+          break;
+        case "session.execution.succeeded":
+          updateSubAgent?.(childId, { status: "completed" });
+          flushChildTranscript(childId);
+          break;
+        // A card raised INSIDE a sub-agent is routed to the PARENT, which is
+        // the session the user is looking at -- a child has no input bar to
+        // answer one in. The reply still goes to the child's own server
+        // session, which is where the blocked tool call lives.
+        case "permission.asked": {
+          if (state.autoApprove || autoApproveForSession?.(sessionId)) {
+            pendingApprovals.push(replyPermission(childId, d.id, { allow: true }));
+            break;
+          }
+          awaitingHuman++;
+          updateSubAgent?.(childId, { awaiting: d.action || "permission" });
+          pendingApprovals.push(
+            requestApproval?.(sessionId, "permission", d.action || "unknown",
+              { resources: d.resources || [] },
+              { canAlwaysAllow: true, externalId: d.id })
+              .then((decision) => (decision?.cancelled ? undefined : replyPermission(childId, d.id, decision)))
+              .finally(() => { awaitingHuman--; updateSubAgent?.(childId, { awaiting: null }); }),
+          );
+          break;
+        }
+        case "form.created": {
+          const form = d.form || d;
+          if (form.metadata?.kind !== "question") break;
+          awaitingHuman++;
+          updateSubAgent?.(childId, { awaiting: "question" });
+          pendingApprovals.push(
+            requestApproval?.(sessionId, "question", "AskUserQuestion",
+              { questions: questionsFromForm(form) }, { externalId: form.id })
+              .then((answer) => (answer?.cancelled ? undefined : replyForm(childId, form, answer)))
+              .finally(() => { awaitingHuman--; updateSubAgent?.(childId, { awaiting: null }); }),
+          );
+          break;
+        }
+        default: break;
+      }
+    }
     let lastEventAt = Date.now();
     const SILENCE_LIMIT_MS = silenceLimitMs;
     const idleWatch = setInterval(() => {
@@ -427,7 +584,7 @@ export function createOpenCodeBackend({
     idleWatch.unref?.();
 
     try {
-      const stream = sessionEvents(realId, ctl.signal);
+      const stream = sessionEvents(realId, ctl.signal, children);
       // The prompt is posted AFTER the stream is open, or the first events of
       // the turn race the subscription and are lost.
       const started = (async () => {
@@ -444,8 +601,13 @@ export function createOpenCodeBackend({
       started.catch((e) => { outcome = { reason: "error", error: e.message }; ctl.abort(); });
 
       for await (const ev of stream) {
+        // A sub-agent's events count as activity: they are this turn's own
+        // work, and a long one would otherwise look like silence and trip
+        // the watchdog below.
         lastEventAt = Date.now();
         const d = ev.data || {};
+        const sid = d.sessionID ?? d.form?.sessionID;
+        if (sid && sid !== realId) { onChildEvent(sid, ev.type, d); continue; }
         switch (ev.type) {
           // STREAMING. The deltas were being accumulated and thrown away,
           // with one broadcast at the END of each block -- so a long answer
@@ -526,13 +688,45 @@ export function createOpenCodeBackend({
             }
             break;
           }
+          // The name arrives here and nowhere else; see summarizeTool.
+          case "session.tool.input.started":
+            noteToolName(d);
+            break;
+          // `d.callID` DOES NOT EXIST -- the field is `d.id`, and it is the
+          // same id the stored part carries. Minting a random one instead
+          // meant a live tool bubble and its replayed self could never be
+          // recognised as the same bubble.
           case "session.tool.called":
-            broadcast(sessionId, "tool", summarizeTool(d), d.callID || randomUUID(), null, state.model || null);
+            broadcast(sessionId, "tool", summarizeTool(d), d.id || randomUUID(), null, state.model || null);
             break;
           case "session.tool.failed":
-            broadcast(sessionId, "tool", `*(${d.tool || "tool"} failed: ${d.error?.message || "unknown"})*`,
-              d.callID || randomUUID(), null, state.model || null);
+            broadcast(sessionId, "tool",
+              `*(${summarizeTool(d).replace(/\*\*/g, "")} failed: ${d.error?.message || "unknown"})*`,
+              d.id || randomUUID(), null, state.model || null);
             break;
+          // THE TASK BUBBLE AND THE ROSTER ROW ARE THE SAME THING, and this
+          // is the only event that says so: a task tool's progress carries
+          // the spawned session's id in `metadata.sessionID` while arriving
+          // under the PARENT's id, alongside the tool call's own `id` --
+          // which is also the id of the bubble already on screen. Recording
+          // the pair is what lets the browser hang live sub-agent status off
+          // that bubble instead of rendering an inert "task" line.
+          //
+          // Also the backstop for admission: a sub-agent whose session.created
+          // was missed (a stream reconnect, an event dropped) is still picked
+          // up here, under an id this turn was never filtering out.
+          case "session.tool.progress":
+          case "session.tool.success": {
+            const kid = d.metadata?.sessionID;
+            if (!kid || kid === realId) break;
+            if (!children.has(kid)) {
+              children.add(kid);
+              onChildEvent(kid, "session.created", { title: d.input?.description || null });
+            }
+            registerChild?.(kid, { parent: sessionId, native: { toolUseId: d.id || null } });
+            if (d.metadata?.status === "completed") onChildEvent(kid, "session.execution.succeeded", {});
+            break;
+          }
           case "permission.asked": {
             // Auto-approve is checked here rather than by the card, and it
             // walks up the parent chain: a delegated session's own tool calls
@@ -710,11 +904,173 @@ export function createOpenCodeBackend({
     }
   }
 
+  // THE TOOL'S NAME IS NOT ON THE EVENT THAT ANNOUNCES THE CALL. Measured
+  // against 2.2.7, one call's lifecycle is:
+  //
+  //   session.tool.input.started  { id, name }          <- the ONLY name
+  //   session.tool.input.ended    { id, text }
+  //   session.tool.called         { id, input }
+  //   session.tool.progress       { id, metadata }
+  //   session.tool.success        { id, content, metadata }
+  //
+  // So reading `d.tool`/`d.name` off the `called` event finds nothing, and
+  // EVERY tool bubble in a live OpenCode turn read "**tool**". The shell ones
+  // salvaged a command string out of `input` and so looked plausible, which
+  // is how this survived. The name is carried forward from the first event
+  // instead, keyed by the call id the whole sequence shares.
+  //
+  // Bounded, because a turn can make unboundedly many calls and nothing here
+  // would otherwise ever forget one. Oldest out first; a bubble that outlives
+  // its entry falls back to "tool", which is where it started.
+  const toolNames = new Map();
+  const MAX_REMEMBERED_TOOL_NAMES = 500;
+  function noteToolName(d) {
+    if (!d?.id || !d.name) return;
+    toolNames.set(d.id, d.name);
+    while (toolNames.size > MAX_REMEMBERED_TOOL_NAMES) {
+      toolNames.delete(toolNames.keys().next().value);
+    }
+  }
+
   function summarizeTool(d) {
-    const name = d.tool || d.name || "tool";
-    const input = d.input && typeof d.input === "object" ? d.input : {};
-    const first = input.command || input.filePath || input.path || input.pattern || "";
+    const name = d.tool || d.name || toolNames.get(d.id) || "tool";
+    // A STORED part nests its arguments under `state.input`; a LIVE event
+    // puts them directly on `input`. Reading only the live shape made every
+    // replayed tool bubble lose its argument.
+    const raw = d.input ?? d.state?.input;
+    const input = raw && typeof raw === "object" ? raw : {};
+    const first = input.command || input.filePath || input.path || input.pattern
+      || input.description || "";
     return first ? `**${name}** \`${String(first).slice(0, 120)}\`` : `**${name}**`;
+  }
+
+  // A FINISHED SUB-AGENT'S TRANSCRIPT, pushed into its own feed.
+  //
+  // The problem this solves is the one created by NOT relaying a child's
+  // blocks live (see onChildEvent): server.py seeds a session's log from
+  // getSessionHistory exactly once, latched, the first time a tab asks to
+  // view it. Open a sub-agent while it is still working and that snapshot is
+  // all you ever get -- and open it the instant it is created and the latch
+  // closes over an EMPTY log, so the finished transcript would never appear
+  // at all without a server.py restart.
+  //
+  // Replaying it at completion costs one request and cannot double anything:
+  // these are the same entries, carrying the same part ids the seed used, and
+  // the viewer upserts by id. A tab with the partial view fills in; a tab
+  // that never opened it gets a log that the later seed then dedups away.
+  const flushedChildren = new Set();
+  async function flushChildTranscript(childRealId) {
+    // ONCE PER CHILD. Two independent events say "this sub-agent finished" --
+    // its own session.execution.succeeded and the parent's tool.success --
+    // and both are wanted, because either can be the one that survives a
+    // stream hiccup. Replaying twice would put the whole transcript in the
+    // log twice over.
+    if (flushedChildren.has(childRealId)) return;
+    flushedChildren.add(childRealId);
+    try {
+      const entries = await transcriptOf(childRealId, `sub-agent ${childRealId}`);
+      for (const e of entries) {
+        broadcast(childRealId, e.role, e.text, e.id, e.ts || null, e.model || null);
+      }
+    } catch (e) {
+      // Never fatal: the roster row and the parent's turn are both fine
+      // without it, and the next view of the child still seeds normally.
+      console.error(`[opencode] could not replay sub-agent transcript ${childRealId}:`, e.message);
+    }
+  }
+
+  // The stored transcript of a session, converted to the viewer's shape.
+  // Separate from the backend method because the ROSTER needs it too: a
+  // sub-agent's transcript is fetched here when its work ends, and the
+  // method below is only the contract's front door onto the same thing.
+  async function transcriptOf(realId, label = realId) {
+    let rows;
+    try {
+      // PAGED, like the session list. A single call returns the most recent
+      // 50 messages and nothing says the rest exist, so a long session
+      // rendered as though it began in the middle -- measured at 50 of 374.
+      rows = await pageAll(`/api/session/${realId}/message`,
+        `the transcript of ${label}`, 20000);
+    } catch (e) {
+      if (e.status === 404) return [];
+      throw e;
+    }
+    // The server returns NEWEST FIRST, and `cursor.next` walks further
+    // BACK in time -- so the pages concatenate newest-to-oldest and one
+    // reverse at the end puts the whole transcript in the order the viewer
+    // renders. Reversing per page would interleave them wrongly.
+    const ordered = [...(rows || [])].reverse();
+    const out = [];
+    for (const m of ordered) {
+      const info = m.info || m;
+      // A row is NOT shaped the way the 1.x backend expected, and the
+      // difference is silent:
+      // every field we used to read simply comes back undefined, so the
+      // transcript renders empty rather than wrong. Measured against 2.2.7:
+      //   assistant -> { type, content: [{type:"text"|"reasoning"|"tool"}],
+      //                  model: {providerID, id}, time }
+      //   user      -> { type, text, time }   // no parts array at all
+      // `parts`/`payload` are kept as fallbacks so this keeps working if a
+      // later version changes its mind.
+      const parts = Array.isArray(m.parts) ? m.parts
+        : Array.isArray(m.content) ? m.content
+        : [];
+      const type = m.type || info.role;
+      const body = (p) => p.text || "";
+      // A model is labelled {providerID, id}; the viewer wants "provider/id".
+      const modelLabel = info.modelID
+        || (info.model && typeof info.model === "object"
+          ? [info.model.providerID, info.model.id].filter(Boolean).join("/") || null
+          : info.model || null);
+      if (type === "user") {
+        const t = parts.filter((p) => p.type === "text").map(body).join("\n")
+          || (typeof m.text === "string" ? m.text : "")
+          || (typeof m.payload?.text === "string" ? m.payload.text : "");
+        if (t.trim()) out.push({ role: "user", text: t, id: info.id || randomUUID(), ts: info.time?.created || null, model: null });
+        continue;
+      }
+      if (type !== "assistant") continue;
+      // A STORED PART HAS NO ID. Measured against 2.2.7: an assistant
+      // message's `content` entries carry type, text and time and nothing
+      // else -- so `p.id` is always undefined and the old `p.id ||
+      // randomUUID()` minted a FRESH id for the same block on every fetch.
+      // That makes a transcript impossible to de-duplicate: server.py dedups
+      // on the (id, role, text) triple, so two fetches of one unchanged
+      // message are two different messages to it, and the content appears
+      // twice. (Found by replaying a sub-agent's transcript into its own
+      // feed, which showed every block three times.)
+      //
+      // A part IS identified, just positionally: by its message and its index
+      // among the parts of its own KIND -- which is exactly what the live
+      // stream calls `ordinal`, and exactly what blockId() builds a live
+      // bubble id from. So deriving the same id here is not merely stable
+      // across fetches, it is the SAME id the live stream already used, and
+      // a reloaded transcript now lands on the bubbles already on screen
+      // instead of beside them.
+      //
+      // The counter advances for EVERY part of a kind, including ones too
+      // empty to render. The server numbers what it streamed, not what we
+      // chose to show, so skipping one here would shift every ordinal after
+      // it and quietly break the pairing this exists to create.
+      const ordinal = { text: 0, reasoning: 0 };
+      for (const p of parts) {
+        const ts = info.time?.created || null;
+        const n = p.type in ordinal ? ordinal[p.type]++ : 0;
+        const idFor = (kind) => blockId(kind, { assistantMessageID: info.id, ordinal: n });
+        if (p.type === "text" && p.text?.trim()) {
+          out.push({ role: "assistant", text: p.text, id: idFor("text"), ts, model: modelLabel });
+        } else if (p.type === "reasoning" && p.text?.trim()) {
+          out.push({ role: "thinking", text: p.text, id: idFor("reasoning"), ts, model: modelLabel });
+        } else if (p.type === "tool") {
+          // A tool part carries the provider's own call id, which the live
+          // path also uses -- so this one was already stable, and is kept.
+          out.push({ role: "tool", text: summarizeTool(p), id: p.callID || p.id || randomUUID(), ts, model: modelLabel });
+        } else {
+          continue;
+        }
+      }
+    }
+    return out;
   }
 
   return {
@@ -840,8 +1196,29 @@ export function createOpenCodeBackend({
       const rows = await listAllSessions();
       const out = [];
       for (const s of rows || []) {
-        // Only sessions PodPrompt drove: anything else is another client's
-        // and has no entry in our map.
+        // A SUB-AGENT CHILD IS NOT A TOP-LEVEL SESSION. It is a real session
+        // with a real transcript -- that is what distinguishes this backend
+        // from Claude Code, whose sub-agents have none -- but it is a worker
+        // owned by its parent's turn, addressed only through it. Listing one
+        // puts it in the picker AND the peer list, where it reads as an
+        // independent chat you could open and message. That happened: eleven
+        // of them, until the criterion was corrected.
+        //
+        // SKIPPED, NOT UNMAPPED. The id map is NOT "sessions the user may
+        // open" -- it is "ids this backend can resolve" -- and the two were
+        // conflated, which is why the filter had to live in the map and the
+        // map was therefore wrong. It lives here now, where it can ask the
+        // honest question.
+        //
+        // A child this process is actually driving IS mapped: onChildEvent
+        // remembers it the moment the server announces it, and records the
+        // id on its relation row too, so seedOpenCodeRealIds() hands it back
+        // after a restart. Mapping every OTHER child seen in a listing would
+        // buy nothing -- a sub-agent with no relation row appears in no
+        // roster, so nothing will ever ask for its transcript -- while
+        // growing the map by every sub-agent the TUI has ever spawned.
+        if (s.parentID) continue;
+        // Anything else without an entry belongs to another client.
         const clientId = toClient(s.id);
         if (!clientId) continue;
         const cwd = s.location?.directory || cwdRoot;
@@ -871,64 +1248,20 @@ export function createOpenCodeBackend({
     },
 
     async getSessionHistory(sessionId) {
-      let rows;
+      // A session this backend cannot resolve has no transcript to show, and
+      // that is NORMAL rather than an error: server.py asks every backend
+      // about ids it has not placed yet, and a brand-new session legitimately
+      // has no real id. requireRealId raises a 404-shaped error for exactly
+      // this case, and it has to be caught HERE -- it is outside transcriptOf,
+      // which takes a real id it can trust.
+      let realId;
       try {
-        // PAGED, like the session list. A single call returns the most recent
-        // 50 messages and nothing says the rest exist, so a long session
-        // rendered as though it began in the middle -- measured at 50 of 374.
-        rows = await pageAll(`/api/session/${requireRealId(sessionId)}/message`,
-          `the transcript of ${sessionId}`, 20000);
+        realId = requireRealId(sessionId);
       } catch (e) {
         if (e.status === 404) return [];
         throw e;
       }
-      // The server returns NEWEST FIRST, and `cursor.next` walks further
-      // BACK in time -- so the pages concatenate newest-to-oldest and one
-      // reverse at the end puts the whole transcript in the order the viewer
-      // renders. Reversing per page would interleave them wrongly.
-      const ordered = [...(rows || [])].reverse();
-      const out = [];
-      for (const m of ordered) {
-        const info = m.info || m;
-        // A row is NOT shaped the way the 1.x backend expected, and the
-        // difference is silent:
-        // every field we used to read simply comes back undefined, so the
-        // transcript renders empty rather than wrong. Measured against 2.2.7:
-        //   assistant -> { type, content: [{type:"text"|"reasoning"|"tool"}],
-        //                  model: {providerID, id}, time }
-        //   user      -> { type, text, time }   // no parts array at all
-        // `parts`/`payload` are kept as fallbacks so this keeps working if a
-        // later version changes its mind.
-        const parts = Array.isArray(m.parts) ? m.parts
-          : Array.isArray(m.content) ? m.content
-          : [];
-        const type = m.type || info.role;
-        const body = (p) => p.text || "";
-        // A model is labelled {providerID, id}; the viewer wants "provider/id".
-        const modelLabel = info.modelID
-          || (info.model && typeof info.model === "object"
-            ? [info.model.providerID, info.model.id].filter(Boolean).join("/") || null
-            : info.model || null);
-        if (type === "user") {
-          const t = parts.filter((p) => p.type === "text").map(body).join("\n")
-            || (typeof m.text === "string" ? m.text : "")
-            || (typeof m.payload?.text === "string" ? m.payload.text : "");
-          if (t.trim()) out.push({ role: "user", text: t, id: info.id || randomUUID(), ts: info.time?.created || null, model: null });
-          continue;
-        }
-        if (type !== "assistant") continue;
-        for (const p of parts) {
-          const ts = info.time?.created || null;
-          if (p.type === "text" && p.text?.trim()) {
-            out.push({ role: "assistant", text: p.text, id: p.id || randomUUID(), ts, model: modelLabel });
-          } else if (p.type === "reasoning" && p.text?.trim()) {
-            out.push({ role: "thinking", text: p.text, id: p.id || randomUUID(), ts, model: modelLabel });
-          } else if (p.type === "tool") {
-            out.push({ role: "tool", text: summarizeTool(p), id: p.id || randomUUID(), ts, model: modelLabel });
-          }
-        }
-      }
-      return out;
+      return transcriptOf(realId, sessionId);
     },
 
     async archiveSession(sessionId) {
@@ -1044,6 +1377,20 @@ export function createOpenCodeBackend({
     // recognise the sender. list_sessions still worked throughout, because
     // listing peers does not need to know who is asking, so the gap looked
     // narrower than it was.
+    // Called once at startup with every pairing the relation index still
+    // knows. Additive and idempotent: an entry the map already holds is left
+    // alone, so this can only ever restore, never overwrite.
+    seedRealIds(pairs) {
+      let n = 0;
+      for (const [clientId, realId] of pairs || []) {
+        if (!clientId || !realId) continue;
+        if (clientToReal.get(clientId) === realId) continue;
+        remember(clientId, realId);
+        n++;
+      }
+      return n;
+    },
+
     clientIdForReal(realId) {
       return toClient(realId);
     },

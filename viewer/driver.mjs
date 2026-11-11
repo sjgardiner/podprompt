@@ -42,6 +42,26 @@
 //                                                              polling block just above runTurn() for who calls this
 //   getCachedAccountUsage() [optional]                     -- synchronous read of the last value
 //                                                              refreshAccountUsage() cached, or null
+//   seedRealIds(pairs)      [optional]                     -- for a backend whose own ids are not
+//                                                              PodPrompt's: accept [clientId, realId]
+//                                                              pairs recovered from the relation index
+//                                                              at startup. Additive; returns how many
+//                                                              were new. See seedOpenCodeRealIds().
+//   stopSubAgent(parentId, parentState, nativeTaskId) [optional]
+//                                                        -- stop ONE sub-agent where it has no session
+//                                                              of its own to abort. A backend whose
+//                                                              sub-agents ARE sessions omits this and
+//                                                              the ordinary abort path is used instead.
+//
+// Hooks handed TO a backend (beyond broadcast/broadcastStatus/requestApproval):
+//   registerChild(childId, info)      -- surface a child session and the ROLE it plays
+//                                          (childKind "native-task" = roster-only sub-agent,
+//                                          "delegated" = a session of its own). The backend
+//                                          never sees the relation index itself.
+//   updateSubAgent(childId, patch)    -- live roster status for one of those children
+//   noteRealSessionId(clientId, realId)
+//                                     -- durable half of an id pairing; read back by
+//                                          seedRealIds() above at the next startup
 //
 // Status payload types broadcast via broadcastStatus (beyond the older
 // turn_start/thinking_tokens/tool_progress/stream_start/stream_delta set):
@@ -508,6 +528,9 @@ const backendHooks = {
   resolveApprovalExternally,
   pendingDelegateAnchorCount,
   updateSubAgent: upsertSubAgent,
+  // See seedOpenCodeRealIds/noteRealSessionId: the backend reports each
+  // pairing as it mints one, and gets them back at the next startup.
+  noteRealSessionId,
   // One place both backends render the turn's user bubble; see MD11.
   broadcastUserPrompt,
   // The messaging surface, handed to each backend so it can expose the SAME

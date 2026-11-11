@@ -414,16 +414,24 @@ function make(extra = {}) {
 
 // ── a successful turn ──────────────────────────────────────────────────────
 {
+  // THESE FIELD NAMES ARE MEASURED, not guessed. An earlier version of this
+  // fixture used textID/reasoningID/callID/tool -- none of which the server
+  // sends -- and it PASSED, because every missing field degraded into the
+  // same fallback. Fixtures that invent their subject cannot catch anything.
+  // Captured from 2.2.7: a block is message+ordinal, a tool call is `id`,
+  // and the tool's NAME arrives only on input.started.
+  const MSG = "msg_1cc7685ca001zOiaMpw6kJI4vQ";
   state.events = [
     { type: "session.execution.started", data: { sessionID: "SID" } },
-    { type: "session.reasoning.started", data: { sessionID: "SID", reasoningID: "r1" } },
-    { type: "session.reasoning.delta", data: { sessionID: "SID", reasoningID: "r1", delta: "think" } },
-    { type: "session.reasoning.ended", data: { sessionID: "SID", reasoningID: "r1" } },
-    { type: "session.tool.called", data: { sessionID: "SID", callID: "c1", tool: "bash", input: { command: "echo hi" } } },
-    { type: "session.text.started", data: { sessionID: "SID", textID: "t1" } },
-    { type: "session.text.delta", data: { sessionID: "SID", textID: "t1", delta: "HEL" } },
-    { type: "session.text.delta", data: { sessionID: "SID", textID: "t1", delta: "LO" } },
-    { type: "session.text.ended", data: { sessionID: "SID", textID: "t1" } },
+    { type: "session.reasoning.started", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0 } },
+    { type: "session.reasoning.delta", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0, delta: "think" } },
+    { type: "session.reasoning.ended", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0, text: "think" } },
+    { type: "session.tool.input.started", data: { sessionID: "SID", id: "chatcmpl-tool-1", name: "shell" } },
+    { type: "session.tool.called", data: { sessionID: "SID", id: "chatcmpl-tool-1", input: { command: "echo hi" } } },
+    { type: "session.text.started", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0 } },
+    { type: "session.text.delta", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0, delta: "HEL" } },
+    { type: "session.text.delta", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0, delta: "LO" } },
+    { type: "session.text.ended", data: { sessionID: "SID", assistantMessageID: MSG, ordinal: 0, text: "HELLO" } },
     { type: "session.idle", data: { sessionID: "SID" } },
   ];
   const { b, bubbles } = make();
@@ -437,7 +445,19 @@ function make(extra = {}) {
   check("assistant deltas are accumulated into one bubble",
     bubbles.some((x) => x.role === "assistant" && x.text === "HELLO"), bubbles);
   check("reasoning becomes a thinking bubble", bubbles.some((x) => x.role === "thinking"));
-  check("a tool call is summarised", bubbles.some((x) => x.role === "tool" && /bash/.test(x.text)), bubbles);
+  // The NAME is the assertion. It arrives on input.started and nowhere else,
+  // so a bubble that finds it proves the carry-forward works; before that
+  // every OpenCode tool bubble in the viewer read "**tool**".
+  check("a tool call is summarised BY NAME",
+    bubbles.some((x) => x.role === "tool" && /\*\*shell\*\*/.test(x.text)), bubbles);
+  check("...and keeps the call id the stored part will also carry",
+    bubbles.some((x) => x.role === "tool" && x.id === "chatcmpl-tool-1"), bubbles);
+  // Reasoning and text are BOTH ordinal 0 of the same message. Without the
+  // kind in the key the answer lands on the thinking block's id and replaces
+  // it, so this pins that they stay two bubbles.
+  check("reasoning and text at the same ordinal stay distinct bubbles",
+    new Set(bubbles.filter((x) => x.id).map((x) => x.id)).size
+      === bubbles.filter((x) => x.id).length, bubbles.map((x) => x.id));
 }
 
 // ── THE HANG: a failed turn emits no session.idle ──────────────────────────
@@ -1024,6 +1044,158 @@ function make(extra = {}) {
   check("timestamps run oldest-first across page boundaries",
     ts.every((v, i) => i === 0 || v >= ts[i - 1]), ts);
   state.msgPageSize = 0;
+}
+
+// ── the sub-agent roster ───────────────────────────────────────────────────
+//
+// A sub-agent on this backend is a REAL session: its own id, its own
+// transcript, its own events on the server-wide stream. Everything here
+// turns on that, and on the one thing it is NOT -- a session the user
+// addresses. The two questions are separate, and conflating them is what
+// put eleven sub-agent children into the session picker and the peer list
+// as though they were independent chats.
+{
+  const PARENT = "ses_PARENT", CHILD = "ses_CHILD", TOOLCALL = "chatcmpl-tool-sub";
+  const registered = [];
+  const subAgentPatches = [];
+  const { b, bubbles } = make({
+    registerChild: (id, info) => registered.push({ id, ...info }),
+    updateSubAgent: (id, patch) => subAgentPatches.push({ id, ...patch }),
+  });
+  const sid = "oc-parent";
+  await b.setModel(sid, "opencode/big-pickle");
+  const realParent = b._ids.toReal(sid) || PARENT;
+  state.messages = [
+    { id: "cm2", type: "assistant", content: [{ type: "text", text: "KUMQUAT" }],
+      model: { providerID: "alcf-minerva", id: "beam-1.0-bf16" }, time: { created: 2 } },
+    { id: "cm1", type: "user", text: "do the thing", time: { created: 1 } },
+  ];
+  state.events = [
+    { type: "session.execution.started", data: { sessionID: realParent } },
+    { type: "session.tool.input.started", data: { sessionID: realParent, id: TOOLCALL, name: "subagent" } },
+    { type: "session.tool.called", data: { sessionID: realParent, id: TOOLCALL, input: { agent: "explore", description: "Find the thing" } } },
+    // The child announces itself. Nothing before this names it.
+    { type: "session.created", data: { sessionID: CHILD, parentID: realParent, title: "Find the thing", agent: "explore" } },
+    { type: "session.tool.progress", data: { sessionID: realParent, id: TOOLCALL, metadata: { sessionID: CHILD, status: "running" } } },
+    // ...and then works under ITS OWN id.
+    { type: "session.tool.input.started", data: { sessionID: CHILD, id: "chatcmpl-tool-kid", name: "grep" } },
+    { type: "session.tool.called", data: { sessionID: CHILD, id: "chatcmpl-tool-kid", input: { pattern: "x" } } },
+    { type: "session.text.ended", data: { sessionID: CHILD, assistantMessageID: "msg_kid", ordinal: 0, text: "KUMQUAT" } },
+    { type: "session.step.ended", data: { sessionID: CHILD, assistantMessageID: "msg_kid", tokens: { input: 10, output: 2 } } },
+    { type: "session.execution.succeeded", data: { sessionID: CHILD } },
+    { type: "session.tool.success", data: { sessionID: realParent, id: TOOLCALL, metadata: { sessionID: CHILD, status: "completed" } } },
+    { type: "session.idle", data: { sessionID: realParent } },
+  ];
+  const outcome = await b.runTurn(sid, "spawn one", { cwd: "/tmp" });
+  check("the parent's turn still completes", outcome.reason === "completed", outcome);
+
+  const reg = registered.find((r) => r.id === CHILD);
+  check("a sub-agent is registered as a child of the session that spawned it",
+    reg && reg.parent === sid, registered);
+  check("...with the role that keeps it out of the session list",
+    reg?.childKind === "native-task", reg);
+  check("...labelled with the agent it runs as", reg?.subagentType === "explore", reg);
+  check("...and described by the title the server gave it",
+    reg?.description === "Find the thing", reg);
+  // The tool call's id is also the Task bubble's id in the parent's feed, so
+  // this pairing is what lets the browser hang live status off that bubble.
+  check("the spawning tool call is paired to the child",
+    registered.some((r) => r.id === CHILD && r.native?.toolUseId === TOOLCALL), registered);
+
+  const forChild = subAgentPatches.filter((x) => x.id === CHILD);
+  check("the roster sees it start", forChild.some((x) => x.status === "running"), forChild);
+  check("...reports the tool it is using", forChild.some((x) => x.lastTool === "grep"), forChild);
+  check("...never blanks that name when the call actually runs",
+    !forChild.some((x) => "lastTool" in x && x.lastTool === null), forChild);
+  check("...summarises what it answered", forChild.some((x) => x.summary === "KUMQUAT"), forChild);
+  check("...carries its token usage", forChild.some((x) => x.usage?.input === 10), forChild);
+  check("...and sees it finish", forChild.some((x) => x.status === "completed"), forChild);
+
+  // THE DISTINCTION. The map is "ids this backend can resolve"; the list is
+  // "sessions the user may open". A child needs the first and must not get
+  // the second.
+  check("the child's transcript resolves through the id map",
+    (await b.getSessionHistory(CHILD)).length === 2);
+  state.sessions.set(CHILD, { id: CHILD, parentID: realParent, title: "Find the thing" });
+  const listed = await b.listSessions({}, new Map(), () => null);
+  check("...but it is NOT offered as a session of its own",
+    !listed.sessions.some((x) => x.sessionId === CHILD), listed.sessions.map((x) => x.sessionId));
+
+  // Claude Code must relay a sub-agent's text because nothing else records
+  // it. Here the server already has it, and the two records cannot share
+  // ids -- so relaying would double every block. The transcript is replayed
+  // once, at completion, carrying the STORED ids.
+  const childBubbles = bubbles.filter((x) => x.text === "KUMQUAT" && x.role === "assistant");
+  check("a finished sub-agent's transcript is replayed exactly once",
+    childBubbles.length === 1, childBubbles);
+  check("...with the same id the live stream would have minted",
+    childBubbles[0]?.id === "text:cm2:0", childBubbles[0]);
+  state.messages = [];
+}
+
+// ── a stored part has no id of its own ─────────────────────────────────────
+//
+// `p.id || randomUUID()` minted a FRESH id per fetch, so server.py's
+// (id, role, text) dedup could never match and one unchanged message read as
+// two. Parts are identified positionally -- message plus index within their
+// own KIND -- which is exactly the live stream's `ordinal`.
+{
+  const { b } = make();
+  // Mapped the only way a session ever is: by actually driving a turn, which
+  // is what makes the server mint an id for it.
+  state.events = [{ type: "session.idle", data: {} }];
+  await b.runTurn("oc-stable", "x", { cwd: "/tmp" });
+  state.messages = [
+    { id: "msgX", type: "assistant", time: { created: 1 },
+      content: [
+        { type: "reasoning", text: "first thought" },
+        { type: "text", text: "" },                 // empty: rendered by nobody
+        { type: "text", text: "the answer" },       // ...but it still took ordinal 0
+        { type: "tool", id: "call-1", name: "shell", state: { input: { command: "ls" } } },
+      ] },
+  ];
+  const a = await b.getSessionHistory("oc-stable");
+  const c = await b.getSessionHistory("oc-stable");
+  check("two reads of one transcript agree on every id",
+    JSON.stringify(a.map((x) => x.id)) === JSON.stringify(c.map((x) => x.id)), a.map((x) => x.id));
+  check("a block's id is its message and its ordinal within its kind",
+    a.find((x) => x.role === "thinking")?.id === "reasoning:msgX:0", a);
+  check("an unrendered part still consumes its ordinal",
+    a.find((x) => x.role === "assistant")?.id === "text:msgX:1", a);
+  check("a stored tool part keeps the provider's call id",
+    a.find((x) => x.role === "tool")?.id === "call-1", a);
+  check("...and reads its arguments out of state.input",
+    /\*\*shell\*\* `ls`/.test(a.find((x) => x.role === "tool")?.text || ""), a);
+  state.messages = [];
+}
+
+// ── the pairing survives a restart ─────────────────────────────────────────
+//
+// The map file is the primary record, but the driver ALSO keeps each pairing
+// on the relation row and hands them all back at startup. Both halves of
+// that -- reporting a new pairing, and accepting seeded ones -- were simply
+// never implemented here, and the driver's optional-call swallowed the
+// absence silently, so a map that lost an entry lost it for good. The
+// symptom is the one that matters most: a delegated child reappearing
+// detached from its parent with no Continue bar.
+{
+  const noted = [];
+  const { b } = make({ noteRealSessionId: (c, r) => noted.push([c, r]) });
+  state.events = [{ type: "session.idle", data: {} }];
+  await b.runTurn("oc-pairing", "x", { cwd: "/tmp" });
+  const real = b._ids.toReal("oc-pairing");
+  check("a new pairing is reported to the driver as it is minted",
+    noted.some(([c, r]) => c === "oc-pairing" && r === real), noted);
+
+  // A fresh backend, as after a restart, with nothing in its map.
+  const { b: fresh } = make();
+  check("...which starts out knowing nothing about it",
+    fresh._ids.toReal("oc-pairing") === null);
+  check("seeding restores it", fresh.seedRealIds([["oc-pairing", real]]) === 1);
+  check("...and the session resolves again", fresh._ids.toReal("oc-pairing") === real);
+  check("seeding twice changes nothing", fresh.seedRealIds([["oc-pairing", real]]) === 0);
+  check("a junk pair is ignored rather than stored",
+    fresh.seedRealIds([[null, real], ["x", null]]) === 0);
 }
 
 server.close();

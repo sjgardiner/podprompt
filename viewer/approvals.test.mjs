@@ -158,12 +158,19 @@ function card(id, externalId, sessionId = "sess-1", extra = {}) {
   for (const evt of ["permission.replied", "permission.rejected", "form.replied", "form.cancelled"]) {
     check(`${evt} is handled`, oc.includes(`"${evt}"`));
   }
+  // DERIVED FROM THE CALL SITES, not hard-coded. These were counts ("=== 2")
+  // and so failed the moment a THIRD and FOURTH ask appeared -- the sub-agent
+  // roster routes a child's permission and question cards to its parent --
+  // even though both new sites did the right thing. A count tests how many
+  // asks exist; what is worth pinning is that EVERY one of them is wired.
+  const askSites = (oc.match(/requestApproval\?\.\(/g) || []).length;
+  check("there are ask sites to check at all", askSites >= 2, askSites);
   check("every ask records its OpenCode request id",
-    (oc.match(/externalId:/g) || []).length === 2,
-    (oc.match(/externalId:/g) || []).length);
+    (oc.match(/externalId:/g) || []).length === askSites,
+    { externalIds: (oc.match(/externalId:/g) || []).length, askSites });
   check("a retracted card is not answered",
-    (oc.match(/cancelled \? undefined :/g) || []).length === 2,
-    (oc.match(/cancelled \? undefined :/g) || []).length);
+    (oc.match(/cancelled \? undefined :/g) || []).length === askSites,
+    { guards: (oc.match(/cancelled \? undefined :/g) || []).length, askSites });
   // Replies are SESSION-scoped, and that is what makes them correct.
   //
   // The 1.x server resolved a permission by DIRECTORY, not by session: a

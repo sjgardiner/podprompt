@@ -798,6 +798,25 @@ export function createOpenCodeBackend({
       return { ok: true };
     },
 
+    // THE PLUGIN ONLY KNOWS THE SERVER'S ID. A tool handler is handed
+    // ctx.sessionID by OpenCode's runtime -- that is the whole security
+    // argument for the plugin, since the model cannot forge it -- but it is
+    // the id the SERVER minted, and the driver files everything under the
+    // client id instead. So every tool call arrives claiming to be from a
+    // session the driver has never heard of.
+    //
+    // podSessionIdFor() in driver.mjs translates through exactly this
+    // method. Without it the translation silently falls through to the raw
+    // id, the sender resolves to nothing, and mail or delegation sent FROM
+    // an OpenCode session fails with "no-session" -- which reads as a
+    // routing problem on the recipient's side rather than a failure to
+    // recognise the sender. list_sessions still worked throughout, because
+    // listing peers does not need to know who is asking, so the gap looked
+    // narrower than it was.
+    clientIdForReal(realId) {
+      return toClient(realId);
+    },
+
     // Test seam. The client-id <-> server-id map is the one piece of state
     // this backend cannot recompute (see the header), so losing it loses the
     // session -- worth asserting directly rather than only through behaviour.

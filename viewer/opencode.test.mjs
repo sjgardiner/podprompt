@@ -15,6 +15,7 @@
 // session busy forever with no way back.
 
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
 let pass = 0, fail = 0;
@@ -178,6 +179,42 @@ function make(extra = {}) {
   // session. A second backend over the same file must see it.
   const { b: b2 } = make({ stateFile: MAP });
   check("the map survives a restart", b2._ids.toReal(cid) === real);
+}
+
+// ── the driver's sender translation ───────────────────────────────────────
+//
+// THE BUG THIS GUARDS, which cost a working feature silently. A plugin tool
+// handler is given ctx.sessionID by OpenCode's runtime -- the id the SERVER
+// minted. The driver files everything under the CLIENT id. So every tool call
+// arrives claiming to come from a session the driver has never heard of, and
+// podSessionIdFor() in driver.mjs translates it back through exactly this
+// method.
+//
+// It was missing. The translation fell through to the raw id, the sender
+// resolved to nothing, and mail or delegation sent FROM an OpenCode session
+// failed with "no-session" -- wording that reads as a problem with the
+// RECIPIENT. list_sessions kept working the whole time, because listing peers
+// never needs to know who is asking, which made the gap look narrower than it
+// was.
+//
+// Asserted against driver.mjs's actual call site, not just the method's
+// existence: a renamed method here is the same outage.
+{
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-whoami", "opencode/big-pickle");
+  const real = b._ids.toReal("oc2-whoami");
+  check("the backend can translate a server id back to ours",
+    typeof b.clientIdForReal === "function");
+  check("...and it round-trips", b.clientIdForReal(real) === "oc2-whoami", b.clientIdForReal?.(real));
+  check("an id we never minted translates to nothing, not to itself",
+    b.clientIdForReal("ses_somebodyelse") === null, b.clientIdForReal?.("ses_somebodyelse"));
+
+  const drv = readFileSync(new URL("./driver.mjs", import.meta.url), "utf8");
+  check("the driver still translates an incoming sender through this method",
+    /clientIdForReal\?\.\(/.test(drv));
+  check("...and every tool-facing route resolves `from` through that translator",
+    (drv.match(/podSessionIdFor\(body\.from\)/g) || []).length >= 2,
+    (drv.match(/podSessionIdFor\(body\.from\)/g) || []).length);
 }
 
 // ── a successful turn ──────────────────────────────────────────────────────

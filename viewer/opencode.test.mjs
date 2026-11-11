@@ -101,7 +101,22 @@ const server = createServer((req, res) => {
       if (rest === "/prompt") { state.prompts.push({ sid, ...json }); return send(200, { data: { id: "msg_1" } }); }
       if (rest === "/interrupt") { state.interrupts.push(sid); return send(200, { data: {} }); }
       if (rest === "/model") return send(204, {});
-      if (rest === "/message") return send(200, { data: state.messages || [] });
+      if (rest === "/message") {
+        // PAGED too, and this is the one that mattered most: a long
+        // transcript returned its most recent page and looked whole, so a
+        // session appeared to begin in the middle.
+        const all = state.messages || [];
+        const size = state.msgPageSize || all.length || 1;
+        const cur = url.searchParams.get("cursor");
+        const start = cur ? Number(Buffer.from(cur, "base64").toString()) : 0;
+        const page = all.slice(start, start + size);
+        const end = start + size;
+        state.msgCalls = (state.msgCalls || 0) + 1;
+        return send(200, {
+          data: page,
+          cursor: { previous: null, next: end < all.length ? Buffer.from(String(end)).toString("base64") : null },
+        });
+      }
       // Replies are SESSION-scoped in v2. Recording the full path matters:
       // addressing one of these to the wrong session is a 404, and v1's
       // equivalent bug (a reply resolved against the server's default
@@ -687,6 +702,41 @@ function make(extra = {}) {
     h[0]?.ts === 20 && h[2]?.ts === 30, h.map((x) => x.ts));
   check("non-message rows (idle, model-switched) are dropped, not rendered",
     h.every((x) => ["user", "assistant", "thinking", "tool"].includes(x.role)), h.map((x) => x.role));
+}
+
+// ── a transcript is PAGED, and the whole of it has to be read ──────────────
+//
+// The worst instance of the cursor bug. /message returns the most recent page
+// -- 50 messages -- and says nothing about the rest, so a long session
+// rendered as though it began in the middle. Measured against a real server:
+// 50 of 374.
+//
+// Ordering is the subtle half. Pages run NEWEST first and cursor.next walks
+// further BACK, so the pages concatenate newest-to-oldest and ONE reverse at
+// the end is correct. Reversing per page would interleave them.
+{
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-long", "opencode/big-pickle");
+  // 9 user messages, newest first, as the server would hand them over.
+  state.messages = [];
+  for (let i = 9; i >= 1; i--) {
+    state.messages.push({ id: `m${i}`, type: "user", text: `msg ${i}`, time: { created: i * 100 } });
+  }
+  state.msgPageSize = 2;
+  state.msgCalls = 0;
+  const h = await b.getSessionHistory("oc2-long");
+  check("the whole transcript is read, not just the first page",
+    h.length === 9, { got: h.length, want: 9, calls: state.msgCalls });
+  check("...which takes more than one request", state.msgCalls > 1, state.msgCalls);
+  check("the session begins at its REAL beginning",
+    h[0]?.text === "msg 1", h[0]?.text);
+  check("...and ends at its real end", h[h.length - 1]?.text === "msg 9", h[h.length - 1]?.text);
+  check("every message appears exactly once",
+    new Set(h.map((x) => x.text)).size === h.length);
+  const ts = h.map((x) => x.ts);
+  check("timestamps run oldest-first across page boundaries",
+    ts.every((v, i) => i === 0 || v >= ts[i - 1]), ts);
+  state.msgPageSize = 0;
 }
 
 server.close();

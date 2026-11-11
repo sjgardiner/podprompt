@@ -181,20 +181,28 @@ export function createOpenCodeBackend({
   // later version adds the flag the obvious way.
   const isArchived = (s) => !!(s?.archived || s?.time?.archived);
 
-  const MAX_SESSION_PAGES = 200;
+  // SESSIONS ARE NOT THE ONLY PAGED LIST. A session's messages are too, and
+  // that one is worse: a 374-message transcript returned its most recent 50
+  // and looked complete, so the viewer showed a session that appeared to
+  // begin in the middle. Both go through this.
+  const MAX_PAGES = 200;
 
-  async function listAllSessions() {
+  async function pageAll(path, what, timeoutMs = 15000) {
     const out = [];
     const seen = new Set();
     let cursor = null;
-    for (let page = 0; page < MAX_SESSION_PAGES; page++) {
-      const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-      const env = await api(`/api/session${q}`, { timeoutMs: 15000, envelope: true });
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const sep = path.includes("?") ? "&" : "?";
+      const url = cursor ? `${path}${sep}cursor=${encodeURIComponent(cursor)}` : path;
+      const env = await api(url, { timeoutMs, envelope: true });
       const rows = Array.isArray(env?.data) ? env.data : [];
       let fresh = 0;
       for (const r of rows) {
-        if (!r?.id || seen.has(r.id)) continue;
-        seen.add(r.id);
+        // Keyed by id where there is one; a row without one cannot be
+        // de-duplicated, so it is kept rather than dropped.
+        const key = r?.id;
+        if (key && seen.has(key)) continue;
+        if (key) seen.add(key);
         out.push(r);
         fresh++;
       }
@@ -206,10 +214,12 @@ export function createOpenCodeBackend({
       if (!next || !rows.length || fresh === 0) return out;
       cursor = next;
     }
-    console.error(`[opencode] stopped paging the session list after ${MAX_SESSION_PAGES} pages;`
-      + ` ${out.length} sessions read and the server still offered more`);
+    console.error(`[opencode] stopped paging ${what} after ${MAX_PAGES} pages;`
+      + ` ${out.length} rows read and the server still offered more`);
     return out;
   }
+
+  const listAllSessions = () => pageAll("/api/session", "the session list");
 
   // THE SERVER MINTS THE ID. Never `POST /api/session` with one of ours --
   // see the header: a client-supplied id loses free-model access entirely.
@@ -682,12 +692,19 @@ export function createOpenCodeBackend({
     async getSessionHistory(sessionId) {
       let rows;
       try {
-        rows = await api(`/api/session/${requireRealId(sessionId)}/message`, { timeoutMs: 20000 });
+        // PAGED, like the session list. A single call returns the most recent
+        // 50 messages and nothing says the rest exist, so a long session
+        // rendered as though it began in the middle -- measured at 50 of 374.
+        rows = await pageAll(`/api/session/${requireRealId(sessionId)}/message`,
+          `the transcript of ${sessionId}`, 20000);
       } catch (e) {
         if (e.status === 404) return [];
         throw e;
       }
-      // The server returns NEWEST FIRST; the viewer renders oldest first.
+      // The server returns NEWEST FIRST, and `cursor.next` walks further
+      // BACK in time -- so the pages concatenate newest-to-oldest and one
+      // reverse at the end puts the whole transcript in the order the viewer
+      // renders. Reversing per page would interleave them wrongly.
       const ordered = [...(rows || [])].reverse();
       const out = [];
       for (const m of ordered) {

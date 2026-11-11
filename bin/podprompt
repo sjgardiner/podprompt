@@ -104,8 +104,8 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   Skip the viewer and drop straight into Claude Code's own
                   interactive terminal UI (`claude`) inside the container
                   instead — a plain terminal session with no browser
-                  involved. Mutually exclusive with --viewer and with
-                  --opencode: pick exactly one interface per launch.
+                  involved. Mutually exclusive with --viewer, --opencode
+                  and --opencode2: pick exactly one interface per launch.
 
   --opencode      Same, but OpenCode's own terminal UI (`opencode`) instead
                   of Claude Code's. OpenCode manages its own provider/model
@@ -142,6 +142,21 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   versions), store the key via the TUI's /connect flow under
                   the same provider id instead and drop apiKey from the
                   config entirely.
+
+  --opencode2     OpenCode v2's terminal UI (`opencode2`). v2 is a SEPARATE
+                  program from the one --opencode runs — `@opencode/cli` 2.x
+                  rather than `opencode-ai` 1.x — with its own API and its
+                  own session database. Both are installed; this flag picks
+                  the newer one.
+
+                  Config, credentials and sessions live in the same
+                  directories as v1 (~/.config/opencode/ and friends), so a
+                  login done through either is visible to the other.
+
+                  v1 is on a deprecation path. When v2 is confirmed working
+                  across the board, --opencode will move to it and
+                  --opencode2 will remain as an alias. Also accepted as
+                  --opencode-v2.
 
   --viewer        Start PodPrompt, the browser-based viewer/driver UI — the
                   default (this flag only ever needs to be explicit, e.g.
@@ -860,7 +875,22 @@ remove_stale_viewer_hooks   # self-heal settings.json regardless of flags used t
 
 PROVIDER="direct"
 PROVIDER_EXPLICIT=0
-TUI_BACKEND=""      # "" (viewer, the default), "claude-code", or "opencode"
+TUI_BACKEND=""      # "" (viewer, the default), "claude-code", "opencode", or "opencode-v2"
+
+# Which binary each TUI backend actually execs. OpenCode v1 and v2 are
+# SEPARATE PROGRAMS (`opencode-ai` 1.x vs `@opencode/cli` 2.x), both installed,
+# so this is a lookup rather than a rename.
+#
+# THIS IS THE FLIP POINT. v1 is on a deprecation path; when v2 is confirmed
+# across the board, `--opencode` moves to it by changing one value here, and
+# `--opencode2` stays as an alias so nobody's muscle memory breaks.
+tui_cmd_for() {
+    case "$1" in
+        opencode)    echo "opencode"  ;;
+        opencode-v2) echo "opencode2" ;;
+        *)           echo "claude"    ;;
+    esac
+}
 VIEWER_ENABLED=1    # the viewer is now the default interface; --claude/--opencode flip this off below
 VIEWER_EXPLICIT=0   # did the user actually type --viewer, vs it just being the default
 OPENCODE_PORT=7845
@@ -914,7 +944,7 @@ while [ $# -gt 0 ]; do
             ;;
         --claude|--claude-code)
             if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ]; then
-                echo "Error: --claude/--claude-code and --opencode are mutually exclusive — pick one interface." >&2
+                echo "Error: --claude/--claude-code, --opencode and --opencode2 are mutually exclusive — pick one interface." >&2
                 exit 1
             fi
             TUI_BACKEND="claude-code"
@@ -923,10 +953,22 @@ while [ $# -gt 0 ]; do
             ;;
         --opencode)
             if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "opencode" ]; then
-                echo "Error: --claude/--claude-code and --opencode are mutually exclusive — pick one interface." >&2
+                echo "Error: --claude/--claude-code, --opencode and --opencode2 are mutually exclusive — pick one interface." >&2
                 exit 1
             fi
             TUI_BACKEND="opencode"
+            VIEWER_ENABLED=0
+            shift
+            ;;
+        --opencode2|--opencode-v2)
+            # OpenCode v2 (`@opencode/cli`), a different program from the one
+            # --opencode runs. Same config and session directories, so a login
+            # done in either is visible to the other.
+            if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "opencode-v2" ]; then
+                echo "Error: --claude/--claude-code, --opencode and --opencode2 are mutually exclusive — pick one interface." >&2
+                exit 1
+            fi
+            TUI_BACKEND="opencode-v2"
             VIEWER_ENABLED=0
             shift
             ;;
@@ -1033,8 +1075,8 @@ fi
 # model picker is skipped for a plain opencode launch (see below) and
 # LITELLM_URL/LITELLM_API_KEY are passed through as plain env vars instead,
 # for opencode.jsonc's own {env:...} substitution to use.
-if [ "$TUI_BACKEND" = "opencode" ] && [ "$PROVIDER_EXPLICIT" = 1 ] \
-   && [ "$PROVIDER" = "direct-api" ]; then
+if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ] \
+   && [ "$PROVIDER_EXPLICIT" = 1 ] && [ "$PROVIDER" = "direct-api" ]; then
     echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --opencode." >&2
     echo "OpenCode manages its own provider auth — run 'podprompt --opencode' and use its" >&2
     echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
@@ -1107,7 +1149,7 @@ if [ "$PROVIDER" = "litellm" ]; then
         echo "LiteLLM server OK (HTTP $status)."
     fi
 
-    if [ "$TUI_BACKEND" = "opencode" ]; then
+    if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ]; then
         # Plain `--opencode --litellm`: opencode picks its own
         # model via its own config (or its TUI's own /models, /connect),
         # not Claude Code's ANTHROPIC_MODEL env var — so skip Claude Code's
@@ -1239,8 +1281,8 @@ ENTRYPOINT_FLAG=()   # empty = use image default (Node, which runs claude/openco
 if [ "$VIEWER_ENABLED" = 1 ]; then
     ENTRYPOINT_FLAG=(--entrypoint /home/agent/.local/share/podprompt/viewer/start-viewer.sh)
     RUN_CMD=("${PASSTHROUGH_ARGS[@]}")
-elif [ "$TUI_BACKEND" = "opencode" ]; then
-    RUN_CMD=(opencode "${PASSTHROUGH_ARGS[@]}")
+elif [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ]; then
+    RUN_CMD=("$(tui_cmd_for "$TUI_BACKEND")" "${PASSTHROUGH_ARGS[@]}")
 else
     RUN_CMD=(claude "${PASSTHROUGH_ARGS[@]}")
 fi
@@ -1256,7 +1298,7 @@ fi
 # (--claude) doesn't touch opencode at all, so skip the mounts rather than
 # exposing host directories it'll never use.
 OPENCODE_MOUNT_FLAGS=()
-if [ "$VIEWER_ENABLED" = 1 ] || [ "$TUI_BACKEND" = "opencode" ]; then
+if [ "$VIEWER_ENABLED" = 1 ] || { [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ]; }; then
     OPENCODE_MOUNT_FLAGS+=(
         -v "${OPENCODE_CONFIG_DIR}:/home/agent/.config/opencode:z"
         -v "${OPENCODE_DATA_DIR}:/home/agent/.local/share/opencode:z"

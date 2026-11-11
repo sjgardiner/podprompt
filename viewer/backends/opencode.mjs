@@ -761,16 +761,39 @@ export function createOpenCodeBackend({
       return { ok: true };
     },
 
+    // THE SHAPE IS THE CONTRACT, exactly as it is for listSessions. The
+    // viewer reads `data.available` and `data.current`; handed a bare array
+    // it finds neither, renders no options, and the model picker simply does
+    // not appear -- with no error anywhere, because an array is a perfectly
+    // good JSON response. A session then runs on whatever the server defaults
+    // to, which is the one thing the picker exists to prevent.
     async listModels() {
+      let rows;
       try {
-        const rows = await api("/api/model", { timeoutMs: 15000 });
-        return (rows || [])
-          .filter((m) => m.enabled !== false)
-          .map((m) => ({ id: `${m.providerID}/${m.id}`, label: `${m.name || m.id} (${m.providerID})` }));
+        rows = await api("/api/model", { timeoutMs: 15000 });
       } catch (e) {
         console.error("[opencode] listModels failed:", e.message);
-        return [];
+        return { available: [], current: null };
       }
+      const available = (rows || [])
+        .filter((m) => m.enabled !== false)
+        // providerID, not id: a model's own id is bare ("beam-1.0-bf16") and
+        // only the pair identifies it. Every custom provider configured in
+        // opencode.jsonc appears here alongside the built-in ones.
+        .map((m) => ({ id: `${m.providerID}/${m.id}`, label: `${m.name || m.id} (${m.providerID})` }));
+
+      // What the server will ACTUALLY use when nobody has chosen. A session
+      // object does not carry its model, so without this the picker would
+      // select whichever entry happened to sort first and quietly misreport
+      // the model the next turn runs on. The driver overrides this with an
+      // explicit pick when it has one.
+      let current = null;
+      try {
+        const def = await api("/api/model/default", { timeoutMs: 8000 });
+        if (def?.providerID && def?.id) current = `${def.providerID}/${def.id}`;
+      } catch { /* a missing default is not worth failing the list over */ }
+
+      return { available, current };
     },
 
     async setModel(sessionId, modelId) {

@@ -125,10 +125,16 @@ const server = createServer((req, res) => {
       r = rest.match(/^\/form\/([^/]+)\/reply$/);
       if (r) { state.formReplies.push({ sid, id: r[1], body: json }); return send(204, {}); }
     }
+    if (p === "/api/model/default") {
+      return send(200, { data: { id: "default-pick", providerID: "opencode", name: "Default Pick" } });
+    }
     if (p === "/api/model") {
       return send(200, { data: [
         { id: "big-pickle", providerID: "opencode", name: "Big Pickle", enabled: true },
         { id: "hidden", providerID: "opencode", name: "Hidden", enabled: false },
+        // A provider configured in opencode.jsonc rather than offered by the
+        // gateway. Its own `id` says nothing about the provider.
+        { id: "beam-1.0-bf16", providerID: "alcf-minerva", name: "Beam 1.0", enabled: true },
       ] });
     }
     if (p === "/api/project") return send(200, { data: [{ id: "p1", directory: "/tmp", name: "tmp" }] });
@@ -414,10 +420,29 @@ function make(extra = {}) {
   const live = sessions.find((s) => s.sessionId === "oc-page-0");
   check("...while a live one is not", live?.archived === false && live?.tag === null, live);
 
+  // THE SHAPE IS THE CONTRACT, and asserting only the contents missed that.
+  // viewer.html reads data.available and data.current. Handed a bare array it
+  // finds neither and renders NO OPTIONS -- the model picker just is not
+  // there, with no error, because an array is perfectly good JSON. A session
+  // then silently runs on the server's default, which is the one outcome the
+  // picker exists to prevent. Reported from a real session.
   const models = await b.listModels();
+  check("listModels returns an ENVELOPE, not a bare array",
+    !Array.isArray(models) && Array.isArray(models.available), models);
+  check("...with the current model the viewer preselects",
+    "current" in models, Object.keys(models));
+  check("...which is what the server will actually use by default",
+    models.current === "opencode/default-pick", models.current);
   check("models are composite provider/model ids",
-    models.some((m) => m.id === "opencode/big-pickle"), models);
-  check("disabled models are omitted", !models.some((m) => m.id.endsWith("/hidden")), models);
+    models.available.some((m) => m.id === "opencode/big-pickle"), models.available);
+  check("disabled models are omitted",
+    !models.available.some((m) => m.id.endsWith("/hidden")), models.available);
+  // A model from a provider configured in opencode.jsonc (ALCF, a local
+  // llama server) must be offered too -- the id is only unique as the
+  // provider/model PAIR, and reading the bare `id` makes custom providers
+  // look absent when they are not.
+  check("a custom provider's models are offered as well",
+    models.available.some((m) => m.id === "alcf-minerva/beam-1.0-bf16"), models.available);
 
   check("resolveValidCwd keeps paths under the root", b.resolveValidCwd("/tmp/sub") === "/tmp/sub");
   check("...and refuses an escape", b.resolveValidCwd("/etc") === null);

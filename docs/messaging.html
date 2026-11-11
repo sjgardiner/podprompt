@@ -439,19 +439,10 @@
         from silence and repeating itself.
       </p>
 
-      <table class="data-table">
-        <thead><tr><th>Backend</th><th>Mail arriving mid-turn</th></tr></thead>
-        <tbody>
-          <tr><td><strong>Claude Code</strong></td><td>Joins the turn in progress.</td></tr>
-          <tr><td><strong>OpenCode v2</strong></td><td>Joins the turn in progress.</td></tr>
-          <tr><td><strong>OpenCode</strong> (v1)</td><td>Waits until the turn ends, as before.</td></tr>
-        </tbody>
-      </table>
-
       <p>
-        Nothing is lost on v1 — mail simply queues the way it always did. If you
-        want a long-running session to stay reachable while it works, put it on
-        Claude Code or OpenCode v2.
+        Both backends work this way, so it is not something to plan a session
+        around: whichever agent you pick, a long-running one stays reachable
+        while it works.
       </p>
     </section>
 

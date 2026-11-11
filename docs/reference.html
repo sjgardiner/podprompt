@@ -73,7 +73,6 @@
           <tr><td>--viewer</td><td>Browser interface with the bidirectional driver. <strong>The default</strong> — you do not need to pass it. Both backends are available per session.</td></tr>
           <tr><td>--claude<br>--claude-code</td><td>A Claude Code terminal session instead, with no browser.</td></tr>
           <tr><td>--opencode</td><td>An OpenCode terminal session instead.</td></tr>
-          <tr><td>--opencode2<br>--opencode-v2</td><td>An OpenCode <strong>v2</strong> terminal session. A separate program from the one above, sharing the same config and sessions.</td></tr>
         </tbody>
       </table>
 
@@ -116,7 +115,6 @@
           <tr><td>--viewer-port PORT</td><td>Port for the page and its event stream. Default <span class="default">7843</span>.</td></tr>
           <tr><td>--viewer-driver-port PORT</td><td>Port for the driver's control plane, which the page posts to. Default <span class="default">7844</span>.</td></tr>
           <tr><td>--opencode-port PORT</td><td>Port the OpenCode server listens on inside the container. Default <span class="default">7845</span>. Never published outside.</td></tr>
-          <tr><td>--opencode-v2-port PORT</td><td>Port the OpenCode v2 server listens on inside the container. Default <span class="default">7856</span>. A separate program from the one above, with its own port. Never published outside.</td></tr>
           <tr><td>--host-network</td><td>Share the host's network namespace; stop publishing ports and bind to loopback instead. For reaching host services that listen only on <code>127.0.0.1</code>.</td></tr>
         </tbody>
       </table>

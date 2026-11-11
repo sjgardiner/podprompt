@@ -57,6 +57,10 @@ export function createOpenCodeBackend({
   // before releasing the session anyway. Settable only so the test can prove
   // the bound exists without sleeping for the real one.
   approvalDrainMs = 30000,
+  // How long a turn may go without ANY event before it is treated as wedged.
+  // Settable only so the test can prove the human-wait exemption without
+  // sitting through the real ten minutes.
+  silenceLimitMs = 10 * 60 * 1000,
 } = {}) {
   const BASE = baseUrl || "http://127.0.0.1:7856";
   // OpenCode always uses HTTP Basic auth with the username "opencode"; only the
@@ -391,14 +395,22 @@ export function createOpenCodeBackend({
     // or a stall can still end the watch with one outstanding, and the reply
     // has to be allowed to land either way.
     const pendingApprovals = [];
+    // A turn PARKED ON A HUMAN is not a stalled turn. A permission blocks the
+    // tool call and the server then emits nothing at all, so the silence
+    // watchdog below cannot tell "waiting for you" from "wedged" -- and
+    // walking away from a card for ten minutes would have killed the work
+    // that was waiting for the answer. Counted rather than inferred from the
+    // promise array, which keeps its entries after they settle.
+    let awaitingHuman = 0;
     let lastEventAt = Date.now();
-    const SILENCE_LIMIT_MS = 10 * 60 * 1000;
+    const SILENCE_LIMIT_MS = silenceLimitMs;
     const idleWatch = setInterval(() => {
+      if (awaitingHuman > 0) return;
       if (Date.now() - lastEventAt > SILENCE_LIMIT_MS && !ctl.signal.aborted) {
         outcome = { reason: "stalled", error: `no events for ${Math.round(SILENCE_LIMIT_MS / 60000)}m` };
         ctl.abort();
       }
-    }, 30000);
+    }, Math.min(30000, Math.max(50, silenceLimitMs / 4)));
     idleWatch.unref?.();
 
     try {
@@ -522,11 +534,13 @@ export function createOpenCodeBackend({
             // Claude's toolName for the generic "Approve <toolName>?" card.
             // Always offerable: the reply takes a scope, so widening is
             // available for every ask without proposing specific rules.
+            awaitingHuman++;
             pendingApprovals.push(
               requestApproval?.(sessionId, "permission", d.action || "unknown",
                 { resources: d.resources || [] },
                 { canAlwaysAllow: true, externalId: d.id })
-                .then((decision) => (decision?.cancelled ? undefined : replyPermission(realId, d.id, decision))),
+                .then((decision) => (decision?.cancelled ? undefined : replyPermission(realId, d.id, decision)))
+                .finally(() => { awaitingHuman--; }),
             );
             break;
           }
@@ -558,10 +572,12 @@ export function createOpenCodeBackend({
             // things too, and answering one of those as if it were a
             // multiple-choice prompt would put nonsense into it.
             if (form.metadata?.kind !== "question") break;
+            awaitingHuman++;
             pendingApprovals.push(
               requestApproval?.(sessionId, "question", "AskUserQuestion",
                 { questions: questionsFromForm(form) }, { externalId: form.id })
-                .then((answer) => (answer?.cancelled ? undefined : replyForm(realId, form, answer))),
+                .then((answer) => (answer?.cancelled ? undefined : replyForm(realId, form, answer)))
+                .finally(() => { awaitingHuman--; }),
             );
             break;
           }

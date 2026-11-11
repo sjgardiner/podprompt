@@ -761,6 +761,41 @@ function make(extra = {}) {
   check("...and the session is released, not left busy", st.turnInFlight === false, st);
 }
 
+// ── a turn parked on a human is not a stalled turn ────────────────────────
+//
+// A permission BLOCKS the tool call and the server then emits nothing at all,
+// so the silence watchdog cannot tell "waiting for you" from "wedged".
+// Without an exemption, walking away from a card for ten minutes killed the
+// work that was waiting for the answer -- the opposite of what the card is
+// for. Proven with a watchdog shortened to the point where any unexempted
+// wait would trip it several times over.
+{
+  let release;
+  const { b } = make({
+    stateFile: MAP,
+    requestApproval: () => new Promise((r) => { release = r; }),
+    silenceLimitMs: 300,
+  });
+  await b.setModel("oc-park", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-park");
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_park", action: "read", resources: [".env"] } },
+  ];
+  let settled = null;
+  const turn = b.runTurn("oc-park", "x", {}).then((o) => { settled = o; return o; });
+  // Four times the watchdog. An unexempted turn is long dead by now; the
+  // exempted one is still sitting on the card, which is the whole point.
+  await new Promise((r) => setTimeout(r, 1200));
+  check("a turn waiting on a card is still alive well past the stall limit",
+    settled === null, settled);
+  release({ allow: true });
+  await Promise.race([turn, new Promise((r) => setTimeout(r, 3000))]);
+  // Once the human HAS answered, the exemption lifts -- a turn that then goes
+  // quiet is genuinely wedged and must still be reaped.
+  check("...and the watchdog resumes once the answer is in",
+    settled === null || settled.reason === "stalled", settled);
+}
+
 // ── questions (AskUserQuestion) ────────────────────────────────────────────
 //
 // A question is modelled as a FORM with typed fields. The viewer card reads

@@ -155,41 +155,47 @@ function card(id, externalId, sessionId = "sess-1", extra = {}) {
 // event dispatcher cannot be unit-tested in isolation.
 {
   const oc = readFileSync(new URL("./backends/opencode.mjs", import.meta.url), "utf8");
-  for (const evt of ["permission.replied", "question.replied", "question.rejected"]) {
+  for (const evt of ["permission.replied", "permission.rejected", "form.replied", "form.cancelled"]) {
     check(`${evt} is handled`, oc.includes(`"${evt}"`));
   }
   check("every ask records its OpenCode request id",
-    (oc.match(/externalId:/g) || []).length === 4,
+    (oc.match(/externalId:/g) || []).length === 2,
     (oc.match(/externalId:/g) || []).length);
   check("a retracted card is not answered",
-    /cancelled \? undefined :/.test(oc) || /if \(decision\?\.cancelled\) return undefined;/.test(oc));
-  // Replies MUST carry ?directory=. OpenCode resolves a permission by
-  // DIRECTORY, not by session: without it the lookup happens in the server's
-  // default directory and anything else returns PermissionNotFoundError.
-  // Proven live — the identical request that 404'd on two directory-less
-  // routes answered 200 the moment the directory was supplied. The
-  // session-scoped /api/session/{id}/permission/{id}/reply route exists in
-  // the spec but does NOT derive the directory from the session, so it fails
-  // the same way; it is deliberately not used.
-  check("permission replies carry the directory",
-    /\/permission\/\$\{requestID\}\/reply\?directory=/.test(oc));
-  check("question replies carry the directory",
-    /\/question\/\$\{requestID\}\/reply\?directory=/.test(oc));
-  check("the directory is URI-encoded", /reply\?directory=\$\{encodeURIComponent\(dir\)\}/.test(oc));
-  check("the session-scoped reply routes are NOT used",
-    !/\/api\/session\/\$\{realId\}\/(permission|question)\//.test(oc));
-  check("a session's directory is cached rather than refetched each time",
-    /sessionDirs\.set\(/.test(oc) && /async function directoryForSession/.test(oc));
+    (oc.match(/cancelled \? undefined :/g) || []).length === 2,
+    (oc.match(/cancelled \? undefined :/g) || []).length);
+  // Replies are SESSION-scoped, and that is what makes them correct.
+  //
+  // The 1.x server resolved a permission by DIRECTORY, not by session: a
+  // reply without ?directory= looked in the server's default directory and
+  // returned PermissionNotFoundError for anything else, so that backend had
+  // to cache a session->directory map to answer at all. OpenCode 2 scopes
+  // the route to the session and ships location.directory ON the event, so
+  // the whole failure mode is gone. Pinned here because reverting to a bare
+  // /permission/{id}/reply would silently 404 again.
+  check("permission replies are session-scoped",
+    /\/api\/session\/\$\{realId\}\/permission\/\$\{requestID\}\/reply/.test(oc));
+  check("question replies are session-scoped",
+    /\/api\/session\/\$\{realId\}\/form\/\$\{form\.id\}\/reply/.test(oc));
+  check("no directory-scoped reply survives the port", !/reply\?directory=/.test(oc));
+  // Matched on the DEFINITION, not the name: "directoryForSession" also
+  // appears in a comment recording why that cache existed and why it no
+  // longer has to, and a bare name search would fail on the explanation.
+  check("no session->directory cache is needed any more",
+    !/function directoryForSession|sessionDirs\.set\(/.test(oc));
+  // The decision vocabulary is the server's, not ours: "once" | "always" |
+  // "reject". Anything else passes schema validation nowhere and the tool
+  // call stays blocked.
+  check("allow-once and allow-always are distinct replies",
+    /decision\?\.allow \? \(decision\.always \? "always" : "once"\) : "reject"/.test(oc));
 
-  // Assert on the FUNCTION, not the file: "PermissionNotFoundError" appears
-  // in a comment explaining why the route changed, so a file-wide string
-  // search would fail for the wrong reason.
+  // Assert on the FUNCTION, not the file: a reply that fails must NOT also
+  // retract the card, or a transient network error would silently discard a
+  // decision the user already made.
   const replyFn = oc.slice(oc.indexOf("async function replyPermission("));
   const replyBody = replyFn.slice(0, replyFn.indexOf("\n  }") + 4);
   check("a failed reply does NOT retract the card",
     !/resolveApprovalExternally/.test(replyBody), replyBody.slice(-260));
-  check("answered ids stop being tracked",
-    /permissionSessionOf\.delete\(requestID\)/.test(oc));
   check("the driver exposes the retraction hook to backends",
     /resolveApprovalExternally,/.test(src));
 }

@@ -185,28 +185,31 @@ function freshDriver() {
   check("...and was recorded", d.rels().kid.native.toolUseId === "prt_x");
 }
 
-// ── The rescan's wiring, asserted against source ──────────────────────────
+// ── The rescan's wiring ───────────────────────────────────────────────────
+//
+// The rescan itself is GONE with the OpenCode 1.x backend. It existed because
+// that backend streamed a delegate tool part whose id sometimes arrived too
+// late to match, so the finished message was re-fetched to recover the
+// anchor. OpenCode 2 never streams that part to us at all: delegation goes
+// plugin -> driver /delegate, where the driver already knows both ends.
+//
+// What remains is the matcher above, which is driver-side and still correct,
+// and a hook with no consumer. That is recorded here rather than quietly
+// asserted away, because a dormant hook and a working one look identical
+// from the outside.
 {
   const { readFileSync } = await import("node:fs");
-  const oc = readFileSync(new URL("./backends/opencode.mjs", import.meta.url), "utf8");
   const drv = readFileSync(new URL("./driver.mjs", import.meta.url), "utf8");
 
-  check("the driver exposes the pending count", /pendingDelegateAnchorCount,/.test(drv));
-  check("the backend rescans the finished message",
-    /pendingDelegateAnchorCount\?\.\(sessionId\) > 0/.test(oc));
-  // Gated, so a healthy turn issues no HTTP request at all.
-  const fin = oc.slice(oc.indexOf("Last chance to recover a delegation anchor"));
-  const block = fin.slice(0, fin.indexOf("turnWaiters.delete"));
-  check("the message fetch happens only when something is unmatched",
-    block.indexOf("pendingDelegateAnchorCount") < block.indexOf("/message"), block.slice(0, 120));
-  check("it reuses the same matcher rather than a second one",
-    /noteDelegateAnchor\?\.\(sessionId, part\)/.test(block));
-  check("it runs before the waiter is torn down",
-    oc.indexOf("Last chance to recover") < oc.indexOf("turnWaiters.delete(realId)"));
-  // A failed rescan leaves the anchor exactly where it already was. Failing
-  // a turn over a best-effort diagnostic would be a worse bug than the one
-  // being fixed.
-  check("a failed rescan cannot fail the turn", /rescan failed for/.test(block));
+  check("the driver still exposes the pending count to backends",
+    /pendingDelegateAnchorCount,/.test(drv));
+  // KNOWN GAP, deliberately visible: with no backend calling it, an OpenCode
+  // delegation has no tool-call anchor, so its "Delegated" label has nothing
+  // in the parent transcript to jump to. The delegation itself is unaffected.
+  const backends = ["./backends/claude-code.mjs", "./backends/opencode.mjs"]
+    .map((f) => readFileSync(new URL(f, import.meta.url), "utf8"));
+  check("no backend currently consumes the anchor hook",
+    backends.every((s) => !/pendingDelegateAnchorCount/.test(s)));
 }
 
 console.log(`delegation anchors: ${pass} passed, ${fail} failed`);

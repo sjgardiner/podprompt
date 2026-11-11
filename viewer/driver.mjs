@@ -72,7 +72,6 @@ import nodePath from "node:path";
 import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
-import { createOpenCodeV2Backend } from "./backends/opencode-v2.mjs";
 import {
   createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
 } from "./autonomy.mjs";
@@ -86,9 +85,6 @@ function parseArgs(argv) {
   const args = {
     port: 7844, viewerPort: 7843, cwd: "/workspace",
     opencodePort: 7845,
-    // OpenCode v2 is a SEPARATE product (@opencode/cli, installed as
-    // `opencode2`), not a newer opencode-ai. Its own server, its own port.
-    opencodeV2Port: 7856,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -96,7 +92,6 @@ function parseArgs(argv) {
     else if (a === "--viewer-port") args.viewerPort = Number(argv[++i]);
     else if (a === "--cwd") args.cwd = argv[++i];
     else if (a === "--opencode-port") args.opencodePort = Number(argv[++i]);
-    else if (a === "--opencode-v2-port") args.opencodeV2Port = Number(argv[++i]);
   }
   return args;
 }
@@ -497,7 +492,17 @@ function noteRateLimitInfo(backendId, info) {
 //
 // Defined up here rather than beside PODPROMPT_TOKEN because the backend map
 // below closes over it, and a `const` is not hoisted into use.
-const OPENCODE_V2_PASSWORD = randomUUID();
+// OpenCode always uses HTTP Basic auth with the username "opencode"; only
+// the password is settable, and OPENCODE_SERVER_USERNAME does not exist in
+// the binary at all.
+const OPENCODE_SERVER_PASSWORD = randomUUID();
+
+// The binary is `opencode2`: OpenCode 2.x ships as @opencode/cli, a different
+// npm package from the 1.x `opencode-ai`, and BOTH declare a bin named
+// `opencode`. The image installs 2.x under its own prefix and symlinks it
+// here so npm never has to arbitrate that collision. One constant, so the
+// day the name settles there is a single line to change.
+const OPENCODE_BIN = "opencode2";
 
 const backendHooks = {
   cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval,
@@ -527,24 +532,21 @@ const backendHooks = {
 };
 const backends = {
   "claude-code": createClaudeCodeBackend(backendHooks),
-  // driver.mjs itself spawns and supervises a headless `opencode serve`
-  // (see the process-ownership block after this map) regardless of which
-  // backend is the default — baseUrl here just needs to agree with the port
-  // that child is started on (--opencode-port).
+  // "opencode" IS OpenCode 2. The 1.x backend is gone; there is no second
+  // OpenCode and nothing in the UI, the CLI or the docs says "v2", because
+  // from a user's point of view there is only one and this is it.
+  //
+  // driver.mjs itself spawns and supervises the headless `opencode2 serve`
+  // this talks to (see the process-ownership block after this map), so
+  // baseUrl only needs to agree with the port that child is started on.
   "opencode": createOpenCodeBackend({
-    noteDelegateAnchor, noteRealSessionId,
-    ...backendHooks, baseUrl: `http://127.0.0.1:${args.opencodePort}` }),
-  // v2 is additive: an existing session keeps whatever backend it was created
-  // with, so registering this changes nothing until a session asks for it.
-  // It is the only backend that can take mail into a turn already running on
-  // the OpenCode side -- v1 advertises `delivery` and silently drops it.
-  "opencode-v2": createOpenCodeV2Backend({
     ...backendHooks,
-    baseUrl: `http://127.0.0.1:${args.opencodeV2Port}`,
-    password: OPENCODE_V2_PASSWORD,
-    // clientId -> the id the v2 server minted. Durable because the mapping
+    baseUrl: `http://127.0.0.1:${args.opencodePort}`,
+    password: OPENCODE_SERVER_PASSWORD,
+    // clientId -> the id the server minted. Durable because the mapping
     // cannot be recomputed: see that backend's header for why the server has
-    // to mint it.
+    // to mint it. The filename is unchanged from when this backend was
+    // registered as "opencode-v2", so existing sessions keep working.
     stateFile: nodePath.join(PODPROMPT_STATE_DIR, "viewer-opencode-v2-sessions.json"),
   }),
 };
@@ -3234,17 +3236,26 @@ function writeOpencodeConfigDoc() {
 
 function spawnOpencode() {
   const args_ = ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodePort)];
-  console.log(`[driver] spawning opencode serve on port ${args.opencodePort}`);
+  console.log(`[driver] spawning ${OPENCODE_BIN} serve on port ${args.opencodePort}`);
   installOpencodePlugin();
-  const child = spawn("opencode", args_, {
+  const haveConfigDoc = writeOpencodeConfigDoc();
+  const child = spawn(OPENCODE_BIN, args_, {
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      // The server generates a fresh password per start and prints it, which
+      // nothing here could discover — so a password we already know is
+      // injected instead. Minted per driver start, never written to disk.
+      OPENCODE_SERVER_PASSWORD,
       // Both of these are what switch the plugin on. Without them it
       // registers nothing, which is what keeps the user's own OpenCode
       // unaffected by a file PodPrompt put in their config directory.
       PODPROMPT_DRIVER_URL: `http://127.0.0.1:${args.port}`,
       PODPROMPT_TOKEN,
+      // Declares podprompt-message/-delegate as "ask" and points at the
+      // messaging instructions. MERGES with the user's config; see
+      // writeOpencodeConfigDoc.
+      ...(haveConfigDoc ? { OPENCODE_CONFIG: OPENCODE_CONFIG_DOC } : {}),
     },
   });
   opencodeChild = child;
@@ -3320,6 +3331,10 @@ function startOpencodeLivenessPoll() {
     try {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), OPENCODE_LIVENESS_TIMEOUT_MS);
+      // /doc deliberately, not an /api/* route: every /api route needs HTTP
+      // Basic auth, but /doc is the web UI and answers 200 unauthenticated
+      // (verified). So liveness never depends on the password being right,
+      // which would turn a credential mistake into an endless kill/respawn.
       const res = await fetch(`http://127.0.0.1:${args.opencodePort}/doc`, { method: "HEAD", signal: ctl.signal });
       clearTimeout(timer);
       if (res.ok) {
@@ -3378,76 +3393,6 @@ setTimeout(() => {
 ensureOpencodeRunning();
 startOpencodeLivenessPoll();
 
-// ── the OpenCode v2 child ────────────────────────────────────────────────
-// A SECOND, separate server: `opencode2` is @opencode/cli 2.x, a different
-// product from the opencode-ai 1.x child above, with its own API, its own
-// database and its own port. The Dockerfile installs both side by side.
-//
-// Deliberately MUCH simpler supervision than v1's. v1 has crash detection,
-// backoff and a liveness probe because every session depended on it. Nothing
-// depends on this one yet — it serves only sessions explicitly created on the
-// "opencode-v2" backend — so the failure mode of "it did not start" is a
-// backend that reports errors, which the /sessions path already treats as an
-// expected, log-once condition rather than a fault.
-//
-// Capped restarts, and no restart at all for a binary that is not installed:
-// an uninstalled `opencode2` would otherwise respawn forever and fill the log
-// with the same line.
-let opencodeV2Child = null;
-let opencodeV2Restarts = 0;
-let opencodeV2Unavailable = false;
-const OPENCODE_V2_MAX_RESTARTS = 3;
-
-function spawnOpencodeV2() {
-  if (opencodeV2Unavailable || opencodeV2Child) return;
-  console.log(`[driver] spawning opencode2 serve on port ${args.opencodeV2Port}`);
-  installOpencodePlugin();
-  const haveConfigDoc = writeOpencodeConfigDoc();
-  const child = spawn("opencode2", ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodeV2Port)], {
-    stdio: ["ignore", "ignore", "pipe"],
-    env: {
-      ...process.env,
-      OPENCODE_SERVER_PASSWORD: OPENCODE_V2_PASSWORD,
-      // These two are what switch the plugin on. Without them it registers
-      // nothing, which is what keeps the user's own OpenCode unaffected by a
-      // file PodPrompt put in their config directory.
-      PODPROMPT_DRIVER_URL: `http://127.0.0.1:${args.port}`,
-      PODPROMPT_TOKEN,
-      ...(haveConfigDoc ? { OPENCODE_CONFIG: OPENCODE_CONFIG_DOC } : {}),
-    },
-  });
-  opencodeV2Child = child;
-  let stderrTail = [];
-  child.stderr.on("data", (d) => {
-    for (const line of d.toString().split("\n")) {
-      const t = line.trim();
-      if (t) { stderrTail.push(t); if (stderrTail.length > 10) stderrTail.shift(); }
-    }
-  });
-  child.on("error", (err) => {
-    // ENOENT means the binary is absent — an older image, or a build without
-    // the v2 install line. That is a configuration fact, not a crash, so it
-    // is reported once and never retried.
-    opencodeV2Child = null;
-    opencodeV2Unavailable = true;
-    console.error(`[driver] opencode2 unavailable (${err.code || err.message});`
-      + " the opencode-v2 backend will not work until the image provides it");
-  });
-  child.on("exit", (code, signal) => {
-    if (opencodeV2Child === child) opencodeV2Child = null;
-    if (opencodeV2Unavailable) return;
-    console.error(`[driver] opencode2 exited (code=${code} signal=${signal})`
-      + (stderrTail.length ? `: ${stderrTail.slice(-3).join(" | ")}` : ""));
-    if (++opencodeV2Restarts > OPENCODE_V2_MAX_RESTARTS) {
-      opencodeV2Unavailable = true;
-      console.error(`[driver] opencode2 failed ${OPENCODE_V2_MAX_RESTARTS} times; leaving it down`);
-      return;
-    }
-    setTimeout(spawnOpencodeV2, 2000 * opencodeV2Restarts).unref?.();
-  });
-}
-spawnOpencodeV2();
-process.on("exit", () => { try { opencodeV2Child?.kill(); } catch { /* already gone */ } });
 
 // Eagerly warm each backend's model/command cache right now, rather than
 // waiting for the first browser-triggered call. For claude-code, listModels()

@@ -1,6 +1,6 @@
 // Unit tests for the OpenCode v2 backend.
 //
-// Run: node viewer/opencode-v2.test.mjs
+// Run: node viewer/opencode.test.mjs
 //
 // Hermetic: a tiny fake v2 server stands in for `opencode2 serve`, so this
 // runs without that binary installed and without touching anything live. The
@@ -15,7 +15,7 @@
 // session busy forever with no way back.
 
 import { createServer } from "node:http";
-import { createOpenCodeV2Backend } from "./backends/opencode-v2.mjs";
+import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -105,7 +105,7 @@ try { (await import("node:fs")).rmSync(MAP); } catch { /* fine */ }
 
 function make(extra = {}) {
   const bubbles = [];
-  const b = createOpenCodeV2Backend({
+  const b = createOpenCodeBackend({
     cwdRoot: "/tmp", baseUrl: `http://127.0.0.1:${PORT}`, password: PASSWORD,
     broadcast: (s, role, text, id) => bubbles.push({ role, text }),
     broadcastStatus: () => {},
@@ -126,19 +126,19 @@ function make(extra = {}) {
   const { b } = make({ stateFile: MAP });
   state.clientSuppliedIds.length = 0;
   const cid = "oc2-map-a";
-  check("a fresh client id has no real id yet", b._ids.toV2(cid) === null);
+  check("a fresh client id has no real id yet", b._ids.toReal(cid) === null);
 
-  const real = await b.setModel(cid, "opencode/big-pickle").then(() => b._ids.toV2(cid));
+  const real = await b.setModel(cid, "opencode/big-pickle").then(() => b._ids.toReal(cid));
   check("driving a session mints a real id", typeof real === "string" && real.startsWith("ses_"), real);
   check("...and the client NEVER supplies one",
     state.clientSuppliedIds.length === 0, state.clientSuppliedIds);
-  check("the map resolves both ways", b._ids.fromV2(real) === cid);
-  check("an unknown real id resolves to null", b._ids.fromV2("ses_somebodyelse") === null);
+  check("the map resolves both ways", b._ids.toClient(real) === cid);
+  check("an unknown real id resolves to null", b._ids.toClient("ses_somebodyelse") === null);
 
   // Durability: the mapping cannot be recomputed, so losing it loses the
   // session. A second backend over the same file must see it.
   const { b: b2 } = make({ stateFile: MAP });
-  check("the map survives a restart", b2._ids.toV2(cid) === real);
+  check("the map survives a restart", b2._ids.toReal(cid) === real);
 }
 
 // ── a successful turn ──────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ function make(extra = {}) {
   ];
   const { b, bubbles } = make();
   const sid = "oc2-happy";
-  state.events.forEach((e) => { if (e.data) e.data.sessionID = b._ids.toV2(sid); });
+  state.events.forEach((e) => { if (e.data) e.data.sessionID = b._ids.toReal(sid); });
   const st = { cwd: "/tmp" };
   const outcome = await b.runTurn(sid, "hello", st);
   check("a completed turn reports completed", outcome.reason === "completed", outcome);
@@ -174,9 +174,9 @@ function make(extra = {}) {
   const { b } = make();
   const sid = "oc2-fail";
   state.events = [
-    { type: "session.execution.started", data: { sessionID: b._ids.toV2(sid) } },
-    { type: "session.step.failed", data: { sessionID: b._ids.toV2(sid), error: { type: "provider.free-limit", message: "Free usage limit reached." } } },
-    { type: "session.execution.failed", data: { sessionID: b._ids.toV2(sid), error: { type: "provider.free-limit", message: "Free usage limit reached." } } },
+    { type: "session.execution.started", data: { sessionID: b._ids.toReal(sid) } },
+    { type: "session.step.failed", data: { sessionID: b._ids.toReal(sid), error: { type: "provider.free-limit", message: "Free usage limit reached." } } },
+    { type: "session.execution.failed", data: { sessionID: b._ids.toReal(sid), error: { type: "provider.free-limit", message: "Free usage limit reached." } } },
     // deliberately NO session.idle — this is what the real server does
   ];
   const st = {};
@@ -196,8 +196,8 @@ function make(extra = {}) {
   const { b } = make();
   const sid = "oc2-int";
   state.events = [
-    { type: "session.execution.started", data: { sessionID: b._ids.toV2(sid) } },
-    { type: "session.execution.interrupted", data: { sessionID: b._ids.toV2(sid) } },
+    { type: "session.execution.started", data: { sessionID: b._ids.toReal(sid) } },
+    { type: "session.execution.interrupted", data: { sessionID: b._ids.toReal(sid) } },
   ];
   const st = {};
   const outcome = await Promise.race([
@@ -224,13 +224,13 @@ function make(extra = {}) {
   const last = state.prompts[state.prompts.length - 1];
   check("...posted with delivery \"steer\", not as a fresh prompt",
     last?.delivery === "steer", last);
-  check("...to the right session", last?.sid === b._ids.toV2(sid));
+  check("...to the right session", last?.sid === b._ids.toReal(sid));
   check("a session we have never driven is refused, not invented",
     (await b.injectIntoTurn("oc2-never-seen", { turnInFlight: true }, "hi")) === false);
 
   // A refusal must be reported, never thrown: the driver re-queues on false,
   // and an exception would escape into the delivery path instead.
-  const dead = createOpenCodeV2Backend({
+  const dead = createOpenCodeBackend({
     cwdRoot: "/tmp", baseUrl: "http://127.0.0.1:1", password: "x",
     broadcast() {}, broadcastStatus() {}, broadcastUserPrompt() {},
   });
@@ -262,7 +262,7 @@ function make(extra = {}) {
     row?.inFlight === true, row);
   check("...and a pending approval is reported too", row?.pendingKind === "permission", row);
   check("every row names its backend, or the session becomes unroutable",
-    sessions.every((s) => s.backend === "opencode-v2"), sessions.map((s) => s.backend));
+    sessions.every((s) => s.backend === "opencode"), sessions.map((s) => s.backend));
   check("sessions belonging to other clients are filtered out",
     sessions.every((s) => typeof s.sessionId === "string" && !s.sessionId.startsWith("ses")));
 
@@ -273,6 +273,15 @@ function make(extra = {}) {
 
   check("resolveValidCwd keeps paths under the root", b.resolveValidCwd("/tmp/sub") === "/tmp/sub");
   check("...and refuses an escape", b.resolveValidCwd("/etc") === null);
+  check("...the root itself is allowed", b.resolveValidCwd("/tmp") === "/tmp");
+  // THE CLASSIC startsWith TRAP, inherited from the backend this replaced
+  // and caught by porting its test: "/tmp-other" starts with "/tmp" but is a
+  // SIBLING, not a child. A bare prefix comparison accepts it and the
+  // session runs in a foreign tree.
+  check("a sibling sharing the root's prefix is refused",
+    b.resolveValidCwd("/tmp-other/x") === null, b.resolveValidCwd("/tmp-other/x"));
+  check("a relative path resolves under the root",
+    b.resolveValidCwd("sub/dir") === "/tmp/sub/dir", b.resolveValidCwd("sub/dir"));
 }
 
 // ── permissions ────────────────────────────────────────────────────────────
@@ -287,7 +296,7 @@ function make(extra = {}) {
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: false }) });
   await b.setModel("oc2-perm", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm");
+  const real = b._ids.toReal("oc2-perm");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "session.execution.started", data: { sessionID: real } },
@@ -304,7 +313,7 @@ function make(extra = {}) {
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: true }) });
   await b.setModel("oc2-perm-always", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm-always");
+  const real = b._ids.toReal("oc2-perm-always");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_2", action: "read", resources: [".env"] } },
@@ -317,7 +326,7 @@ function make(extra = {}) {
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: false }) });
   await b.setModel("oc2-perm-deny", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm-deny");
+  const real = b._ids.toReal("oc2-perm-deny");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_3", action: "podprompt-message", resources: ["@x"] } },
@@ -338,7 +347,7 @@ function make(extra = {}) {
     autoApproveForSession: () => true,
   });
   await b.setModel("oc2-perm-auto", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm-auto");
+  const real = b._ids.toReal("oc2-perm-auto");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_4", action: "read", resources: [".env"] } },
@@ -367,7 +376,7 @@ function make(extra = {}) {
     },
   });
   await b.setModel("oc2-perm-ext", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm-ext");
+  const real = b._ids.toReal("oc2-perm-ext");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_5", action: "read", resources: [".env"] } },
@@ -393,7 +402,7 @@ function make(extra = {}) {
     approvalDrainMs: 200,
   });
   await b.setModel("oc2-perm-stuck", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-perm-stuck");
+  const real = b._ids.toReal("oc2-perm-stuck");
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_6", action: "read", resources: [".env"] } },
     { type: "session.execution.interrupted", data: { sessionID: real } },
@@ -435,7 +444,7 @@ function make(extra = {}) {
     },
   });
   await b.setModel("oc2-form", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-form");
+  const real = b._ids.toReal("oc2-form");
   form.sessionID = real;
   state.formReplies.length = 0;
   // NESTED, exactly as the server sends it. permission.asked puts its
@@ -466,7 +475,7 @@ function make(extra = {}) {
   let asked = 0;
   const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
   await b.setModel("oc2-form-other", "opencode/big-pickle");
-  const real = b._ids.toV2("oc2-form-other");
+  const real = b._ids.toReal("oc2-form-other");
   state.formReplies.length = 0;
   state.events = [
     { type: "form.created", data: { form: { sessionID: real, id: "frm_2", metadata: { kind: "login" }, fields: [] } } },
@@ -484,7 +493,7 @@ function make(extra = {}) {
   let asked = 0;
   const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
   await b.setModel("oc2-form-mine", "opencode/big-pickle");
-  const mine = b._ids.toV2("oc2-form-mine");
+  const mine = b._ids.toReal("oc2-form-mine");
   state.formReplies.length = 0;
   state.events = [
     { type: "form.created", data: { form: {
@@ -551,6 +560,6 @@ function make(extra = {}) {
 }
 
 server.close();
-console.log(`\nopencode-v2.test.mjs: ${pass} passed, ${fail} failed`);
+console.log(`\nopencode.test.mjs: ${pass} passed, ${fail} failed`);
 for (const f of failures) console.log(`  FAIL  ${f}`);
 process.exit(fail === 0 ? 0 : 1);

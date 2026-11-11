@@ -459,13 +459,19 @@ const MIN = 60 * 1000;
   check("claude-code stashes rate_limit_event", cc.includes('"rate_limit_event"'));
   check("...and handles api_retry", cc.includes('"api_retry"'));
 
-  check("opencode handles session.status for a parent", oc.includes('evt.type === "session.status"'));
-  check("...and reads the retry horizon", /st\.next/.test(oc));
-  check("...and handles session.error for a parent",
-    (oc.match(/evt\.type === "session\.error"/g) || []).length >= 2,
-    (oc.match(/evt\.type === "session\.error"/g) || []).length);
-  check("...and reads isRetryable", oc.includes("isRetryable"));
-  check("...and the provider's response headers", oc.includes("responseHeaders"));
+  // OpenCode's side of this is thinner than Claude Code's, and deliberately
+  // so for now. The 1.x server published a retry horizon and the provider's
+  // response headers on session.status/session.error, and that backend read
+  // both. OpenCode 2 reports a failure as session.execution.failed carrying
+  // an error type and message, with no horizon attached — so classification
+  // happens from the message in classifyFailure (a free-tier exhaustion does
+  // come back as rate_limited, verified live) but there is nothing richer to
+  // read yet. Asserted at the level that is actually true, rather than
+  // asserting a horizon that is not there.
+  check("opencode reports a failed turn rather than hanging",
+    oc.includes('case "session.execution.failed"'));
+  check("...and carries the provider's error through to classification",
+    /reason: "error", error: d\.error\?\.message/.test(oc));
 
   check("the driver classifies failed turns", /classifyFailure\(\{/.test(driver));
   check("...and records the category", /outcome\.category = verdict\.category/.test(driver));

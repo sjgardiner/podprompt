@@ -150,8 +150,16 @@ function bodyOf(name) {
   check("...and is distinguishable from a plain immediate delivery",
     folded !== now, [folded, now]);
   check("...and from a queued one", folded !== queued, [folded, queued]);
-  check("a queued message explains WHEN it will be seen",
-    /current turn ends/.test(queued), queued);
+  // NOT a cause. Three independent gates can queue a message and only one of
+  // them is "they are busy"; the common case is a session sitting idle while
+  // the user watches it. The old wording named the turn specifically, which
+  // was usually false and sent the reader looking for one that did not exist.
+  check("a queued message says it is not delivered yet",
+    /not delivered yet/.test(queued), queued);
+  check("...without asserting a turn that may not exist",
+    !/current turn/.test(queued), queued);
+  check("...and tells the sender not to resend",
+    /do not resend/i.test(queued), queued);
   check("all three still report the remaining budget",
     [folded, now, queued].every((s) => /7 steps left/.test(s)));
 }

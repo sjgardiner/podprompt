@@ -2997,10 +2997,19 @@ function describeReceipt(receipt, to) {
     // the recipient was BUSY and got the message anyway, which is the exact
     // case a model would otherwise read as "queued, they have not seen it"
     // and start repeating itself about.
+    // The queued wording DOES NOT NAME A CAUSE, deliberately. Three
+    // independent gates can hold a message -- the autonomy budget, the
+    // watching hold, and the user's approval -- and only one of them is "they
+    // are busy". It used to say "when their current turn ends", which is a
+    // specific claim and usually the wrong one: the common case is a session
+    // sitting idle while the user watches it, where there is no turn at all
+    // and the release is the user clicking Deliver. Observed live, and it
+    // sent the reader looking for a turn that did not exist.
     const where = receipt.folded
       ? "delivered into the turn they are already running — they will see it at their next step"
       : receipt.delivered ? "delivered now"
-      : "queued (they will see it when their current turn ends)";
+      : "queued — not delivered yet. They may be busy, or the user may be holding it;"
+        + " it goes through on its own, so do not resend";
     const left = receipt.remaining === null ? "no step limit" : `${receipt.remaining} steps left`;
     return `Message ${where} to ${to}. ${left}.`;
   }

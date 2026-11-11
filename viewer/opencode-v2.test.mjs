@@ -279,6 +279,43 @@ function make(extra = {}) {
     h[0]?.text === "first" && h[1]?.text === "second", h.map((x) => x.text));
 }
 
+// ── history: the REAL 2.2.7 wire shape ─────────────────────────────────────
+// The block above encodes the shape this backend was *written against*, which
+// is the v1 shape. A live 2.2.7 server does not send that, and the mismatch is
+// silent: every field reads back undefined, so the viewer showed an EMPTY
+// transcript for every v2 session rather than a broken one. These rows are
+// copied verbatim from a real server, so the assumption cannot drift back.
+{
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-real", "opencode/big-pickle");
+  state.messages = [ // newest first, exactly as the server returns them
+    { id: "m4", type: "idle", content: null, time: { created: 40 } },
+    { id: "m3", type: "assistant", time: { created: 30 },
+      model: { providerID: "alcf-minerva", id: "beam-1.0-bf16" },
+      content: [
+        { type: "reasoning", text: "thinking out loud", id: "r1" },
+        { type: "text", text: "the answer", id: "t1" },
+      ] },
+    { id: "m2", type: "user", text: "the question", time: { created: 20 } },
+    { id: "m1", type: "model-switched", content: null, time: { created: 10 } },
+  ];
+  const h = await b.getSessionHistory("oc2-real");
+  check("a real v2 transcript is not empty (parts live under `content`)",
+    h.length === 3, h);
+  check("user text is read from the row itself, which has no parts array",
+    h[0]?.role === "user" && h[0]?.text === "the question", h[0]);
+  check("assistant reasoning becomes a thinking row",
+    h[1]?.role === "thinking" && h[1]?.text === "thinking out loud", h[1]);
+  check("assistant text becomes an assistant row",
+    h[2]?.role === "assistant" && h[2]?.text === "the answer", h[2]);
+  check("a {providerID,id} model is labelled provider/id for the viewer",
+    h[2]?.model === "alcf-minerva/beam-1.0-bf16", h[2]?.model);
+  check("rows carry their timestamp, so the viewer can order and date them",
+    h[0]?.ts === 20 && h[2]?.ts === 30, h.map((x) => x.ts));
+  check("non-message rows (idle, model-switched) are dropped, not rendered",
+    h.every((x) => ["user", "assistant", "thinking", "tool"].includes(x.role)), h.map((x) => x.role));
+}
+
 server.close();
 console.log(`\nopencode-v2.test.mjs: ${pass} passed, ${fail} failed`);
 for (const f of failures) console.log(`  FAIL  ${f}`);

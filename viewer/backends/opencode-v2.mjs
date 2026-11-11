@@ -469,23 +469,40 @@ export function createOpenCodeV2Backend({
       const out = [];
       for (const m of ordered) {
         const info = m.info || m;
-        const parts = Array.isArray(m.parts) ? m.parts : [];
+        // A v2 row is NOT shaped like a v1 one, and the difference is silent:
+        // every field we used to read simply comes back undefined, so the
+        // transcript renders empty rather than wrong. Measured against 2.2.7:
+        //   assistant -> { type, content: [{type:"text"|"reasoning"|"tool"}],
+        //                  model: {providerID, id}, time }
+        //   user      -> { type, text, time }   // no parts array at all
+        // `parts`/`payload` are kept as fallbacks so this keeps working if a
+        // later version converges on the v1 shape.
+        const parts = Array.isArray(m.parts) ? m.parts
+          : Array.isArray(m.content) ? m.content
+          : [];
         const type = m.type || info.role;
         const body = (p) => p.text || "";
+        // v2 labels a model as {providerID, id}; the viewer wants "provider/id".
+        const modelLabel = info.modelID
+          || (info.model && typeof info.model === "object"
+            ? [info.model.providerID, info.model.id].filter(Boolean).join("/") || null
+            : info.model || null);
         if (type === "user") {
           const t = parts.filter((p) => p.type === "text").map(body).join("\n")
+            || (typeof m.text === "string" ? m.text : "")
             || (typeof m.payload?.text === "string" ? m.payload.text : "");
           if (t.trim()) out.push({ role: "user", text: t, id: info.id || randomUUID(), ts: info.time?.created || null, model: null });
           continue;
         }
         if (type !== "assistant") continue;
         for (const p of parts) {
+          const ts = info.time?.created || null;
           if (p.type === "text" && p.text?.trim()) {
-            out.push({ role: "assistant", text: p.text, id: p.id || randomUUID(), ts: null, model: info.modelID || null });
+            out.push({ role: "assistant", text: p.text, id: p.id || randomUUID(), ts, model: modelLabel });
           } else if (p.type === "reasoning" && p.text?.trim()) {
-            out.push({ role: "thinking", text: p.text, id: p.id || randomUUID(), ts: null, model: info.modelID || null });
+            out.push({ role: "thinking", text: p.text, id: p.id || randomUUID(), ts, model: modelLabel });
           } else if (p.type === "tool") {
-            out.push({ role: "tool", text: summarizeTool(p), id: p.id || randomUUID(), ts: null, model: info.modelID || null });
+            out.push({ role: "tool", text: summarizeTool(p), id: p.id || randomUUID(), ts, model: modelLabel });
           }
         }
       }

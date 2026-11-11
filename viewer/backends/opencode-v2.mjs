@@ -65,6 +65,11 @@ import { readFileSync, writeFileSync, renameSync } from "node:fs";
 export function createOpenCodeV2Backend({
   cwdRoot, broadcast, broadcastStatus, broadcastUserPrompt,
   messaging, baseUrl, password, stateFile,
+  requestApproval, autoApproveForSession, resolveApprovalExternally,
+  // How long a finished turn waits for an outstanding approval reply to land
+  // before releasing the session anyway. Settable only so the test can prove
+  // the bound exists without sleeping for the real one.
+  approvalDrainMs = 30000,
 } = {}) {
   const BASE = baseUrl || "http://127.0.0.1:7856";
   // v2 always uses HTTP Basic auth with the username "opencode"; only the
@@ -259,6 +264,11 @@ export function createOpenCodeV2Backend({
     // the session would be busy forever with no way back. So the watch is
     // also bounded by silence: not by total duration, which would kill
     // legitimate long work, but by how long since anything at all arrived.
+    // Cards raised during this turn. A permission BLOCKS the tool call, so
+    // the turn cannot reach idle until each one is answered -- but an abort
+    // or a stall can still end the watch with one outstanding, and the reply
+    // has to be allowed to land either way.
+    const pendingApprovals = [];
     let lastEventAt = Date.now();
     const SILENCE_LIMIT_MS = 10 * 60 * 1000;
     const idleWatch = setInterval(() => {
@@ -307,6 +317,55 @@ export function createOpenCodeV2Backend({
             broadcast(sessionId, "tool", `*(${d.tool || "tool"} failed: ${d.error?.message || "unknown"})*`,
               d.callID || randomUUID(), null, state.model || null);
             break;
+          case "permission.asked": {
+            // Auto-approve is checked here rather than by the card, and it
+            // walks up the parent chain: a delegated session's own tool calls
+            // must inherit the flag, or unattended delegation parks on its
+            // first gated action and sits there until someone ticks a box.
+            if (state.autoApprove || autoApproveForSession?.(sessionId)) {
+              pendingApprovals.push(replyPermission(v2id, d.id, { allow: true }));
+              break;
+            }
+            // d.action is the ruleset key being asked about ("read",
+            // "podprompt-message", ...) — the closest v2 equivalent of
+            // Claude's toolName for the generic "Approve <toolName>?" card.
+            // Always offerable: the reply takes a scope, so widening is
+            // available for every ask without proposing specific rules.
+            pendingApprovals.push(
+              requestApproval?.(sessionId, "permission", d.action || "unknown",
+                { resources: d.resources || [] },
+                { canAlwaysAllow: true, externalId: d.id })
+                .then((decision) => (decision?.cancelled ? undefined : replyPermission(v2id, d.id, decision))),
+            );
+            break;
+          }
+          // Answered or withdrawn somewhere else -- the user replying in the
+          // OpenCode TUI, or the server giving up on it. Retract our card
+          // rather than leaving one the model is no longer waiting on;
+          // replying to a dead request is what produces a 404. Harmless for
+          // our OWN replies, which emit this too: by then the card is gone
+          // and the lookup finds nothing.
+          case "permission.replied":
+          case "permission.rejected":
+          case "form.replied":
+          case "form.cancelled":
+            if (d.id) {
+              resolveApprovalExternally?.(d.id,
+                "This request was already answered or withdrawn in OpenCode.");
+            }
+            break;
+          case "form.created": {
+            // Only a question form is a question; v2 uses forms for other
+            // things too, and answering one of those as if it were a
+            // multiple-choice prompt would put nonsense into it.
+            if (d.metadata?.kind !== "question") break;
+            pendingApprovals.push(
+              requestApproval?.(sessionId, "question", "AskUserQuestion",
+                { questions: questionsFromForm(d) }, { externalId: d.id })
+                .then((answer) => (answer?.cancelled ? undefined : replyForm(v2id, d, answer))),
+            );
+            break;
+          }
           // EVERY terminal event must end the watch, not just the happy one.
           // Measured against the real server: a turn that fails emits
           // session.execution.failed and then NOTHING -- no session.idle
@@ -336,11 +395,90 @@ export function createOpenCodeV2Backend({
       }
     } finally {
       clearInterval(idleWatch);
+      // Settle, never reject: these are reply round-trips that already log
+      // their own failures, and one of them throwing must not turn a
+      // finished turn into a failed one.
+      //
+      // BOUNDED, because reaching here with a card still open is already
+      // anomalous: a permission blocks the tool call, so a turn that answered
+      // its cards cannot be at this point with one outstanding. What can is a
+      // turn that was aborted or stalled underneath an open card -- and that
+      // card may never be answered by anyone. Waiting on it forever would
+      // leave turnInFlight set and the session busy with no way back, which
+      // is the same failure the silence watchdog above exists to prevent.
+      if (pendingApprovals.length) {
+        const settled = await Promise.race([
+          Promise.allSettled(pendingApprovals).then(() => true),
+          new Promise((r) => setTimeout(() => r(false), approvalDrainMs)),
+        ]);
+        if (!settled) {
+          console.error(`[opencode-v2] ${sessionId}: turn ended with an unanswered approval;`
+            + " releasing the session rather than waiting on it");
+        }
+      }
       state.abortController = null;
       state.turnInFlight = false;
     }
     state.turnOutcome = outcome;
     return outcome;
+  }
+
+  // ── permissions and questions ───────────────────────────────────────────
+  // v2 blocks the tool call and emits an event; if nobody answers, the turn
+  // dies with an unexplained tool failure rather than hanging visibly. So a
+  // dropped event here is worse than an error -- it looks like the model
+  // failed at something, with no card and no reason.
+  //
+  // Both routes are SESSION-scoped (/api/session/{id}/permission/{req}/reply),
+  // and the event carries location.directory with it. v1 had neither: a bare
+  // reply resolved against the server's default directory and silently found
+  // nothing, which is why that backend caches a directoryForSession map. That
+  // whole class of bug cannot occur here, so nothing models it.
+  async function replyPermission(realId, requestID, decision) {
+    // v2's reply vocabulary is exactly v1's -- "once" | "always" | "reject" --
+    // so the viewer's existing decision shape maps over unchanged.
+    const reply = decision?.allow ? (decision.always ? "always" : "once") : "reject";
+    try {
+      await api(`/api/session/${realId}/permission/${requestID}/reply`,
+        { method: "POST", body: { decision: reply }, timeoutMs: 5000 });
+    } catch (e) {
+      console.error("[opencode-v2] failed to reply to permission:", e.message);
+    }
+  }
+
+  // A v2 "question" is a FORM: typed fields, each with its own options and a
+  // `custom` flag for free text. The viewer's question card reads Claude's
+  // QuestionInfo[] shape, so the fields are presented in that shape and the
+  // answer is mapped back by field key.
+  function questionsFromForm(form) {
+    return (form.fields || []).map((f) => ({
+      question: f.description || f.title || "",
+      header: f.title || f.key,
+      multiSelect: f.type === "array",
+      options: (f.options || []).map((o) => ({
+        label: o.label ?? o.value, description: o.description || "",
+      })),
+    }));
+  }
+
+  async function replyForm(realId, form, answer) {
+    const fields = form.fields || [];
+    // `structured` is a per-question {header, answer} array in the same order
+    // as the fields (see driver.mjs's /permission-response). v2 wants one
+    // value per field key, so a multiSelect array is joined rather than sent
+    // as an array -- the field's declared type is a string.
+    const out = {};
+    fields.forEach((f, i) => {
+      let v = Array.isArray(answer?.structured) ? answer.structured[i]?.answer : undefined;
+      if (v === undefined) v = String(answer?.text ?? "");
+      out[f.key] = Array.isArray(v) ? v.join(", ") : String(v ?? "");
+    });
+    try {
+      await api(`/api/session/${realId}/form/${form.id}/reply`,
+        { method: "POST", body: { answer: out }, timeoutMs: 5000 });
+    } catch (e) {
+      console.error("[opencode-v2] failed to reply to question:", e.message);
+    }
   }
 
   function summarizeTool(d) {

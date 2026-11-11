@@ -233,10 +233,12 @@ const realish = {
   const cc = readFileSync(new URL("./backends/claude-code.mjs", import.meta.url), "utf8");
   const oc = readFileSync(new URL("./opencode-plugin.ts", import.meta.url), "utf8");
   const ccDelegate = cc.slice(cc.indexOf('"delegate_session"'));
-  const ocDelegate = oc.slice(oc.indexOf("delegate_session: tool("));
+  // v2 registers tools by name on an editor rather than as a keyed object,
+  // and declares arguments as JSON Schema rather than with schema builders.
+  const ocDelegate = oc.slice(oc.indexOf('name: "delegate_session"'));
 
   check("claude-code's schema declares model", /model: z\.string\(\)\.optional\(\)/.test(ccDelegate));
-  check("opencode's schema declares model", /model: tool\.schema\.string\(\)\.optional\(\)/.test(ocDelegate));
+  check("opencode's schema declares model", /model: \{[\s\S]{0,60}type: "string"/.test(ocDelegate));
   check("claude-code forwards model to the driver", /model: args\.model \|\| null/.test(ccDelegate));
   check("opencode forwards model to the driver", /model: args\.model \|\| null/.test(ocDelegate));
 

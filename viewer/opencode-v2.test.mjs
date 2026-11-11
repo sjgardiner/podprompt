@@ -27,7 +27,10 @@ function check(name, cond, detail) {
 
 // ── a fake v2 server ───────────────────────────────────────────────────────
 const PASSWORD = "testpw";
-const state = { sessions: new Map(), prompts: [], events: [], interrupts: [], minted: 1, clientSuppliedIds: [] };
+const state = {
+  sessions: new Map(), prompts: [], events: [], interrupts: [], minted: 1,
+  clientSuppliedIds: [], permissionReplies: [], formReplies: [],
+};
 
 function sse(res, frames) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
@@ -75,6 +78,14 @@ const server = createServer((req, res) => {
       if (rest === "/interrupt") { state.interrupts.push(sid); return send(200, { data: {} }); }
       if (rest === "/model") return send(204, {});
       if (rest === "/message") return send(200, { data: state.messages || [] });
+      // Replies are SESSION-scoped in v2. Recording the full path matters:
+      // addressing one of these to the wrong session is a 404, and v1's
+      // equivalent bug (a reply resolved against the server's default
+      // directory) is exactly the class this shape was chosen to avoid.
+      let r = rest.match(/^\/permission\/([^/]+)\/reply$/);
+      if (r) { state.permissionReplies.push({ sid, id: r[1], body: json }); return send(204, {}); }
+      r = rest.match(/^\/form\/([^/]+)\/reply$/);
+      if (r) { state.formReplies.push({ sid, id: r[1], body: json }); return send(204, {}); }
     }
     if (p === "/api/model") {
       return send(200, { data: [
@@ -262,6 +273,202 @@ function make(extra = {}) {
 
   check("resolveValidCwd keeps paths under the root", b.resolveValidCwd("/tmp/sub") === "/tmp/sub");
   check("...and refuses an escape", b.resolveValidCwd("/etc") === null);
+}
+
+// ── permissions ────────────────────────────────────────────────────────────
+//
+// v2 BLOCKS the tool call and emits permission.asked. Before this was wired,
+// nothing listened: pending-approvals stayed empty and the turn died minutes
+// later with an unexplained tool failure. So the failure this guards against
+// is not a crash — it is silence.
+//
+// The frames are the real 2.2.7 shape: the request is under `data`, and the
+// reply vocabulary is "once" | "always" | "reject".
+{
+  const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: false }) });
+  await b.setModel("oc2-perm", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm");
+  state.permissionReplies.length = 0;
+  state.events = [
+    { type: "session.execution.started", data: { sessionID: real } },
+    { type: "permission.asked", data: { sessionID: real, id: "per_1", action: "read", resources: [".env"] } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-perm", "x", {});
+  check("a permission ask produces exactly one reply", state.permissionReplies.length === 1, state.permissionReplies);
+  check("...addressed to the SESSION that asked", state.permissionReplies[0]?.sid === real, state.permissionReplies[0]);
+  check("...naming the request it answers", state.permissionReplies[0]?.id === "per_1");
+  check("allow-once maps to the v2 decision \"once\"",
+    state.permissionReplies[0]?.body?.decision === "once", state.permissionReplies[0]?.body);
+}
+{
+  const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: true }) });
+  await b.setModel("oc2-perm-always", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm-always");
+  state.permissionReplies.length = 0;
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_2", action: "read", resources: [".env"] } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-perm-always", "x", {});
+  check("allow-always widens the scope to \"always\"",
+    state.permissionReplies[0]?.body?.decision === "always", state.permissionReplies[0]?.body);
+}
+{
+  const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: false }) });
+  await b.setModel("oc2-perm-deny", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm-deny");
+  state.permissionReplies.length = 0;
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_3", action: "podprompt-message", resources: ["@x"] } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-perm-deny", "x", {});
+  check("a denial maps to \"reject\"",
+    state.permissionReplies[0]?.body?.decision === "reject", state.permissionReplies[0]?.body);
+}
+{
+  // Auto-approve must be consulted by the BACKEND, not the card. It also has
+  // to walk up the parent chain, or a delegated session parks on its first
+  // gated action and unattended delegation is impossible.
+  let asked = 0;
+  const { b } = make({
+    stateFile: MAP,
+    requestApproval: async () => { asked++; return { allow: true }; },
+    autoApproveForSession: () => true,
+  });
+  await b.setModel("oc2-perm-auto", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm-auto");
+  state.permissionReplies.length = 0;
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_4", action: "read", resources: [".env"] } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-perm-auto", "x", {});
+  check("auto-approve answers without raising a card at all", asked === 0, asked);
+  check("...and still replies, or the turn stays blocked forever",
+    state.permissionReplies[0]?.body?.decision === "once", state.permissionReplies[0]);
+}
+{
+  // A request answered elsewhere (the OpenCode TUI, or the server giving up)
+  // must retract our card. Replying to a dead request is what produces a 404.
+  // The stub mirrors driver.mjs: the card's promise stays open until
+  // resolveApprovalExternally settles it with {cancelled:true}.
+  const resolved = [];
+  const open = new Map();
+  const { b } = make({
+    stateFile: MAP,
+    requestApproval: (sid, kind, name, input, opts) =>
+      new Promise((resolve) => open.set(opts.externalId, resolve)),
+    resolveApprovalExternally: (id) => {
+      resolved.push(id);
+      open.get(id)?.({ cancelled: true });
+      return true;
+    },
+  });
+  await b.setModel("oc2-perm-ext", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm-ext");
+  state.permissionReplies.length = 0;
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_5", action: "read", resources: [".env"] } },
+    { type: "permission.replied", data: { sessionID: real, id: "per_5" } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  const outcome = await Promise.race([
+    b.runTurn("oc2-perm-ext", "x", {}),
+    new Promise((r) => setTimeout(() => r({ reason: "HUNG" }), 8000)),
+  ]);
+  check("an externally-answered request retracts our card", resolved.includes("per_5"), resolved);
+  check("...and the turn still ends", outcome.reason !== "HUNG", outcome);
+  check("...and we do NOT reply to it again, which is what produced a 404",
+    state.permissionReplies.length === 0, state.permissionReplies);
+}
+{
+  // A card nobody ever answers must not keep the session busy forever. A
+  // permission blocks the tool call, so reaching the end of a turn with one
+  // outstanding means the turn was aborted or stalled underneath it.
+  const { b } = make({
+    stateFile: MAP,
+    requestApproval: () => new Promise(() => {}),   // never settles, ever
+    approvalDrainMs: 200,
+  });
+  await b.setModel("oc2-perm-stuck", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-perm-stuck");
+  state.events = [
+    { type: "permission.asked", data: { sessionID: real, id: "per_6", action: "read", resources: [".env"] } },
+    { type: "session.execution.interrupted", data: { sessionID: real } },
+  ];
+  const st = {};
+  const outcome = await Promise.race([
+    b.runTurn("oc2-perm-stuck", "x", st),
+    new Promise((r) => setTimeout(() => r({ reason: "HUNG" }), 8000)),
+  ]);
+  check("an unanswered card does not pin the turn open", outcome.reason !== "HUNG", outcome);
+  check("...and the session is released, not left busy", st.turnInFlight === false, st);
+}
+
+// ── questions (AskUserQuestion) ────────────────────────────────────────────
+//
+// v2 models a question as a FORM with typed fields, which is a richer shape
+// than v1's question event. The viewer card reads Claude's QuestionInfo[],
+// so the mapping is asserted in both directions: fields -> card, answer ->
+// {answer: {fieldKey: value}}.
+{
+  const form = {
+    sessionID: null, id: "frm_1", title: "Questions",
+    metadata: { kind: "question" },
+    fields: [{
+      key: "q0", title: "Module name", description: "mailbox or inbox?", type: "string",
+      options: [
+        { value: "mailbox", label: "mailbox", description: "Name it mailbox." },
+        { value: "inbox", label: "inbox", description: "Name it inbox." },
+      ],
+      custom: true,
+    }],
+  };
+  let seenCard = null;
+  const { b } = make({
+    stateFile: MAP,
+    requestApproval: async (sid, kind, toolName, toolInput) => {
+      seenCard = { kind, toolName, toolInput };
+      return { text: "inbox", structured: [{ header: "Module name", answer: "inbox" }] };
+    },
+  });
+  await b.setModel("oc2-form", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-form");
+  form.sessionID = real;
+  state.formReplies.length = 0;
+  state.events = [
+    { type: "form.created", data: { ...form } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-form", "x", {});
+  check("a question form raises a question card, not a permission one",
+    seenCard?.kind === "question" && seenCard?.toolName === "AskUserQuestion", seenCard);
+  check("the field becomes a question the viewer can render",
+    seenCard?.toolInput?.questions?.[0]?.question === "mailbox or inbox?"
+    && seenCard?.toolInput?.questions?.[0]?.header === "Module name", seenCard?.toolInput);
+  check("...with its options as {label, description}",
+    seenCard?.toolInput?.questions?.[0]?.options?.[1]?.label === "inbox", seenCard?.toolInput);
+  check("the answer goes back keyed by FIELD KEY, not by index or header",
+    state.formReplies[0]?.body?.answer?.q0 === "inbox", state.formReplies[0]?.body);
+  check("...to the form that asked", state.formReplies[0]?.id === "frm_1");
+}
+{
+  // Not every form is a question. Answering a non-question form as if it
+  // were multiple-choice would write nonsense into it.
+  let asked = 0;
+  const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
+  await b.setModel("oc2-form-other", "opencode/big-pickle");
+  const real = b._ids.toV2("oc2-form-other");
+  state.formReplies.length = 0;
+  state.events = [
+    { type: "form.created", data: { sessionID: real, id: "frm_2", metadata: { kind: "login" }, fields: [] } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc2-form-other", "x", {});
+  check("a non-question form is left alone", asked === 0 && state.formReplies.length === 0,
+    { asked, replies: state.formReplies.length });
 }
 
 // ── history ordering ───────────────────────────────────────────────────────

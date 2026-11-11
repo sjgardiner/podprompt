@@ -3189,6 +3189,49 @@ function installOpencodePlugin() {
   }
 }
 
+// OpenCode keeps its permission policy in CONFIG, and nothing else can set
+// it. A plugin cannot install a rule: ctx.agent.transform accepts the edit
+// and silently drops it, and ctx.permission.hook never fires for assert --
+// both measured against 2.2.7. Without a rule the mail tools still work, they
+// just never ask, so sending mail would raise a card on Claude Code and be
+// silent on OpenCode.
+//
+// This document is PodPrompt's own and is pointed at with OPENCODE_CONFIG,
+// which MERGES with the user's config -- their providers, plugins and
+// instructions all survive, and their file is never read or written.
+//
+// Not to be confused with OPENCODE_CONFIG_CONTENT, which REPLACES the config
+// wholesale. Passing only these rules through that variable silently costs
+// the user their entire `provider` block, ALCF and all. Same prefix, opposite
+// semantics.
+const OPENCODE_CONFIG_DOC = nodePath.join(PODPROMPT_STATE_DIR, "opencode-config.json");
+const OPENCODE_INSTRUCTIONS_DOC = nodePath.join(PODPROMPT_STATE_DIR, "opencode-instructions.md");
+
+function writeOpencodeConfigDoc() {
+  try {
+    mkdirSync(PODPROMPT_STATE_DIR, { recursive: true });
+    // The same paragraph Claude Code gets through its MCP server, written
+    // where OpenCode will read it. v1 pulled this over HTTP from a system
+    // prompt hook that v2 removed; `instructions` is the replacement, and it
+    // keeps the text single-sourced from messagingSystemPrompt either way.
+    writeFileSync(OPENCODE_INSTRUCTIONS_DOC, messagingSystemPrompt({ prefix: "" }));
+    writeFileSync(OPENCODE_CONFIG_DOC, JSON.stringify({
+      permission: {
+        "podprompt-message": "ask",
+        "podprompt-delegate": "ask",
+      },
+      instructions: [OPENCODE_INSTRUCTIONS_DOC],
+    }, null, 2));
+    return true;
+  } catch (e) {
+    // Degrade loudly rather than silently: the tools still work, they just
+    // stop asking first, and that is a difference worth seeing in the log.
+    console.error(`[driver] could not write the opencode config document (${e.message});`
+      + " opencode sessions will send mail and delegate WITHOUT a permission prompt");
+    return false;
+  }
+}
+
 function spawnOpencode() {
   const args_ = ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodePort)];
   console.log(`[driver] spawning opencode serve on port ${args.opencodePort}`);
@@ -3358,9 +3401,20 @@ const OPENCODE_V2_MAX_RESTARTS = 3;
 function spawnOpencodeV2() {
   if (opencodeV2Unavailable || opencodeV2Child) return;
   console.log(`[driver] spawning opencode2 serve on port ${args.opencodeV2Port}`);
+  installOpencodePlugin();
+  const haveConfigDoc = writeOpencodeConfigDoc();
   const child = spawn("opencode2", ["serve", "--hostname", "127.0.0.1", "--port", String(args.opencodeV2Port)], {
     stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, OPENCODE_SERVER_PASSWORD: OPENCODE_V2_PASSWORD },
+    env: {
+      ...process.env,
+      OPENCODE_SERVER_PASSWORD: OPENCODE_V2_PASSWORD,
+      // These two are what switch the plugin on. Without them it registers
+      // nothing, which is what keeps the user's own OpenCode unaffected by a
+      // file PodPrompt put in their config directory.
+      PODPROMPT_DRIVER_URL: `http://127.0.0.1:${args.port}`,
+      PODPROMPT_TOKEN,
+      ...(haveConfigDoc ? { OPENCODE_CONFIG: OPENCODE_CONFIG_DOC } : {}),
+    },
   });
   opencodeV2Child = child;
   let stderrTail = [];

@@ -181,36 +181,6 @@ function make(extra = {}) {
   check("the map survives a restart", b2._ids.toReal(cid) === real);
 }
 
-// ── adopting the map from its old filename ────────────────────────────────
-//
-// The map was written as viewer-opencode-v2-sessions.json while this backend
-// was registered as "opencode-v2". Renaming the file by hand would have made
-// an upgrade depend on someone performing a migration step, and losing the
-// map loses the sessions -- so the new name is adopted from the old one on
-// first load instead, and only when the new one has nothing to say.
-{
-  const { rmSync, writeFileSync: wf, existsSync } = await import("node:fs");
-  const NEW = "/tmp/pp-oc2-map-new.json";
-  const OLD = "/tmp/pp-oc2-map-old.json";
-  for (const f of [NEW, OLD]) { try { rmSync(f); } catch { /* fine */ } }
-  wf(OLD, JSON.stringify({ sessions: { "oc2-legacy": "ses_legacyreal" } }));
-
-  const { b } = make({ stateFile: NEW, legacyStateFile: OLD });
-  check("an absent new file falls back to the old one",
-    b._ids.toReal("oc2-legacy") === "ses_legacyreal", b._ids.toReal("oc2-legacy"));
-  check("...and the adoption is written under the NEW name", existsSync(NEW));
-  check("...leaving the old file untouched, so a downgrade still works", existsSync(OLD));
-
-  // Once the new file exists it wins outright -- the old one must not be
-  // re-read, or a stale entry would come back after being deleted.
-  wf(NEW, JSON.stringify({ sessions: { "oc2-current": "ses_currentreal" } }));
-  const { b: b2 } = make({ stateFile: NEW, legacyStateFile: OLD });
-  check("the new file takes precedence once it exists",
-    b2._ids.toReal("oc2-current") === "ses_currentreal");
-  check("...and the old file is NOT merged back in",
-    b2._ids.toReal("oc2-legacy") === null, b2._ids.toReal("oc2-legacy"));
-}
-
 // ── the driver's sender translation ───────────────────────────────────────
 //
 // THE BUG THIS GUARDS, which cost a working feature silently. A plugin tool

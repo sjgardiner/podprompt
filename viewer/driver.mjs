@@ -548,12 +548,6 @@ const backends = {
     // to mint it. The filename is unchanged from when this backend was
     // registered as "opencode-v2", so existing sessions keep working.
     stateFile: nodePath.join(PODPROMPT_STATE_DIR, "viewer-opencode-sessions.json"),
-    // Read once, if the file above does not exist yet, and then never again:
-    // the map was written under this name while the backend was registered as
-    // "opencode-v2". Adopting it rather than renaming by hand means an
-    // upgrade does not depend on anyone performing a migration step, and a
-    // downgrade still finds its own file where it left it.
-    legacyStateFile: nodePath.join(PODPROMPT_STATE_DIR, "viewer-opencode-v2-sessions.json"),
   }),
 };
 

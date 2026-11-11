@@ -68,7 +68,7 @@ import { readFileSync, writeFileSync, renameSync } from "node:fs";
 
 export function createOpenCodeBackend({
   cwdRoot, broadcast, broadcastStatus, broadcastUserPrompt,
-  messaging, baseUrl, password, stateFile, legacyStateFile,
+  messaging, baseUrl, password, stateFile,
   requestApproval, autoApproveForSession, resolveApprovalExternally,
   // How long a finished turn waits for an outstanding approval reply to land
   // before releasing the session anyway. Settable only so the test can prove
@@ -89,35 +89,17 @@ export function createOpenCodeBackend({
   const clientToReal = new Map();
   const realToClient = new Map();
 
-  function readMapFile(path) {
-    try {
-      const raw = JSON.parse(readFileSync(path, "utf8"));
-      const pairs = Object.entries(raw?.sessions || {})
-        .filter(([c, r]) => typeof c === "string" && typeof r === "string");
-      return pairs.length ? pairs : null;
-    } catch { return null; }   // missing or corrupt: not an error here
-  }
-
   function loadMap() {
     if (!stateFile) return;
-    // Current name first. Only if it has nothing to say do we look under the
-    // name this file used while the backend was registered as "opencode-v2"
-    // -- adopted, not renamed, so nothing has to be migrated by hand and a
-    // downgrade still finds its own file intact.
-    let pairs = readMapFile(stateFile);
-    let adopted = false;
-    if (!pairs && legacyStateFile) {
-      pairs = readMapFile(legacyStateFile);
-      adopted = !!pairs;
-    }
-    for (const [c, r] of pairs || []) {
-      clientToReal.set(c, r);
-      realToClient.set(r, c);
-    }
-    if (adopted) {
-      console.log(`[opencode] adopted ${clientToReal.size} session ids from ${legacyStateFile}`);
-      saveMap();
-    }
+    try {
+      const raw = JSON.parse(readFileSync(stateFile, "utf8"));
+      for (const [c, r] of Object.entries(raw?.sessions || {})) {
+        if (typeof c === "string" && typeof r === "string") {
+          clientToReal.set(c, r);
+          realToClient.set(r, c);
+        }
+      }
+    } catch { /* missing or corrupt: start empty rather than fail over it */ }
   }
 
   function saveMap() {

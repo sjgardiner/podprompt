@@ -64,7 +64,26 @@ const server = createServer((req, res) => {
       state.sessions.set(id, { id, title: json.title || null, time: { created: Date.now() } });
       return send(200, { data: state.sessions.get(id) });
     }
-    if (p === "/api/session" && req.method === "GET") return send(200, { data: [...state.sessions.values()] });
+    if (p === "/api/session" && req.method === "GET") {
+      // PAGED, exactly like the real server: one page of rows plus a cursor
+      // SIBLING of `data`. A client that reads only `data` sees page one and
+      // cannot tell it from the whole list -- which is the bug this models.
+      const all = [...state.sessions.values()];
+      const size = state.pageSize || 2;
+      const cur = url.searchParams.get("cursor");
+      const start = cur ? Number(Buffer.from(cur, "base64").toString()) : 0;
+      const page = all.slice(start, start + size);
+      const end = start + size;
+      state.listCalls = (state.listCalls || 0) + 1;
+      // state.stuckCursor models a server that keeps offering a next page
+      // without ever advancing -- the shape that spins a paging loop forever.
+      const nextAt = state.stuckCursor ? start : end;
+      const more = state.stuckCursor ? true : end < all.length;
+      return send(200, {
+        data: page,
+        cursor: { previous: null, next: more ? Buffer.from(String(nextAt)).toString("base64") : null },
+      });
+    }
     const m = p.match(/^\/api\/session\/([^/]+)(\/.*)?$/);
     if (m) {
       const [, sid, rest] = m;
@@ -279,6 +298,71 @@ function make(extra = {}) {
     sessions.every((s) => b._ids.toReal(s.sessionId) !== null), sessions.map((s) => s.sessionId));
   check("...and a server session we have no entry for never appears",
     !sessions.some((s) => s.sessionId === "ses_somebodyelse"));
+}
+
+// ── the session list is PAGED ──────────────────────────────────────────────
+//
+// GET /api/session returns ONE page plus a cursor in a sibling of `data`. It
+// reports no total and no error for the rows it withheld, so a single call is
+// indistinguishable from a complete list. That is exactly how sessions
+// carried over from the 1.x line stayed invisible: they were older than the
+// most recent page, and nothing said so.
+//
+// A bigger `limit` is NOT the fix -- it raises the cliff and leaves it there.
+{
+  const { b } = make({ stateFile: MAP });
+  // Enough sessions to need several pages at the fake server's page size.
+  const ids = [];
+  for (let i = 0; i < 7; i++) {
+    const cid = `oc2-page-${i}`;
+    await b.setModel(cid, "opencode/big-pickle");
+    ids.push(cid);
+  }
+  state.pageSize = 2;
+  state.listCalls = 0;
+  const { sessions } = await b.listSessions({}, new Map(), () => null);
+  check("every page is followed, not just the first",
+    ids.every((id) => sessions.some((s) => s.sessionId === id)),
+    { want: ids.length, got: sessions.length });
+  check("...which takes more than one request", state.listCalls > 1, state.listCalls);
+  check("no session is listed twice", new Set(sessions.map((s) => s.sessionId)).size === sessions.length);
+}
+{
+  // A cursor that never advances must not spin. The guard is "a page that
+  // added nothing new ends the walk" -- without it this hangs until the page
+  // cap, re-fetching the same rows every time.
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-stuck-page", "opencode/big-pickle");
+  state.pageSize = 2;
+  state.stuckCursor = true;
+  state.listCalls = 0;
+  const done = await Promise.race([
+    b.listSessions({}, new Map(), () => null).then(() => "returned"),
+    new Promise((r) => setTimeout(() => r("HUNG"), 8000)),
+  ]);
+  state.stuckCursor = false;
+  check("a cursor that never advances ends the walk", done === "returned", done);
+  check("...without grinding through every allowed page", state.listCalls < 10, state.listCalls);
+}
+
+// ── archived state ─────────────────────────────────────────────────────────
+//
+// Reported as a TIMESTAMP at time.archived, not a boolean at `archived`.
+// Reading the wrong field made the flag permanently false, which stayed
+// invisible only while the un-paged list happened to contain almost no
+// archived sessions. Paging surfaces all of them.
+{
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-arch", "opencode/big-pickle");
+  const real = b._ids.toReal("oc2-arch");
+  state.sessions.get(real).time.archived = 1794358597744;
+  state.pageSize = 50;
+  const { sessions } = await b.listSessions({}, new Map(), () => null);
+  const row = sessions.find((s) => s.sessionId === "oc2-arch");
+  check("an archived session is reported as archived", row?.archived === true, row);
+  check("...and tagged for the panel", row?.tag === "archived", row?.tag);
+  const live = sessions.find((s) => s.sessionId === "oc2-page-0");
+  check("...while a live one is not", live?.archived === false && live?.tag === null, live);
 
   const models = await b.listModels();
   check("models are composite provider/model ids",

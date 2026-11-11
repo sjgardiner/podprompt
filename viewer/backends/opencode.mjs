@@ -125,7 +125,7 @@ export function createOpenCodeBackend({
 
   loadMap();
 
-  async function api(path, { method = "GET", body, timeoutMs = 30000, raw = false } = {}) {
+  async function api(path, { method = "GET", body, timeoutMs = 30000, raw = false, envelope = false } = {}) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
@@ -147,11 +147,68 @@ export function createOpenCodeBackend({
       }
       if (res.status === 204) return null;
       const payload = await res.json().catch(() => null);
-      // Every response wraps its result in `data`.
+      // Every response wraps its result in `data` -- and a LIST response puts
+      // its paging cursor in a SIBLING of it. Unwrapping is what a caller
+      // almost always wants, but it silently discards that cursor, which is
+      // how a capped list came to look like the complete one. `envelope`
+      // keeps the whole payload for the callers that have to page.
+      if (envelope) return payload;
       return payload && typeof payload === "object" && "data" in payload ? payload.data : payload;
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // GET /api/session IS PAGED, and says so only if you look. It returns one
+  // page -- 50 rows by default -- plus a SIBLING of `data`:
+  //
+  //     { "data": [...], "cursor": { "previous": "<opaque>", "next": "<opaque>" } }
+  //
+  // There is no total and no error when rows are left behind, so a single
+  // call looks exactly like a complete list and silently loses everything
+  // past the first page. That is not hypothetical: it is why sessions
+  // carried over from the 1.x line stayed invisible even with correct id-map
+  // entries -- they were simply older than the 50 most recent.
+  //
+  // The cursor is opaque and SERVER-MINTED: `offset` is accepted and does
+  // nothing (three pages requested at different offsets came back byte-
+  // identical), and any cursor value we invent is rejected with
+  // InvalidCursorError. So the only honest way to read the whole list is to
+  // follow `cursor.next` until it stops -- which is also why a bigger
+  // `limit` is the wrong fix: it raises the cliff without removing it.
+  // Archived state is reported as a TIMESTAMP at time.archived, not as a
+  // boolean at `archived`. Both are accepted so this keeps working if a
+  // later version adds the flag the obvious way.
+  const isArchived = (s) => !!(s?.archived || s?.time?.archived);
+
+  const MAX_SESSION_PAGES = 200;
+
+  async function listAllSessions() {
+    const out = [];
+    const seen = new Set();
+    let cursor = null;
+    for (let page = 0; page < MAX_SESSION_PAGES; page++) {
+      const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const env = await api(`/api/session${q}`, { timeoutMs: 15000, envelope: true });
+      const rows = Array.isArray(env?.data) ? env.data : [];
+      let fresh = 0;
+      for (const r of rows) {
+        if (!r?.id || seen.has(r.id)) continue;
+        seen.add(r.id);
+        out.push(r);
+        fresh++;
+      }
+      const next = env?.cursor?.next;
+      // Stop on the server saying "no more", on an empty page, and ALSO on a
+      // page that was entirely duplicates. That last one is the guard that
+      // matters: a cursor that stops advancing would otherwise spin here
+      // until the page cap, re-fetching the same rows every time.
+      if (!next || !rows.length || fresh === 0) return out;
+      cursor = next;
+    }
+    console.error(`[opencode] stopped paging the session list after ${MAX_SESSION_PAGES} pages;`
+      + ` ${out.length} sessions read and the server still offered more`);
+    return out;
   }
 
   // THE SERVER MINTS THE ID. Never `POST /api/session` with one of ours --
@@ -589,7 +646,7 @@ export function createOpenCodeBackend({
     // "is this session busy?", which is the question the whole mid-turn
     // delivery path turns on.
     async listSessions(opts, sessionsIndex, pendingKindForSession) {
-      const rows = await api("/api/session", { timeoutMs: 15000 });
+      const rows = await listAllSessions();
       const out = [];
       for (const s of rows || []) {
         // Only sessions PodPrompt drove: anything else is another client's
@@ -610,8 +667,13 @@ export function createOpenCodeBackend({
           unreachable: false,
           inFlight: !!sessionsIndex?.get?.(clientId)?.turnInFlight,
           pendingKind: pendingKindForSession?.(clientId) ?? null,
-          archived: !!s.archived,
-          tag: s.archived ? "archived" : null,
+          // The flag lives at `time.archived` (a timestamp), not `archived`.
+          // Reading the wrong one made this permanently false -- harmless
+          // only for as long as the un-paged list happened to contain almost
+          // no archived sessions. Paging surfaces all of them, and without
+          // this they would arrive looking like ordinary live sessions.
+          archived: isArchived(s),
+          tag: isArchived(s) ? "archived" : null,
         });
       }
       return { sessions: out, unreachableCount: 0, unreachableSessions: [] };

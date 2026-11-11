@@ -268,8 +268,17 @@ function make(extra = {}) {
   check("...and a pending approval is reported too", row?.pendingKind === "permission", row);
   check("every row names its backend, or the session becomes unroutable",
     sessions.every((s) => s.backend === "opencode"), sessions.map((s) => s.backend));
+  // The rule is "only sessions we have a map entry for", asserted directly.
+  // It used to be expressed as "no row's id looks like a server id", which
+  // happened to hold and is NOT the rule: a session migrated from the 1.x
+  // line keeps the id the server already gave it, so its map entry is the
+  // identity and its PodPrompt id is a ses_ id. Asserting the shape would
+  // have failed the moment those were made visible again, for a session that
+  // is legitimately ours.
   check("sessions belonging to other clients are filtered out",
-    sessions.every((s) => typeof s.sessionId === "string" && !s.sessionId.startsWith("ses")));
+    sessions.every((s) => b._ids.toReal(s.sessionId) !== null), sessions.map((s) => s.sessionId));
+  check("...and a server session we have no entry for never appears",
+    !sessions.some((s) => s.sessionId === "ses_somebodyelse"));
 
   const models = await b.listModels();
   check("models are composite provider/model ids",

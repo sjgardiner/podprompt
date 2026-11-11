@@ -1122,8 +1122,8 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   //
   // That uuid earns a second job below: the CLI echoes it back on the `result`
   // for whichever turn consumed the prompt, which is how this turn recognises
-  // its OWN ending. See onePrompt and turn-binding.mjs — getting that wrong is
-  // what broke permissions for whole turns before 2026-11-10.
+  // its OWN ending. See makeInputQueue and turn-binding.mjs — getting that
+  // wrong is what broke permissions for whole turns before 2026-11-10.
   //
   // Still spawn-per-turn: the generator parks until the turn ends and the
   // query is closed right after, so no process outlives its turn.
@@ -1193,31 +1193,78 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // So the generator parks on `gate` instead, and the message loop opens it
     // on the result that is actually ours (see resultBelongsToTurn). Reproduced
     // and fixed under test 2026-11-10; see turn-binding.mjs.
-    function onePrompt(gate) {
-      // A fresh async generator per attempt: once iterated (even partially,
-      // even to a thrown error), a JS generator is exhausted and can't be
-      // replayed — the resume-retry below needs its own. Each attempt gets its
-      // own gate for the same reason.
-      return (async function* () {
-        yield {
-          type: "user",
-          message: { role: "user", content: modelPrompt },
-          parent_tool_use_id: null,
-          // Also what binds this turn's result back to this turn. The CLI
-          // echoes it on the result for whichever turn consumed the prompt.
-          uuid: userMsgUuid,
-        };
-        await gate.promise;
-      })();
-    }
-
-    // Resolve-once, never rejects: a gate that throws would surface as an
-    // error from deep inside the SDK's input pump rather than as this turn's
-    // outcome. Ending the turn is always done by opening it.
-    function makeGate() {
-      let open;
-      const promise = new Promise((resolve) => { open = resolve; });
-      return { promise, open: () => open() };
+    // THE TURN'S INPUT: the opening prompt, then anything the driver pushes
+    // in while the turn is still running, then end.
+    //
+    // The second part is what makes mid-turn delivery possible. A message
+    // handed to push() is picked up by the model at its NEXT STEP BOUNDARY —
+    // once the tool call in flight returns — with nothing aborted and no work
+    // discarded. Measured 2026-11-11: injected 5s into a three-step turn
+    // whose first step had 9s left to run, and step two obeyed it. That is
+    // the same semantics OpenCode v2 gives `delivery: "steer"`, which is not
+    // a coincidence: an agent loop is inference -> tools -> inference, and a
+    // step boundary is the only place a message can enter without throwing
+    // away the work in progress.
+    //
+    // This replaces a gate that yielded exactly one message and then parked.
+    // The parking is still essential and still here — see below — but there
+    // is now a queue behind it.
+    //
+    // A FRESH QUEUE PER ATTEMPT. Once iterated (even partially, even to a
+    // thrown error) a JS generator is exhausted and cannot be replayed, and
+    // the resume-retry below needs its own.
+    //
+    // PUSH MUST NOT LIE. The driver re-queues whatever push() refuses, so a
+    // message accepted here and then silently dropped is a message lost
+    // outright — precisely the failure the delivery core exists to make
+    // impossible ("a silently dropped message is indistinguishable to a model
+    // from a peer that chose not to answer"). Three things make the answer
+    // trustworthy against a close landing mid-push: `closed` is set
+    // SYNCHRONOUSLY by open(), push() refuses the instant it is set, and the
+    // generator drains anything already in `pending` even after closing. So a
+    // message that got in before the close is still delivered, and one that
+    // did not is reported as refused rather than swallowed.
+    function makeInputQueue() {
+      const pending = [{
+        type: "user",
+        message: { role: "user", content: modelPrompt },
+        parent_tool_use_id: null,
+        // Also what binds this turn's result back to this turn. The CLI
+        // echoes it on the result for whichever turn consumed the prompt.
+        // Injected messages below get their own ids; the turn stays bound to
+        // THIS one, which remains in the result's uuid list either way.
+        uuid: userMsgUuid,
+      }];
+      let wake = null;
+      let closed = false;
+      function bump() { const w = wake; wake = null; if (w) w(); }
+      return {
+        accepting: () => !closed,
+        push(text) {
+          if (closed) return false;
+          pending.push({
+            type: "user",
+            message: { role: "user", content: text },
+            parent_tool_use_id: null,
+            uuid: randomUUID(),
+          });
+          bump();
+          return true;
+        },
+        // Named `open` because it ends the turn the way the gate it replaces
+        // did: the generator finishing is what lets the SDK close stdin.
+        // Resolve-once and never throwing, for the same reason the gate was —
+        // an error raised in here would surface from deep inside the SDK's
+        // input pump rather than as this turn's outcome.
+        open() { closed = true; bump(); },
+        stream: (async function* () {
+          for (;;) {
+            while (pending.length) yield pending.shift();
+            if (closed) return;
+            await new Promise((resolve) => { wake = resolve; });
+          }
+        })(),
+      };
     }
 
     // Turn-scoped so consume()'s finally can clear it no matter how the turn
@@ -1674,8 +1721,12 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     }
 
     async function consume(opts) {
-      const gate = makeGate();
-      const q = query({ prompt: onePrompt(gate), options: opts });
+      const gate = makeInputQueue();
+      // Published so the driver can push mail into THIS attempt while it
+      // runs. Replaced by the bootstrap retry's own queue and cleared in the
+      // finally below, so a push can never reach a dead attempt's generator.
+      state.inputQueue = gate;
+      const q = query({ prompt: gate.stream, options: opts });
       // Held for the life of the turn so a per-sub-agent stop can reach it:
       // stopTask is a control request on the live Query, and a sub-agent has
       // no process or abortController of its own to target. The bootstrap
@@ -1703,6 +1754,10 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // already done it; on a throw or an abort it has not, and a prompt
         // generator parked forever would keep the SDK's input pump alive.
         gate.open();
+        // Cleared only if this attempt still owns it: the bootstrap retry
+        // installs a second queue, and clearing unconditionally here would
+        // blank out the live one when the FIRST attempt unwinds.
+        if (state.inputQueue === gate) state.inputQueue = null;
         disarmSafetyNet();
         // Synchronous and idempotent. Guarded anyway so a cleanup failure
         // can never mask the turn's own outcome.
@@ -2165,6 +2220,23 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
 
     abort(sessionId, state) {
       state?.abortController?.abort();
+    },
+
+    // Hand a message to a turn that is ALREADY RUNNING. The model picks it up
+    // at its next step boundary; nothing is aborted and no work is discarded.
+    //
+    // Returns true only if the message is genuinely in this turn's input and
+    // will be yielded. A false answer means the caller must queue it for the
+    // next turn instead — so this must never report success it cannot honour.
+    // See makeInputQueue(): `closed` is set synchronously, and anything that
+    // got in before it is still drained.
+    //
+    // Deliberately a boolean rather than a throw: "the turn just ended" is
+    // the ordinary case, not an error, and it races every caller by nature.
+    injectIntoTurn(sessionId, state, text) {
+      const q = state?.inputQueue;
+      if (!q || !q.accepting() || typeof text !== "string" || !text) return false;
+      return q.push(text);
     },
 
     // Stop ONE sub-agent without touching the turn that spawned it. The

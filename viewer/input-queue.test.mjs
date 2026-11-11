@@ -36,14 +36,23 @@ function check(name, cond, detail) {
 const src = readFileSync(new URL("./backends/claude-code.mjs", import.meta.url), "utf8");
 function fnSource(name) {
   const i = src.indexOf(`function ${name}(`);
-  if (i < 0) throw new Error(`claude-code.mjs no longer defines ${name}()`);
-  let depth = 0, started = false;
-  for (let j = i; j < src.length; j++) {
-    const c = src[j];
-    if (c === "{") { depth++; started = true; }
-    else if (c === "}") { depth--; if (started && depth === 0) return src.slice(i, j + 1); }
+  if (i < 0) throw new Error(`source no longer defines ${name}()`);
+  const start = src.slice(Math.max(0, i - 6), i) === "async " ? i - 6 : i;
+  // Walk the parameter list first: a destructured parameter contains braces,
+  // and stopping at the first "{" would yield a body of just the signature --
+  // which would then match nothing and let every assertion pass vacuously.
+  let parens = 0, open = -1;
+  for (let k = src.indexOf("(", i); k < src.length; k++) {
+    if (src[k] === "(") parens++;
+    else if (src[k] === ")" && --parens === 0) { open = src.indexOf("{", k); break; }
   }
-  throw new Error(`could not brace-match ${name}()`);
+  if (open < 0) throw new Error(`could not find the body of ${name}()`);
+  let depth = 0;
+  for (let k = open; k < src.length; k++) {
+    if (src[k] === "{") depth++;
+    else if (src[k] === "}" && --depth === 0) return src.slice(start, k + 1);
+  }
+  throw new Error(`unbalanced braces reading ${name}()`);
 }
 
 const BIND_UUID = "binding-uuid-0001";

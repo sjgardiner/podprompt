@@ -169,8 +169,22 @@ const NATIVE = { kid: { childKind: "native-task" } };
   check("the hold decision reads isWatched", /isWatched\(sessionId\)/.test(drain));
   check("the hold decision reads autoDeliverFor", /autoDeliverFor\(sessionId\)/.test(drain));
   check("mail is parked as 'watched' only behind that decision",
-    /if \(watched && !auto\) group = parkUnapproved\(sessionId, group, "watched", approved\);/.test(drain),
+    /if \(!running && watched && !auto\) group = parkUnapproved\(sessionId, group, "watched", approved\);/.test(drain),
     drain.slice(drain.indexOf("watched && !auto") - 60, drain.indexOf("watched && !auto") + 120));
+
+  // THE HOLD IS NARROWED TO IDLE SESSIONS, and that `!running` is the whole
+  // narrowing. The hold exists because a delivery SPENDS the turn the user
+  // was about to type into -- true only when nothing is running. If a turn is
+  // already going, the message folds into it, costs no turn, and a prompt the
+  // user typed would have queued behind that turn anyway.
+  //
+  // If `!running` is ever dropped from this condition, a watched session goes
+  // back to holding mail it could simply have been handed, which is the
+  // "the agent stalls BECAUSE you are watching it" failure in a new place.
+  check("the watched hold applies only to a session with no turn running",
+    /if \(!running &&/.test(drain), drain.slice(drain.indexOf("watched && !auto") - 80, drain.indexOf("watched && !auto") + 60));
+  check("...and `running` means a live turn, not merely 'not idle'",
+    /const running = !!state\?\.turnInFlight;/.test(drain));
 
   // The autonomy gate must NOT be bypassed by it: the user asked for
   // visibility-gating to be skippable, explicitly keeping the budget as the
@@ -200,11 +214,30 @@ const NATIVE = { kid: { childKind: "native-task" } };
   check("only unapproved entries are parked",
     /const toPark = group\.filter\(\(e\) => !approved\(e\)\);/.test(bodyOf("parkUnapproved")));
 
-  // Busy is now the LAST gate. If it climbs back above the hold decision,
+  // Busy is still the LAST gate. If it climbs back above the hold decision,
   // mid-turn mail becomes invisible again — the bug this all came from.
+  //
+  // Anchored on the CALL, not the name. The name now also appears in a
+  // comment near the top explaining how `running` differs from it, and
+  // matching that made this assertion pass or fail on prose.
+  const idleCallAt = drain.search(/if \(!sessionIsIdle\(sessionId\)\)/);
+  check("the busy check is still findable", idleCallAt > 0, idleCallAt);
   check("the busy check comes after the hold decision",
-    drain.indexOf("sessionIsIdle") > drain.indexOf('"watched", approved'),
-    [drain.indexOf("sessionIsIdle"), drain.indexOf('"watched", approved')]);
+    idleCallAt > drain.indexOf('"watched", approved'),
+    [idleCallAt, drain.indexOf('"watched", approved')]);
+
+  // A running turn is now fed rather than made to wait, and the fold must be
+  // reached BEFORE the idle check — otherwise a busy session falls through to
+  // "not ready" and the message queues despite being deliverable.
+  const foldAt = drain.indexOf("foldIntoRunningTurn(");
+  check("a running turn is offered the fold", foldAt > 0, foldAt);
+  check("...before the busy check turns it away", foldAt < idleCallAt, [foldAt, idleCallAt]);
+
+  // The fold's answer is load-bearing: a refusal must leave the mail QUEUED,
+  // never marked delivered, or the message is lost outright.
+  check("mail is only marked delivered when the fold is actually taken",
+    /if \(foldIntoRunningTurn\([^)]*\)\) \{\s*\n\s*inbox\.markDelivered/.test(drain),
+    drain.slice(foldAt - 40, foldAt + 200));
 
   // And the browser has to be able to see the resolved value, because it is
   // derived and cannot be recomputed client-side.

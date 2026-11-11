@@ -1726,6 +1726,41 @@ function parkUnapproved(sessionId, group, reason, approved) {
   return group.filter(approved);
 }
 
+// Hand a message to a turn that is already running. Returns whether it was
+// actually taken.
+//
+// The backend's answer is TRUSTED AND LOAD-BEARING: false means the message
+// is still ours and must stay queued. A backend that said yes and then
+// dropped it would lose the message outright, which is the one outcome the
+// delivery core is built to make impossible — so injectIntoTurn() is
+// specified to refuse rather than to swallow, and the caller above re-queues
+// on false rather than marking delivered.
+//
+// Backends without the capability (opencode v1) simply do not define the
+// method, and their mail queues exactly as it always did. That asymmetry is
+// deliberate and visible rather than papered over: v1 is on a deprecation
+// path, and pretending otherwise would mean the same action silently
+// behaving differently depending on a backend the sender cannot see.
+function foldIntoRunningTurn(sessionId, body, originLabel) {
+  const state = sessions.get(sessionId);
+  const backend = state?.backend;
+  if (typeof backend?.injectIntoTurn !== "function") return false;
+  let taken = false;
+  try {
+    taken = backend.injectIntoTurn(sessionId, state, body) === true;
+  } catch (e) {
+    console.error(`[driver] injectIntoTurn failed for ${sessionId}:`, e.message);
+    return false;
+  }
+  if (!taken) return false;
+  // C10: the transcript must never be ambiguous about who said something.
+  // A folded message produces no user bubble of its own — the backend only
+  // broadcasts the prompt that STARTED the turn — so it is announced here,
+  // carrying the same origin label a delivered turn would have had.
+  broadcastUserPrompt(sessionId, body, randomUUID(), originLabel);
+  return true;
+}
+
 function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Everything pending, not a per-chain slice. nextDrainGroup existed solely
   // so one chain's budget could not pay for another's work; with a single
@@ -1733,6 +1768,13 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // the lot into one turn is strictly cheaper than one turn per sender.
   let group = inbox.pendingFor(sessionId);
   if (!group.length) return false;
+  // Is a turn actually running right now? Not the same question as
+  // sessionIsIdle(), which is also false when a session is merely sitting on
+  // an unanswered permission card with no turn behind it. Only a LIVE turn
+  // has an input stream to fold a message into.
+  const state = sessions.get(sessionId);
+  const running = !!state?.turnInFlight;
+
   // MD1: the user is looking at this conversation, so this message would
   // spend the turn they were about to use. Held for them to decide.
   // Checked BEFORE the gate because it is the more specific condition —
@@ -1775,7 +1817,18 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   // Mail for an auto-deliver session, or one nobody is watching, is NOT
   // parked by this and stays invisible until it flows at turn end. That is
   // what keeps the bar from flickering for mail that resolves itself.
-  if (watched && !auto) group = parkUnapproved(sessionId, group, "watched", approved);
+  // MD1', narrowed. The hold exists because a delivery SPENDS the turn the
+  // user was about to type into. That is only true of an IDLE session. If a
+  // turn is already running, the message folds into it, costs no turn, and
+  // the user was not about to get one anyway — a prompt they typed would
+  // queue behind the running turn exactly the same way.
+  //
+  // So what the hold really means is: a watched idle session is one the user
+  // has CLAIMED, and it stays static until they release it — by sending a
+  // prompt, or by accepting the mail. autoDeliverFor() is the explicit
+  // waiver of that claim ("this one is a worker; deliver to it even while I
+  // watch"), which is why it keeps its meaning unchanged here.
+  if (!running && watched && !auto) group = parkUnapproved(sessionId, group, "watched", approved);
   // Parked rather than left queued, so the strip can show it as stuck. A
   // queued message is merely waiting its turn; a parked one is waiting on
   // the USER, and those must not look alike.
@@ -1784,22 +1837,49 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
   }
   if (!group.length) return false;
 
-  // Being busy is now the LAST gate, not the first: the hold decision above
-  // has to happen on arrival so the bar can show it, but nothing can
-  // actually be delivered into a running turn. Whatever survives stays
-  // queued (approved entries keep their approval) and the turn-end drain
-  // picks it up.
-  if (!sessionIsIdle(sessionId)) {
-    console.log(`[driver] mail ${sessionId}: ${group.length} msg(s) queued, session busy`);
-    return false;
-  }
   // One sender gets named; several become "peer" without a handle, since no
   // single name would be honest about a coalesced delivery.
   const senders = new Set(group.map((e) => describeSender(e)));
   const originLabel = senders.size === 1
     ? `${group[0].kind === "result" ? "result" : "peer"}:${[...senders][0]}`
     : "peer";
-  const started = startTurn(sessionId, withStopNotice(sessionId, composeDelivery(group)), {
+  const body = withStopNotice(sessionId, composeDelivery(group));
+
+  // BEING BUSY IS NO LONGER A WALL. It used to be the last gate: "nothing can
+  // actually be delivered into a running turn", so mail sat queued until the
+  // turn ended. Both supported backends can now take a message into a turn
+  // that is already running — folded in at the next step boundary, nothing
+  // aborted, no work discarded — so busy is a ROUTING decision instead.
+  //
+  // This is the half of the change that matters most for unattended runs. A
+  // session no longer has to END ITS TURN in order to hear from anyone, which
+  // is the step that used to leave a parent idle and waiting on a child that
+  // never came back.
+  if (running) {
+    if (foldIntoRunningTurn(sessionId, body, originLabel)) {
+      inbox.markDelivered(group.map((e) => e.id));
+      console.log(`[driver] fold -> ${sessionId}: ${group.length} msg(s) into the running turn`);
+      broadcastStatus(sessionId, { type: "inbox_changed" });
+      // "folded", not true: the sender's receipt distinguishes joining a
+      // turn already in progress from starting one, and every caller that
+      // only cares whether anything moved still reads this as truthy.
+      return "folded";
+    }
+    // The backend cannot fold (opencode v1), or the turn ended between the
+    // check above and the push. Either way the message is still OURS — it was
+    // never handed over — so it stays queued and the turn-end drain takes it.
+    console.log(`[driver] mail ${sessionId}: ${group.length} msg(s) queued, cannot fold into this turn`);
+    return false;
+  }
+
+  // Not running, but still not ready: a session sitting on an unanswered
+  // permission card has no live turn to fold into AND must not have a new one
+  // started on top of it, or the card gets buried.
+  if (!sessionIsIdle(sessionId)) {
+    console.log(`[driver] mail ${sessionId}: ${group.length} msg(s) queued, session not ready`);
+    return false;
+  }
+  const started = startTurn(sessionId, body, {
     source: "peer",
     origin: originLabel,
     userDirected,
@@ -1813,7 +1893,7 @@ function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
     return false;
   }
   inbox.markDelivered(group.map((e) => e.id));
-  return true;
+  return "started";
 }
 
 function drainAllInboxes() {
@@ -1883,7 +1963,13 @@ function deliver(toAddr, text, { from, kind = "peer" }) {
   return {
     ok: true,
     entryId: entry.id,
-    delivered: deliveredNow,
+    delivered: !!deliveredNow,
+    // Which KIND of delivery, reported rather than left to be guessed.
+    // A sender that cannot tell "folded into the turn already running" from
+    // "queued until it finishes" will infer one from silence and start
+    // repeating itself — the same hazard this function's own receipts exist
+    // to prevent, one level down.
+    folded: deliveredNow === "folded",
     queued: !deliveredNow,
     remaining: autonomy.status().remaining,
     to,
@@ -2233,6 +2319,16 @@ function toolMessage(fromSessionId, { to, text, kind = "peer", resume = false })
   // out, and width is where the expensive failure lives.
   const fan = noteFanout(state);
   if (!fan.ok) return { ok: false, reason: fan.reason, cap: fan.cap };
+  // SEND-SIDE METERING: the initiative is taken HERE, so it is paid for here
+  // rather than out of the recipient's budget (see startTurnInner).
+  //
+  // A shut gate is deliberately NOT an error. deliver() parks the message so
+  // the strip can offer it to the user, and their release is itself a human
+  // action that resets the counter — so the released message rides a fresh
+  // budget, exactly as it did when the charge lived in startTurn. Charging
+  // only when the gate is open therefore keeps one charge per send and never
+  // double-charges a release.
+  if (!autonomy.status().paused) autonomy.chargeAutomaticTurn();
   // A session's FIRST outbound message necessarily happens before it has a
   // title, so its handle would otherwise be the provisional fallback and the
   // recipient would see "@session". The prompt that started this work is the
@@ -2426,12 +2522,22 @@ async function toolDelegate(fromSessionId, { backend, prompt, title, awaitResult
   if (creationDepthExceeded(fromSessionId)) {
     return { ok: false, reason: "depth-cap", max: MAX_CREATION_DEPTH };
   }
-  // Checked, not charged. The child's turn is charged by its own startTurn
-  // below — charging here too would bill one delegation twice. Reported up
-  // front anyway so the model is told plainly rather than having the child
-  // silently fail to start.
-  if (autonomy.status().paused) {
-    return { ok: false, reason: "autonomy-paused" };
+  // SEND-SIDE METERING. Charged HERE now, not by the child's own startTurn:
+  // delegating is the initiative, and it belongs to the session taking it.
+  //
+  // Refused up front when the gate is shut, rather than letting the child be
+  // created and silently fail to start — the model is told plainly instead.
+  // (A peer MESSAGE parks on a shut gate so the user can release it; there is
+  // nothing equivalent to park here, because a delegation with no child is
+  // not a message waiting to be delivered.)
+  //
+  // What one delegation buys, and why that is bounded: this charge, plus the
+  // single report its child eventually sends back, plus at most one staleness
+  // nudge. All three are system-originated and none is separately charged, so
+  // a delegation costs exactly one unit however it ends.
+  const charged = autonomy.chargeAutomaticTurn();
+  if (!charged.ok) {
+    return { ok: false, reason: charged.reason, count: charged.count, pauseAfter: charged.pauseAfter };
   }
 
   // PodPrompt mints the id (C1). The opencode backend expects its client
@@ -2849,7 +2955,14 @@ function renderReadSession(result) {
 // including the refusals: a receipt a model cannot interpret gets retried.
 function describeReceipt(receipt, to) {
   if (receipt.ok) {
-    const where = receipt.delivered ? "delivered now" : "queued (recipient is busy)";
+    // Three outcomes, not two. "Folded" is the one worth naming explicitly:
+    // the recipient was BUSY and got the message anyway, which is the exact
+    // case a model would otherwise read as "queued, they have not seen it"
+    // and start repeating itself about.
+    const where = receipt.folded
+      ? "delivered into the turn they are already running — they will see it at their next step"
+      : receipt.delivered ? "delivered now"
+      : "queued (they will see it when their current turn ends)";
     const left = receipt.remaining === null ? "no step limit" : `${receipt.remaining} steps left`;
     return `Message ${where} to ${to}. ${left}.`;
   }
@@ -3683,6 +3796,30 @@ function startTurnInner(sessionId, promptText, {
     // neither needs the gate open nor counts against it. Turns this message
     // then provokes ARE automatic and do count, so the cascade it starts
     // stays bounded exactly as before.
+  } else if (source === "peer" || source === "delegate") {
+    // SEND-SIDE METERING. Already paid for, at the send.
+    //
+    // The budget used to be charged here and nowhere else, which made the
+    // SENDER's initiative cost the RECIPIENT's budget: flood a session with
+    // peer mail and it was the recipient that ran out and got paused —
+    // punished for someone else's behaviour. The delivery core already named
+    // that asymmetry ("peer messaging is the harder caller — it makes a
+    // DIFFERENT session spend tokens and run tools under ITS permissions")
+    // without acting on it.
+    //
+    // It also stopped working once mail could fold into a running turn: a
+    // delivery that starts no turn would charge nothing, and the dead-man's
+    // switch would simply never trip. Charging the send instead keeps the
+    // bound — a ping-pong loop burns budget at exactly the rate it always
+    // did — and keeps it even when a whole chain runs inside one long turn.
+    //
+    // ONE CHARGE POINT PER EVENT CLASS is what makes this safe. Sends are
+    // charged in toolMessage/toolDelegate; auto-resume is charged below, on a
+    // path a send can never trigger. The two never overlap. (Charging at send
+    // was tried once before and backed out because it was charging a PROXY
+    // for a turn that might never happen. It is not a proxy now: "I tried to
+    // make another session work" is the thing being metered, and it happened
+    // whether or not a turn followed.)
   } else {
     const charged = autonomy.chargeAutomaticTurn();
     if (!charged.ok) {

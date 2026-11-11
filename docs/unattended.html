@@ -108,9 +108,22 @@
 
       <p>
         <strong>There is one counter for the whole system.</strong> Not one per
-        session, not one per delegation chain. Every automatic turn anywhere —
-        mail being delivered, a delegated session starting, a parked message
-        being released — spends from the same budget.
+        session, not one per delegation chain.
+      </p>
+
+      <p>
+        <strong>The session that acts is the one that pays.</strong> An agent
+        spends from the budget when it <em>messages</em> another session or
+        <em>delegates</em> work — the moment it takes the initiative, whether or
+        not anything comes of it. Automatic retries spend too. Receiving a
+        message costs the recipient nothing.
+      </p>
+
+      <p>
+        That is what keeps a runaway bounded: two sessions talking in circles
+        burn the budget at exactly the rate they talk, and the system stops. It
+        also means a session cannot be paused by somebody else's behaviour —
+        being on the receiving end of a flood is not something it chose.
       </p>
 
       <table class="data-table">
@@ -326,8 +339,8 @@
       <div class="callout warn">
         <div class="callout-label">Gotcha · Automatic retries spend the shared budget</div>
         <p>
-          Each one counts as an automatic turn, exactly as a delivered message
-          would. This is intentional — if retries refilled the budget instead,
+          Each one spends from the budget, exactly as sending a message or
+          delegating does. This is intentional — if retries were free instead,
           one crash-looping session would hand every other session a fresh
           twenty turns, forever. The practical consequence is that a flapping
           session quietly eats the allowance you were saving for real work.

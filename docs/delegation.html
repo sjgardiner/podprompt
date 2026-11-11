@@ -100,15 +100,22 @@
 
       <p>
         By default delegation does <strong>not</strong> wait. The call returns
-        the moment the child exists, the parent's turn can end, and when the
-        child finishes, its final reply is delivered to the parent as ordinary
-        mail — reported as delegated work finishing, with a pointer to read the
-        transcript for detail.
+        the moment the child exists, and when the child finishes, its final
+        reply is delivered to the parent as ordinary mail — reported as
+        delegated work finishing, with a pointer to read the transcript for
+        detail.
       </p>
 
       <p>
-        Asking it to wait holds the parent's turn open until the child's turn
-        ends, and returns the outcome and the child's final text directly.
+        The parent does not have to stop to receive it. If it is still working
+        when the report arrives, the report
+        <a href="messaging.html#midturn">joins the turn in progress</a>. It can
+        delegate several jobs and keep going, collecting results as they land.
+      </p>
+
+      <p>
+        Asking it to wait holds the parent's turn open until the child is
+        finished, and returns the outcome and the child's final text directly.
       </p>
 
       <table class="data-table">
@@ -132,6 +139,25 @@
           is still there; read it.
         </p>
       </div>
+
+      <h3>When a child goes quiet</h3>
+
+      <p>
+        A report is sent when the child is genuinely <strong>finished</strong> —
+        not merely when one of its turns has ended. A child that hits a provider
+        rate limit is retried automatically, and the parent hears nothing until
+        the retry has played out. This matters because the alternative is worse
+        than silence: the parent would be told the work <em>failed</em>, and
+        then the retry's real answer would have nowhere to go.
+      </p>
+
+      <p>
+        If a child stops without finishing — it is sitting on an approval nobody
+        answered, or it has simply gone quiet — the parent is sent a note saying
+        so, once, after about half an hour. The note says which of the two it
+        is, because one needs you and the other needs looking at. A child that
+        is still working is never interrupted by this, however long it takes.
+      </p>
 
       <p>
         Async also means the user is not left staring at a spinner. A parent that

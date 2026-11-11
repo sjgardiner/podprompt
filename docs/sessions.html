@@ -220,9 +220,32 @@
 
       <p>
         <strong>+ New chat</strong> opens a picker rather than immediately
-        creating anything. You choose a backend — Claude Code or OpenCode — and
-        a project, with the current one listed first. You can type a custom
-        subdirectory path instead and confirm it with <kbd>Enter</kbd>.
+        creating anything. You choose a backend and a project, with the current
+        one listed first. You can type a custom subdirectory path instead and
+        confirm it with <kbd>Enter</kbd>.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Backend</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Claude Code</strong></td>
+            <td>Anthropic's agent. Reachable by mail <a href="messaging.html#midturn">while it is working</a>.</td>
+          </tr>
+          <tr>
+            <td><strong>OpenCode v2</strong></td>
+            <td>The current OpenCode. Also reachable by mail while it is working.</td>
+          </tr>
+          <tr>
+            <td><strong>OpenCode</strong></td>
+            <td>The older OpenCode, kept for existing sessions. Mail waits until its turn ends.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        For a long job you will want to talk to while it runs, pick Claude Code
+        or OpenCode v2. Otherwise the choice is about which agent you prefer.
       </p>
 
       <p>

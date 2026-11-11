@@ -38,6 +38,7 @@
       <a class="nav-link sub" href="#handles">Handles</a>
       <a class="nav-link sub" href="#tools">What agents can do</a>
       <a class="nav-link sub" href="#waiting">Why mail waits</a>
+      <a class="nav-link sub" href="#midturn">Reaching a session that is busy</a>
       <a class="nav-link sub" href="#batch">How a batch arrives</a>
       <a class="nav-link sub" href="#control">Your controls</a>
     </div>
@@ -72,8 +73,9 @@
 
       <p>
         A message from one session to another is <strong>mail</strong>. It is
-        durable — written down, not held in memory — and delivering it
-        <strong>starts a turn</strong> in the recipient. The sender does not
+        durable — written down, not held in memory. Delivering it
+        <strong>starts a turn</strong> in the recipient, or
+        <a href="#midturn">joins one already running</a>. The sender does not
         wait for a reply; it gets a receipt saying what happened to the message,
         and if the recipient has something to say it messages back later.
       </p>
@@ -169,8 +171,9 @@
 
       <p>
         <code>message_session</code> takes a handle and some text. It returns a
-        receipt immediately — delivered, queued, or a refusal with a reason —
-        never the recipient's answer.
+        receipt immediately — delivered, delivered into a turn the recipient is
+        <a href="#midturn">already running</a>, queued, or a refusal with a
+        reason — never the recipient's answer.
       </p>
 
       <p>
@@ -233,21 +236,27 @@
       <h2>Why mail waits</h2>
 
       <p>
-        A message is not always delivered the moment it is sent. There are four
+        A message is not always delivered the moment it is sent. There are three
         reasons it might sit, and they are independent — clearing one does not
         clear another.
+      </p>
+
+      <p>
+        Being <strong>busy is not one of them</strong>. A session that is already
+        working is the easiest to reach, not the hardest: the message joins the
+        turn in progress. See <a href="#midturn">Reaching a session that is busy</a>.
       </p>
 
       <figure class="diagram">
         <svg viewBox="4 26 960 148" width="1425" height="220" role="img" aria-labelledby="mf-t mf-d">
           <title id="mf-t">What a message passes through before it is delivered</title>
-          <desc id="mf-d">A message passes four independent gates in order: the
-          autonomy budget, the watching hold, the recipient being mid-turn, and
-          your approval. Each gate can hold the message, and each is released by
-          something different — more budget or any input from you; looking away
-          for 120 seconds or switching auto-deliver on; nothing at all, since a
-          busy recipient releases it when its turn ends; and approving that
-          specific message. Clearing one gate does not clear another.</desc>
+          <desc id="mf-d">A message passes three independent gates in order: the
+          autonomy budget, the watching hold, and your approval. Each gate can
+          hold the message, and each is released by something different — more
+          budget or any input from you; looking away for 120 seconds or switching
+          auto-deliver on; and approving that specific message. Clearing one gate
+          does not clear another. Once through, the message either joins a turn
+          the recipient is already running or starts a new one.</desc>
 
           <defs>
             <marker id="m-arrow" viewBox="0 0 10 10" refX="9" refY="5"
@@ -270,32 +279,25 @@
           <path class="dgm-flow" d="M 454 53 H 494" marker-end="url(#m-arrow)"/>
 
           <rect class="dgm-box" x="500" y="30" width="150" height="46" rx="8"/>
-          <text class="dgm-text" x="575" y="52" text-anchor="middle">mid-turn</text>
-          <text class="dgm-ui-meta" x="575" y="67" text-anchor="middle">is it busy?</text>
+          <text class="dgm-text" x="575" y="52" text-anchor="middle">approval</text>
+          <text class="dgm-ui-meta" x="575" y="67" text-anchor="middle">did you allow it?</text>
           <path class="dgm-flow" d="M 654 53 H 694" marker-end="url(#m-arrow)"/>
 
-          <rect class="dgm-box" x="700" y="30" width="150" height="46" rx="8"/>
-          <text class="dgm-text" x="775" y="52" text-anchor="middle">approval</text>
-          <text class="dgm-ui-meta" x="775" y="67" text-anchor="middle">did you allow it?</text>
-          <path class="dgm-flow" d="M 854 53 H 894" marker-end="url(#m-arrow)"/>
-
-          <text class="dgm-key" x="902" y="58">delivered</text>
-          <text class="dgm-ui-meta" x="902" y="73">as a turn</text>
+          <text class="dgm-key" x="702" y="44">delivered</text>
+          <text class="dgm-ui-meta" x="702" y="62">busy &#8594; joins the turn in progress</text>
+          <text class="dgm-ui-meta" x="702" y="77">idle &#8594; starts a new one</text>
 
           <!-- the held branch under each gate -->
           <path class="dgm-boundary" d="M 175 76 V 104"/>
           <path class="dgm-boundary" d="M 375 76 V 104"/>
           <path class="dgm-boundary" d="M 575 76 V 104"/>
-          <path class="dgm-boundary" d="M 775 76 V 104"/>
 
           <rect class="card-tool" x="100" y="104" width="150" height="26" rx="6"/>
           <text class="dgm-ui-meta" x="175" y="121" text-anchor="middle">parked</text>
           <rect class="card-tool" x="300" y="104" width="150" height="26" rx="6"/>
           <text class="dgm-ui-meta" x="375" y="121" text-anchor="middle">held for you</text>
           <rect class="card-tool" x="500" y="104" width="150" height="26" rx="6"/>
-          <text class="dgm-ui-meta" x="575" y="121" text-anchor="middle">queued</text>
-          <rect class="card-tool" x="700" y="104" width="150" height="26" rx="6"/>
-          <text class="dgm-ui-meta" x="775" y="121" text-anchor="middle">held for you</text>
+          <text class="dgm-ui-meta" x="575" y="121" text-anchor="middle">held for you</text>
 
           <text class="dgm-muted" x="175" y="152" text-anchor="middle">released by any input</text>
           <text class="dgm-muted" x="175" y="167" text-anchor="middle">from you, or more budget</text>
@@ -303,16 +305,14 @@
           <text class="dgm-muted" x="375" y="152" text-anchor="middle">released after 120s away,</text>
           <text class="dgm-muted" x="375" y="167" text-anchor="middle">or by auto-deliver</text>
 
-          <text class="dgm-muted" x="575" y="152" text-anchor="middle">releases itself when</text>
-          <text class="dgm-muted" x="575" y="167" text-anchor="middle">the turn ends</text>
-
-          <text class="dgm-muted" x="775" y="152" text-anchor="middle">released by approving</text>
-          <text class="dgm-muted" x="775" y="167" text-anchor="middle">that one message</text>
+          <text class="dgm-muted" x="575" y="152" text-anchor="middle">released by approving</text>
+          <text class="dgm-muted" x="575" y="167" text-anchor="middle">that one message</text>
         </svg>
         <figcaption>
           The gates are independent and are checked in this order. Clearing one
           does not clear another &#8212; which is why mail can appear to be stuck
-          after you have just dealt with something.
+          after you have just dealt with something. Note that none of them is
+          &#8220;the recipient is busy&#8221;.
         </figcaption>
       </figure>
 
@@ -320,16 +320,12 @@
         <thead><tr><th>Reason</th><th>What releases it</th></tr></thead>
         <tbody>
           <tr>
-            <td><strong>You are watching</strong><br>The recipient is the session on your screen, and auto-delivery is off for it. Mail is held so an agent does not start typing over you.</td>
-            <td>You deliver it, or you look away for <span class="default">120 s</span>.</td>
+            <td><strong>You are watching an idle session</strong><br>The recipient is the session on your screen, it is not doing anything, and auto-delivery is off for it. Mail is held so an agent does not start typing over you.</td>
+            <td>You deliver it, you prompt the session yourself, or you look away for <span class="default">120 s</span>.</td>
           </tr>
           <tr>
-            <td><strong>Autonomy is paused</strong><br>The global budget of automatic turns is spent.</td>
+            <td><strong>Autonomy is paused</strong><br>The global budget is spent.</td>
             <td>You give it more budget, or any input from you. See <a href="unattended.html">Running unattended</a>.</td>
-          </tr>
-          <tr>
-            <td><strong>The recipient is mid-turn</strong><br>It cannot start a new turn while finishing one.</td>
-            <td>Nothing — it delivers itself when the turn ends.</td>
           </tr>
           <tr>
             <td><strong>You have not approved it</strong><br>Held mail waits for a per-message decision.</td>
@@ -349,6 +345,16 @@
       </p>
 
       <p>
+        The hold applies <strong>only while the session is idle</strong>. The
+        point of it is that a watched session you are about to type into should
+        stay still until you are ready to move on — and you release it either by
+        prompting it yourself or by accepting the mail. A session that is already
+        working was never going to give you that turn anyway, so mail goes
+        straight in. You can still take control at any moment with
+        <strong>Stop</strong>.
+      </p>
+
+      <p>
         <strong>Auto-deliver</strong>, next to the composer, switches this off
         for a session: mail arrives even while you watch. It is
         <strong>on by default for delegated sessions</strong> and off for
@@ -359,10 +365,11 @@
       <div class="callout warn">
         <div class="callout-label">Gotcha · Auto-deliver does not bypass the autonomy budget</div>
         <p>
-          It only overrides the watching hold. A delegated session with
-          auto-delivery on still spends automatic turns and still stops dead
-          when the global budget runs out. And watching a session never refills
-          that budget.
+          It only overrides the watching hold. Mail still stops arriving when
+          the global budget runs out — the budget is spent by whoever
+          <em>sends</em>, so a chatty pair of sessions stops itself whether or
+          not auto-deliver is on. And watching a session never refills that
+          budget.
         </p>
       </div>
 
@@ -383,16 +390,69 @@
       </p>
 
       <div class="callout warn">
-        <div class="callout-label">Gotcha · A sender cannot tell "held for the user" from "busy"</div>
+        <div class="callout-label">Gotcha · A queued receipt does not say who is holding it</div>
         <p>
-          Both come back as a queued receipt. An agent that reports its message
-          was "queued because the recipient is busy" may actually be waiting on
-          your approval. Check the strip rather than taking the receipt at face
-          value. Mail held by the autonomy pause is reported as not delivered,
-          but it <em>is</em> stored and will flow when you resume — that one is
-          not worth retrying.
+          A sender is told whether its message was delivered, joined a turn
+          already running, or was queued — but not <em>why</em> it was queued. An
+          agent reporting that its message is "queued" may be waiting on your
+          approval. Check the strip rather than taking the receipt at face value.
+          Mail held by the autonomy pause is reported as not delivered, but it
+          <em>is</em> stored and will flow when you resume — that one is not
+          worth retrying.
         </p>
       </div>
+    </section>
+
+    <section id="midturn">
+      <h2>Reaching a session that is busy</h2>
+
+      <p>
+        A session that is working does not have to stop to hear from anyone.
+        Mail reaches it <strong>mid-turn</strong>: the message joins the work in
+        progress rather than waiting for it to finish.
+      </p>
+
+      <p>
+        It arrives at the next natural break — after whatever tool the agent is
+        running returns, not in the middle of it. Nothing is cancelled and no
+        work is thrown away. The agent reads the message with its own task still
+        in front of it and decides what to do: act on it now, or finish what it
+        was doing first.
+      </p>
+
+      <div class="callout">
+        <div class="callout-label">Why this matters for long jobs</div>
+        <p>
+          It used to be that a session waiting on a reply had to end its turn to
+          receive one. If the thing it was waiting for never came back, nobody
+          was waiting and the work simply stopped — the sort of thing you
+          discover the next morning. A session that never has to stop listening
+          cannot get stuck that way.
+        </p>
+      </div>
+
+      <p>
+        The sender is told which happened. A receipt reads
+        <em>"delivered into the turn they are already running"</em>,
+        <em>"delivered now"</em>, or <em>"queued"</em> — so an agent can tell a
+        message that landed from one that is still waiting, instead of guessing
+        from silence and repeating itself.
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>Backend</th><th>Mail arriving mid-turn</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Claude Code</strong></td><td>Joins the turn in progress.</td></tr>
+          <tr><td><strong>OpenCode v2</strong></td><td>Joins the turn in progress.</td></tr>
+          <tr><td><strong>OpenCode</strong> (v1)</td><td>Waits until the turn ends, as before.</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        Nothing is lost on v1 — mail simply queues the way it always did. If you
+        want a long-running session to stay reachable while it works, put it on
+        Claude Code or OpenCode v2.
+      </p>
     </section>
 
     <section id="batch">
@@ -400,8 +460,8 @@
 
       <p>
         When several messages are waiting for one session, they are delivered
-        <strong>together, as a single turn</strong> — not one turn each. Three
-        messages cost one automatic turn.
+        <strong>together</strong> — as a single turn if the recipient is idle,
+        or as one entry into the turn it is already running.
       </p>
 
       <p>

@@ -222,10 +222,18 @@ function make(extra = {}) {
   await b.setModel("oc-stream", "opencode/big-pickle");
   const real = b._ids.toReal("oc-stream");
   state.events = [
-    { type: "session.text.started", data: { sessionID: real, textID: "t1" } },
-    { type: "session.text.delta", data: { sessionID: real, textID: "t1", delta: "Hel" } },
-    { type: "session.text.delta", data: { sessionID: real, textID: "t1", delta: "lo" } },
-    { type: "session.text.ended", data: { sessionID: real, textID: "t1" } },
+    // THE REAL SHAPE. There is no textID: a block is its assistantMessageID
+    // plus its ordinal WITHIN that message. Keying on a field that does not
+    // exist put every block under `undefined`.
+    { type: "session.text.started", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0 } },
+    { type: "session.text.delta", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0, delta: "Hel" } },
+    { type: "session.text.delta", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0, delta: "lo" } },
+    { type: "session.text.ended", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0 } },
+    // Reasoning ordinals restart, so this is ALSO ordinal 0 -- the collision
+    // that made an answer overwrite the thinking that preceded it.
+    { type: "session.reasoning.started", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0 } },
+    { type: "session.reasoning.delta", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0, delta: "hmm" } },
+    { type: "session.reasoning.ended", data: { sessionID: real, assistantMessageID: "m1", ordinal: 0 } },
     { type: "session.usage.updated", data: { sessionID: real, cost: 0.0123,
       tokens: { input: 1000, output: 50, reasoning: 10, cache: { read: 240, write: 0 } } } },
     { type: "session.idle", data: { sessionID: real } },
@@ -234,8 +242,8 @@ function make(extra = {}) {
   const types = [...new Set(statuses.map((s) => s.type))];
 
   check("a text block announces itself before any text arrives",
-    statuses.some((s) => s.type === "stream_start" && s.id === "t1" && s.role === "assistant"), types);
-  const deltas = statuses.filter((s) => s.type === "stream_delta");
+    statuses.some((s) => s.type === "stream_start" && s.role === "assistant"), types);
+  const deltas = statuses.filter((s) => s.type === "stream_delta" && s.role === "assistant");
   check("every delta is streamed, not just the finished block",
     deltas.length === 2, deltas.length);
   // THE TRAP: the viewer's handler takes the text SO FAR, not the increment.
@@ -244,8 +252,14 @@ function make(extra = {}) {
     deltas.map((d) => d.text).join("|") === "Hel|Hello", deltas.map((d) => d.text));
   check("the durable bubble still arrives at the end",
     bubbles.some((x) => x.role === "assistant" && x.text === "Hello"), bubbles);
-  check("...under the SAME id as the stream, so it replaces rather than duplicates",
-    bubbles.find((x) => x.role === "assistant")?.id === "t1", bubbles);
+  const aId = bubbles.find((x) => x.role === "assistant")?.id;
+  const tId = bubbles.find((x) => x.role === "thinking")?.id;
+  check("...under the SAME id as its stream, so it replaces rather than duplicates",
+    aId && statuses.some((s) => s.type === "stream_start" && s.role === "assistant" && s.id === aId), aId);
+  // Both blocks are ordinal 0 of the same message; keying on that alone makes
+  // the answer land on the thinking's id and replace it in the transcript.
+  check("a reasoning block and a text block never share an id",
+    aId && tId && aId !== tId, { assistant: aId, thinking: tId });
 
   check("spend is reported, or the cost indicator never appears",
     statuses.some((s) => s.type === "spend" && s.totalCostUsd === 0.0123), types);

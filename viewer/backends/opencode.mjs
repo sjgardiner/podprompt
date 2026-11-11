@@ -142,6 +142,22 @@ export function createOpenCodeBackend({
     }
   }
 
+  // IDENTIFYING A BLOCK OF STREAMED TEXT. There is no textID or reasoningID
+  // on these events -- a block is identified by its MESSAGE plus its ORDINAL
+  // within that message. Keying on a field that does not exist put every
+  // block under `undefined`: two text blocks in one turn merged into one, and
+  // the durable bubble fell back to a random id, so it appeared alongside the
+  // streamed text instead of replacing it.
+  //
+  // The same id is used for the live stream and the durable bubble, which is
+  // what makes the second supersede the first in the viewer.
+  //
+  // The KIND is part of the key because ordinals restart per block type: the
+  // reasoning and the text of one message are both ordinal 0, so without it
+  // the answer lands on the id of the thinking that preceded it and replaces
+  // it in the transcript.
+  const blockId = (kind, d) => `${kind}:${d.assistantMessageID || "msg"}:${d.ordinal ?? 0}`;
+
   // A model's context window, cached. Needed to turn OpenCode's raw token
   // counts into the percentage the viewer's context bar wants, and it never
   // changes for a given model -- so it is fetched once rather than on every
@@ -413,43 +429,47 @@ export function createOpenCodeBackend({
           // feeding it. stream_delta carries the text SO FAR, not the
           // increment, which is what the viewer's handler expects.
           case "session.text.started":
-            text.set(d.textID, "");
+            text.set(blockId("text", d), "");
             broadcastStatus(sessionId, {
-              type: "stream_start", id: d.textID, role: "assistant", model: state.model || null,
+              type: "stream_start", id: blockId("text", d), role: "assistant", model: state.model || null,
             });
             break;
           case "session.text.delta": {
-            const sofar = (text.get(d.textID) || "") + (d.delta || "");
-            text.set(d.textID, sofar);
-            broadcastStatus(sessionId, { type: "stream_delta", id: d.textID, role: "assistant", text: sofar });
+            const key = blockId("text", d);
+            const sofar = (text.get(key) || "") + (d.delta || "");
+            text.set(key, sofar);
+            broadcastStatus(sessionId, { type: "stream_delta", id: key, role: "assistant", text: sofar });
             break;
           }
           case "session.text.ended": {
-            const body = d.text ?? text.get(d.textID) ?? "";
+            const key = blockId("text", d);
+            const body = d.text ?? text.get(key) ?? "";
             // Still broadcast at the end: the live stream is a preview the
             // viewer discards on reload, and this is the durable bubble.
-            // Sharing the id is what lets it replace the streamed one rather
+            // Sharing the id is what lets it REPLACE the streamed one rather
             // than appear twice.
-            if (body.trim()) broadcast(sessionId, "assistant", body, d.textID || randomUUID(), null, state.model || null);
-            text.delete(d.textID);
+            if (body.trim()) broadcast(sessionId, "assistant", body, key, null, state.model || null);
+            text.delete(key);
             break;
           }
           case "session.reasoning.started":
-            reasoning.set(d.reasoningID, "");
+            reasoning.set(blockId("reasoning", d), "");
             broadcastStatus(sessionId, {
-              type: "stream_start", id: d.reasoningID, role: "thinking", model: state.model || null,
+              type: "stream_start", id: blockId("reasoning", d), role: "thinking", model: state.model || null,
             });
             break;
           case "session.reasoning.delta": {
-            const sofar = (reasoning.get(d.reasoningID) || "") + (d.delta || "");
-            reasoning.set(d.reasoningID, sofar);
-            broadcastStatus(sessionId, { type: "stream_delta", id: d.reasoningID, role: "thinking", text: sofar });
+            const key = blockId("reasoning", d);
+            const sofar = (reasoning.get(key) || "") + (d.delta || "");
+            reasoning.set(key, sofar);
+            broadcastStatus(sessionId, { type: "stream_delta", id: key, role: "thinking", text: sofar });
             break;
           }
           case "session.reasoning.ended": {
-            const body = d.text ?? reasoning.get(d.reasoningID) ?? "";
-            if (body.trim()) broadcast(sessionId, "thinking", body, d.reasoningID || randomUUID(), null, state.model || null);
-            reasoning.delete(d.reasoningID);
+            const key = blockId("reasoning", d);
+            const body = d.text ?? reasoning.get(key) ?? "";
+            if (body.trim()) broadcast(sessionId, "thinking", body, key, null, state.model || null);
+            reasoning.delete(key);
             break;
           }
           // COST AND CONTEXT. The viewer has an indicator for each, and the

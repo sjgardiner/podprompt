@@ -330,10 +330,13 @@
       </p>
 
       <p>
-        Turns that go silent are noticed too.
-        <span class="badge badge--opencode">OpenCode</span> turns are probed after
-        <span class="default">5 minutes</span> of silence; a session that is
-        waiting on <em>you</em> is exempt, since that is not a stall.
+        Turns that go silent are noticed too. An
+        <span class="badge badge--opencode">OpenCode</span> turn that produces
+        nothing at all for <span class="default">10 minutes</span> is treated as
+        wedged and ended, so it becomes something you can resume rather than
+        sitting there forever. A turn waiting on a permission or a question is
+        exempt for as long as it waits &mdash; that is not a stall, and the clock
+        would otherwise run out while the card sat on your screen.
       </p>
 
       <div class="callout warn">

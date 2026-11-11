@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 const PASSWORD = "testpw";
 const state = {
   sessions: new Map(), prompts: [], events: [], interrupts: [], minted: 1,
-  clientSuppliedIds: [], permissionReplies: [], formReplies: [],
+  clientSuppliedIds: [], permissionReplies: [], formReplies: [], commandDirs: [],
 };
 
 function sse(res, frames) {
@@ -125,12 +125,27 @@ const server = createServer((req, res) => {
       r = rest.match(/^\/form\/([^/]+)\/reply$/);
       if (r) { state.formReplies.push({ sid, id: r[1], body: json }); return send(204, {}); }
     }
+    if (p === "/api/agent") {
+      return send(200, { data: [
+        { id: "build", name: "Build", mode: "primary", hidden: false },
+        { id: "plan", name: "Plan", mode: "primary", hidden: false },
+        { id: "explore", name: "Explore", mode: "subagent", hidden: false },
+        { id: "title", name: "Title", mode: "primary", hidden: true },
+      ] });
+    }
+    if (p === "/api/command") {
+      state.commandDirs.push(url.searchParams.get("directory"));
+      return send(200, { data: [
+        { name: "init", description: "setup" },
+        { name: "review", description: "review changes" },
+      ] });
+    }
     if (p === "/api/model/default") {
       return send(200, { data: { id: "default-pick", providerID: "opencode", name: "Default Pick" } });
     }
     if (p === "/api/model") {
       return send(200, { data: [
-        { id: "big-pickle", providerID: "opencode", name: "Big Pickle", enabled: true },
+        { id: "big-pickle", providerID: "opencode", name: "Big Pickle", enabled: true, limit: { context: 200000 } },
         { id: "hidden", providerID: "opencode", name: "Hidden", enabled: false },
         // A provider configured in opencode.jsonc rather than offered by the
         // gateway. Its own `id` says nothing about the provider.
@@ -157,14 +172,15 @@ try { (await import("node:fs")).rmSync(MAP); } catch { /* fine */ }
 
 function make(extra = {}) {
   const bubbles = [];
+  const statuses = [];
   const b = createOpenCodeBackend({
     cwdRoot: "/tmp", baseUrl: `http://127.0.0.1:${PORT}`, password: PASSWORD,
-    broadcast: (s, role, text, id) => bubbles.push({ role, text }),
-    broadcastStatus: () => {},
+    broadcast: (s, role, text, id) => bubbles.push({ role, text, id }),
+    broadcastStatus: (s, st) => statuses.push(st),
     broadcastUserPrompt: (s, t) => bubbles.push({ role: "user", text: t }),
     ...extra,
   });
-  return { b, bubbles };
+  return { b, bubbles, statuses };
 }
 
 // ── ids: the server mints, we remember ────────────────────────────────────
@@ -191,6 +207,102 @@ function make(extra = {}) {
   // session. A second backend over the same file must see it.
   const { b: b2 } = make({ stateFile: MAP });
   check("the map survives a restart", b2._ids.toReal(cid) === real);
+}
+
+// ── what the viewer is actually told during a turn ────────────────────────
+//
+// THE GAP THIS CLOSES. This backend broadcast exactly ONE status type,
+// turn_start, while the viewer renders live streaming text, a context bar and
+// a spend indicator from three others. None of them ever appeared for an
+// OpenCode session, and nothing failed -- the viewer simply had nothing to
+// draw. Asserting the SET of types emitted is what turns the next omission
+// into a failing test instead of something a user has to notice.
+{
+  const { b, bubbles, statuses } = make({ stateFile: MAP });
+  await b.setModel("oc-stream", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-stream");
+  state.events = [
+    { type: "session.text.started", data: { sessionID: real, textID: "t1" } },
+    { type: "session.text.delta", data: { sessionID: real, textID: "t1", delta: "Hel" } },
+    { type: "session.text.delta", data: { sessionID: real, textID: "t1", delta: "lo" } },
+    { type: "session.text.ended", data: { sessionID: real, textID: "t1" } },
+    { type: "session.usage.updated", data: { sessionID: real, cost: 0.0123,
+      tokens: { input: 1000, output: 50, reasoning: 10, cache: { read: 240, write: 0 } } } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc-stream", "hi", { model: "opencode/big-pickle" });
+  const types = [...new Set(statuses.map((s) => s.type))];
+
+  check("a text block announces itself before any text arrives",
+    statuses.some((s) => s.type === "stream_start" && s.id === "t1" && s.role === "assistant"), types);
+  const deltas = statuses.filter((s) => s.type === "stream_delta");
+  check("every delta is streamed, not just the finished block",
+    deltas.length === 2, deltas.length);
+  // THE TRAP: the viewer's handler takes the text SO FAR, not the increment.
+  // Sending increments renders "Hel" then "lo" instead of "Hello".
+  check("...carrying the text SO FAR, not the increment",
+    deltas.map((d) => d.text).join("|") === "Hel|Hello", deltas.map((d) => d.text));
+  check("the durable bubble still arrives at the end",
+    bubbles.some((x) => x.role === "assistant" && x.text === "Hello"), bubbles);
+  check("...under the SAME id as the stream, so it replaces rather than duplicates",
+    bubbles.find((x) => x.role === "assistant")?.id === "t1", bubbles);
+
+  check("spend is reported, or the cost indicator never appears",
+    statuses.some((s) => s.type === "spend" && s.totalCostUsd === 0.0123), types);
+  const ctx = statuses.find((s) => s.type === "context_usage");
+  check("context usage is reported", !!ctx, types);
+  // Prompt-side only: output and reasoning are generation, and only occupy
+  // the window on the NEXT request, where they arrive counted in `input`.
+  check("...counting the prompt side, including what came from cache",
+    ctx?.totalTokens === 1240, ctx?.totalTokens);
+  check("...against the model's real context window",
+    ctx?.maxTokens === 200000, ctx?.maxTokens);
+  check("...as a percentage the bar can draw",
+    Math.abs(ctx.percentage - 0.62) < 0.01, ctx?.percentage);
+}
+{
+  // An unknown context window must draw NO bar rather than one against a
+  // guessed denominator.
+  const { b, statuses } = make({ stateFile: MAP });
+  await b.setModel("oc-nolimit", "opencode/hidden");
+  const real = b._ids.toReal("oc-nolimit");
+  state.events = [
+    { type: "session.usage.updated", data: { sessionID: real, cost: 1,
+      tokens: { input: 10, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } } },
+    { type: "session.idle", data: { sessionID: real } },
+  ];
+  await b.runTurn("oc-nolimit", "hi", { model: "opencode/no-such-model" });
+  check("an unknown context window reports no context usage at all",
+    !statuses.some((s) => s.type === "context_usage"), statuses.map((s) => s.type));
+  check("...but spend is still reported", statuses.some((s) => s.type === "spend"));
+}
+
+// ── commands and modes ────────────────────────────────────────────────────
+{
+  const { b } = make({ stateFile: MAP });
+  await new Promise((r) => setTimeout(r, 120));   // the command fetch is fire-and-forget
+  const cmds = b.getKnownCommands();
+  check("getKnownCommands returns the contract's shape, not an array",
+    !Array.isArray(cmds) && Array.isArray(cmds.slash_commands), cmds);
+  check("...with every key the viewer reads",
+    "terminal_slash_commands" in cmds && "skills" in cmds, Object.keys(cmds));
+  check("...populated from the server", cmds.slash_commands.includes("review"), cmds.slash_commands);
+  // Directory-scoped: without one the server answers for ITS default
+  // directory and returns nothing, which is indistinguishable from "this
+  // backend has no commands".
+  check("the command fetch is scoped to the workspace",
+    state.commandDirs.includes("/tmp"), state.commandDirs);
+
+  const modes = await b.listModes("oc-modes");
+  check("listModes returns {current, available}",
+    modes && typeof modes.current === "string" && Array.isArray(modes.available), modes);
+  check("only the primary, user-selectable agents are offered",
+    modes.available.map((m) => m.id).sort().join(",") === "build,plan",
+    modes.available.map((m) => m.id));
+  check("...so a subagent-only agent is not offered as a mode",
+    !modes.available.some((m) => m.id === "explore"), modes.available);
+  check("...and neither is an internal hidden one",
+    !modes.available.some((m) => m.id === "title"), modes.available);
 }
 
 // ── the project picker ────────────────────────────────────────────────────

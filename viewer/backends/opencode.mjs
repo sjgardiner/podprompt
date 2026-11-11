@@ -142,6 +142,52 @@ export function createOpenCodeBackend({
     }
   }
 
+  // A model's context window, cached. Needed to turn OpenCode's raw token
+  // counts into the percentage the viewer's context bar wants, and it never
+  // changes for a given model -- so it is fetched once rather than on every
+  // usage event, of which there are several per turn.
+  const contextLimits = new Map();   // "provider/id" -> context window, 0 = unknown
+  let limitsLoaded = false;
+
+  async function contextLimitFor(modelId) {
+    if (!modelId) return 0;
+    if (contextLimits.has(modelId)) return contextLimits.get(modelId);
+    if (!limitsLoaded) {
+      try {
+        for (const m of (await api("/api/model", { timeoutMs: 8000 })) || []) {
+          contextLimits.set(`${m.providerID}/${m.id}`, m.limit?.context || 0);
+        }
+        limitsLoaded = true;
+      } catch {
+        // An unknown limit means no context bar, which is strictly better
+        // than a bar drawn against a guessed denominator.
+        return 0;
+      }
+    }
+    return contextLimits.get(modelId) || 0;
+  }
+
+  // Slash commands, cached. GET /api/command is DIRECTORY-SCOPED: called
+  // without one it answers for the server's default directory and returned
+  // zero rows here, which looks identical to "this backend has no commands".
+  // With the workspace supplied it returns the real set (init, review, goal).
+  //
+  // Kept in the contract's shape rather than the API's: the viewer reads
+  // slash_commands and terminal_slash_commands, and `skills` is a Claude Code
+  // concept with no OpenCode equivalent, so it stays an empty array rather
+  // than being omitted.
+  let knownCommands = { slash_commands: [], terminal_slash_commands: [], skills: [] };
+
+  async function refreshCommands() {
+    try {
+      const rows = await api(`/api/command?directory=${encodeURIComponent(cwdRoot || "/")}`,
+        { timeoutMs: 8000 });
+      const names = (rows || []).map((c) => c.name).filter(Boolean);
+      if (names.length) knownCommands = { slash_commands: names, terminal_slash_commands: [], skills: [] };
+    } catch { /* keep whatever we had; an empty palette is not worth an error */ }
+  }
+  refreshCommands();
+
   // GET /api/session IS PAGED, and says so only if you look. It returns one
   // page -- 50 rows by default -- plus a SIBLING of `data`:
   //
@@ -345,7 +391,14 @@ export function createOpenCodeBackend({
       // the turn race the subscription and are lost.
       const started = (async () => {
         await new Promise((r) => setTimeout(r, 50));
-        return api(`/api/session/${realId}/prompt`, { method: "POST", body: { text: promptText } });
+        // The agent rides along with the prompt as well as being set on the
+        // session. setMode is best-effort by contract -- the driver records
+        // the choice even when the backend call fails -- so carrying it here
+        // is what makes the recorded choice actually take effect on the turn.
+        return api(`/api/session/${realId}/prompt`, {
+          method: "POST",
+          body: { text: promptText, ...(state?.mode ? { agent: state.mode } : {}) },
+        });
       })();
       started.catch((e) => { outcome = { reason: "error", error: e.message }; ctl.abort(); });
 
@@ -353,21 +406,79 @@ export function createOpenCodeBackend({
         lastEventAt = Date.now();
         const d = ev.data || {};
         switch (ev.type) {
-          case "session.text.started": text.set(d.textID, ""); break;
-          case "session.text.delta": text.set(d.textID, (text.get(d.textID) || "") + (d.delta || "")); break;
+          // STREAMING. The deltas were being accumulated and thrown away,
+          // with one broadcast at the END of each block -- so a long answer
+          // sat invisible until it was finished and then appeared all at
+          // once. The viewer has rendered live text all along; nothing was
+          // feeding it. stream_delta carries the text SO FAR, not the
+          // increment, which is what the viewer's handler expects.
+          case "session.text.started":
+            text.set(d.textID, "");
+            broadcastStatus(sessionId, {
+              type: "stream_start", id: d.textID, role: "assistant", model: state.model || null,
+            });
+            break;
+          case "session.text.delta": {
+            const sofar = (text.get(d.textID) || "") + (d.delta || "");
+            text.set(d.textID, sofar);
+            broadcastStatus(sessionId, { type: "stream_delta", id: d.textID, role: "assistant", text: sofar });
+            break;
+          }
           case "session.text.ended": {
             const body = d.text ?? text.get(d.textID) ?? "";
+            // Still broadcast at the end: the live stream is a preview the
+            // viewer discards on reload, and this is the durable bubble.
+            // Sharing the id is what lets it replace the streamed one rather
+            // than appear twice.
             if (body.trim()) broadcast(sessionId, "assistant", body, d.textID || randomUUID(), null, state.model || null);
             text.delete(d.textID);
             break;
           }
-          case "session.reasoning.started": reasoning.set(d.reasoningID, ""); break;
-          case "session.reasoning.delta":
-            reasoning.set(d.reasoningID, (reasoning.get(d.reasoningID) || "") + (d.delta || "")); break;
+          case "session.reasoning.started":
+            reasoning.set(d.reasoningID, "");
+            broadcastStatus(sessionId, {
+              type: "stream_start", id: d.reasoningID, role: "thinking", model: state.model || null,
+            });
+            break;
+          case "session.reasoning.delta": {
+            const sofar = (reasoning.get(d.reasoningID) || "") + (d.delta || "");
+            reasoning.set(d.reasoningID, sofar);
+            broadcastStatus(sessionId, { type: "stream_delta", id: d.reasoningID, role: "thinking", text: sofar });
+            break;
+          }
           case "session.reasoning.ended": {
             const body = d.text ?? reasoning.get(d.reasoningID) ?? "";
             if (body.trim()) broadcast(sessionId, "thinking", body, d.reasoningID || randomUUID(), null, state.model || null);
             reasoning.delete(d.reasoningID);
+            break;
+          }
+          // COST AND CONTEXT. The viewer has an indicator for each, and the
+          // spend one exists specifically for this backend -- its tooltip
+          // reads "OpenCode has no subscription/quota concept". Neither was
+          // ever fed, so both stayed hidden for every OpenCode session.
+          case "session.usage.updated":
+          case "session.step.ended": {
+            if (typeof d.cost === "number") {
+              broadcastStatus(sessionId, { type: "spend", totalCostUsd: d.cost });
+            }
+            const t = d.tokens;
+            if (t) {
+              // PROMPT-SIDE tokens only. What occupies the context window is
+              // what gets sent, including the part served from cache; output
+              // and reasoning are generation, and only occupy the window on
+              // the NEXT request, where they arrive counted in `input`.
+              const used = (t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
+              const max = await contextLimitFor(state.model);
+              if (max > 0) {
+                broadcastStatus(sessionId, {
+                  type: "context_usage",
+                  percentage: Math.min(100, (used / max) * 100),
+                  totalTokens: used,
+                  maxTokens: max,
+                  model: state.model || null,
+                });
+              }
+            }
             break;
           }
           case "session.tool.called":
@@ -599,7 +710,14 @@ export function createOpenCodeBackend({
       }
     },
 
-    getKnownCommands() { return []; },
+    // THE SHAPE IS THE CONTRACT. viewer.html reads cmds.slash_commands and
+    // cmds.terminal_slash_commands; an array satisfies neither, so the
+    // command palette showed nothing for an OpenCode session -- quietly,
+    // because the viewer defaults each missing key to [].
+    //
+    // Synchronous by contract (the driver calls it without awaiting from the
+    // warm-up path), so this serves a cache that refreshCommands() fills.
+    getKnownCommands() { return knownCommands; },
 
     cwdForSession(sessionId, fallbackCwd) { return fallbackCwd || cwdRoot; },
 
@@ -819,6 +937,33 @@ export function createOpenCodeBackend({
       } catch { /* a missing default is not worth failing the list over */ }
 
       return { available, current };
+    },
+
+    // Agents are OpenCode's modes. Only the PRIMARY, non-hidden ones are a
+    // user's choice: `build` and `plan`. The subagent ones (general, explore)
+    // are spawned by the model, and the hidden ones (compaction, title,
+    // summary) are internal bookkeeping -- offering either as a mode would
+    // let someone put a session into a state it was never meant to run in.
+    async listModes(sessionId) {
+      try {
+        const rows = await api("/api/agent", { timeoutMs: 8000 });
+        const available = (rows || [])
+          .filter((a) => a.mode === "primary" && !a.hidden)
+          .map((a) => ({ id: a.id, label: a.name || a.id }));
+        if (!available.length) return null;
+        // `build` is the server's default. The driver prefers an explicit
+        // in-run choice over this, so it only shows through before one.
+        return { current: "build", available };
+      } catch (e) {
+        console.error("[opencode] listModes failed:", e.message);
+        return null;
+      }
+    },
+
+    async setMode(sessionId, mode) {
+      const realId = await ensureSession(sessionId);
+      await api(`/api/session/${realId}/agent`, { method: "POST", body: { agent: mode } });
+      return { ok: true };
     },
 
     async setModel(sessionId, modelId) {

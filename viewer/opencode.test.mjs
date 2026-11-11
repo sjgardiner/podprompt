@@ -318,6 +318,25 @@ function make(extra = {}) {
   check("...and neither is an internal hidden one",
     !modes.available.some((m) => m.id === "title"), modes.available);
 }
+{
+  // THE COLD-START RACE, which is what actually shipped. The backend is
+  // constructed in the same tick `opencode serve` is spawned, and the server
+  // needs seconds before it accepts connections -- so the first fetch ALWAYS
+  // loses. A one-shot filler therefore left the palette empty for the entire
+  // life of the process. listModels never showed this because it refetches on
+  // every request; a cache with no second chance is a permanent failure.
+  const { b: cold } = make({ stateFile: MAP, baseUrl: "http://127.0.0.1:1" });
+  await new Promise((r) => setTimeout(r, 120));
+  check("a failed first fetch still answers in the contract's shape",
+    Array.isArray(cold.getKnownCommands().slash_commands)
+    && cold.getKnownCommands().slash_commands.length === 0, cold.getKnownCommands());
+
+  const { b: warm } = make({ stateFile: MAP });
+  warm.getKnownCommands();                      // the read that tops it up
+  await new Promise((r) => setTimeout(r, 200));
+  check("...and a later read recovers it, with no timer and no restart",
+    warm.getKnownCommands().slash_commands.includes("review"), warm.getKnownCommands());
+}
 
 // ── the project picker ────────────────────────────────────────────────────
 //

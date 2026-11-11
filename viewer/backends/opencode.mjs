@@ -197,14 +197,27 @@ export function createOpenCodeBackend({
   // concept with no OpenCode equivalent, so it stays an empty array rather
   // than being omitted.
   let knownCommands = { slash_commands: [], terminal_slash_commands: [], skills: [] };
+  let commandFetch = null;
 
-  async function refreshCommands() {
-    try {
-      const rows = await api(`/api/command?directory=${encodeURIComponent(cwdRoot || "/")}`,
-        { timeoutMs: 8000 });
-      const names = (rows || []).map((c) => c.name).filter(Boolean);
-      if (names.length) knownCommands = { slash_commands: names, terminal_slash_commands: [], skills: [] };
-    } catch { /* keep whatever we had; an empty palette is not worth an error */ }
+  // RETRIED UNTIL IT LANDS ONCE. The backend is constructed in the same tick
+  // that `opencode serve` is spawned, and the server needs several seconds
+  // before it accepts connections -- so the first fetch always loses that
+  // race and fails. A one-shot filler therefore left the palette empty for
+  // the entire life of the process. listModels never showed this because it
+  // refetches on every request; this is a cache, and a cache with no second
+  // chance is just a permanent failure.
+  function refreshCommands() {
+    if (commandFetch) return commandFetch;
+    commandFetch = (async () => {
+      try {
+        const rows = await api(`/api/command?directory=${encodeURIComponent(cwdRoot || "/")}`,
+          { timeoutMs: 8000 });
+        const names = (rows || []).map((c) => c.name).filter(Boolean);
+        if (names.length) knownCommands = { slash_commands: names, terminal_slash_commands: [], skills: [] };
+      } catch { /* a later call tries again; an empty palette is not an error */ }
+      commandFetch = null;
+    })();
+    return commandFetch;
   }
   refreshCommands();
 
@@ -752,8 +765,13 @@ export function createOpenCodeBackend({
     // because the viewer defaults each missing key to [].
     //
     // Synchronous by contract (the driver calls it without awaiting from the
-    // warm-up path), so this serves a cache that refreshCommands() fills.
-    getKnownCommands() { return knownCommands; },
+    // warm-up path), so this serves a cache -- and tops it up in the
+    // background whenever it is still empty, which is what recovers from the
+    // cold-start race above without a timer or a retry ladder.
+    getKnownCommands() {
+      if (!knownCommands.slash_commands.length) refreshCommands();
+      return knownCommands;
+    },
 
     cwdForSession(sessionId, fallbackCwd) { return fallbackCwd || cwdRoot; },
 

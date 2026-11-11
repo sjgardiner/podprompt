@@ -1,8 +1,8 @@
-// Unit tests for the OpenCode v2 backend.
+// Unit tests for the OpenCode backend.
 //
 // Run: node viewer/opencode.test.mjs
 //
-// Hermetic: a tiny fake v2 server stands in for `opencode2 serve`, so this
+// Hermetic: a tiny fake server stands in for `opencode2 serve`, so this
 // runs without that binary installed and without touching anything live. The
 // EVENT FRAMES it replays were captured from a real 2.2.7 server, including
 // the failure path, so the parsing is tested against what the server actually
@@ -25,7 +25,7 @@ function check(name, cond, detail) {
   failures.push(`${name}${detail !== undefined ? ` — ${JSON.stringify(detail)}` : ""}`);
 }
 
-// ── a fake v2 server ───────────────────────────────────────────────────────
+// ── a fake OpenCode server ───────────────────────────────────────────────────────
 const PASSWORD = "testpw";
 const state = {
   sessions: new Map(), prompts: [], events: [], interrupts: [], minted: 1,
@@ -69,6 +69,11 @@ const server = createServer((req, res) => {
     if (m) {
       const [, sid, rest] = m;
       if (!rest) {
+        if (req.method === "DELETE") {
+          if (state.failDeletes) return send(500, { error: "nope" });
+          state.sessions.delete(sid);
+          return send(200, { data: {} });
+        }
         if (req.method === "GET") {
           return state.sessions.has(sid) ? send(200, { data: state.sessions.get(sid) }) : send(404, { error: "no" });
         }
@@ -505,6 +510,38 @@ function make(extra = {}) {
   await b.runTurn("oc2-form-mine", "x", {});
   check("another session's question never reaches this one",
     asked === 0 && state.formReplies.length === 0, { asked, replies: state.formReplies.length });
+}
+
+// ── deleting a session forgets its id ──────────────────────────────────────
+//
+// The map is the one piece of state that cannot be recomputed, so it is also
+// the one that must not accumulate junk. A deleted session's entry points at
+// a 404: the map would grow without bound, and reusing the client id would
+// resolve to a dead session instead of creating a live one.
+{
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-doomed", "opencode/big-pickle");
+  const real = b._ids.toReal("oc2-doomed");
+  check("the session is mapped before deletion", typeof real === "string");
+  await b.deleteSession("oc2-doomed");
+  check("the mapping is gone afterwards", b._ids.toReal("oc2-doomed") === null);
+  check("...in both directions", b._ids.toClient(real) === null);
+  // Durability: the forget must reach disk, or a restart resurrects it.
+  const { b: b2 } = make({ stateFile: MAP });
+  check("...and the forget survives a restart", b2._ids.toReal("oc2-doomed") === null);
+}
+{
+  // A FAILED delete must NOT forget: the session is still there, and losing
+  // the mapping would strand it with no way to address it again.
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-keeper", "opencode/big-pickle");
+  const real = b._ids.toReal("oc2-keeper");
+  state.failDeletes = true;
+  let threw = false;
+  try { await b.deleteSession("oc2-keeper"); } catch { threw = true; }
+  state.failDeletes = false;
+  check("a failed delete is reported, not swallowed", threw);
+  check("...and the mapping survives it", b._ids.toReal("oc2-keeper") === real);
 }
 
 // ── history ordering ───────────────────────────────────────────────────────

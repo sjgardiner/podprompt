@@ -680,7 +680,17 @@ export function createOpenCodeBackend({
       return { ok: true };
     },
     async deleteSession(sessionId) {
-      await api(`/api/session/${requireRealId(sessionId)}`, { method: "DELETE" });
+      const realId = requireRealId(sessionId);
+      await api(`/api/session/${realId}`, { method: "DELETE" });
+      // Forget the mapping too. The server has no such session any more, so a
+      // surviving entry is a pointer to a 404 -- it would make the map grow
+      // without bound, and anything that reused the client id would resolve
+      // to a dead session instead of creating a live one. Only AFTER the
+      // delete succeeds: dropping it first would strand a session that is
+      // still there if the request failed.
+      clientToReal.delete(sessionId);
+      realToClient.delete(realId);
+      saveMap();
       return { ok: true };
     },
     async renameSession(sessionId, title) {

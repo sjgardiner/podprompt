@@ -107,10 +107,10 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   involved. Mutually exclusive with --viewer and
                   --opencode: pick exactly one interface per launch.
 
-  --opencode      Same, but OpenCode's own terminal UI (`opencode2`) instead
+  --opencode      Same, but OpenCode's own terminal UI (`opencode`) instead
                   of Claude Code's. OpenCode manages its own provider/model
                   credentials entirely separately from --direct/--direct-api
-                  above (see `opencode2 auth login`, or just use this flag
+                  above (see `opencode auth login`, or just use this flag
                   once — its first-run login flow persists to this host's
                   own standard config/data directories, e.g.
                   ~/.config/opencode/, independent of ~/.claude/ — see
@@ -159,7 +159,7 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   claude-code and opencode backends are always available to
                   pick per-session from the browser's "+ New chat" picker —
                   this also starts a
-                  headless `opencode2 serve` instance inside the container
+                  headless `opencode serve` instance inside the container
                   for you, so nothing needs to be started by hand first.
                   There is no command-line flag for "the default backend"
                   anymore: the new-chat picker just remembers whichever
@@ -175,14 +175,14 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   permission responses from the browser). Default: 7844.
 
   --opencode-port PORT
-                  Loopback-only port `opencode2 serve` listens on inside the
+                  Loopback-only port `opencode serve` listens on inside the
                   container, and that driver.mjs's opencode backend connects
                   to. Never published to the host via -p (driver.mjs and
-                  `opencode2 serve` talk to each other inside the container's
+                  `opencode serve` talk to each other inside the container's
                   own network namespace; --host-network drops the -p publishes
                   anyway) — only worth changing if something else inside the
                   image ever collides with the default.
-                  Relevant whenever `opencode2 serve` might run at all: under
+                  Relevant whenever `opencode serve` might run at all: under
                   --viewer (always) or under a plain --opencode launch.
                   Default: 7845.
 
@@ -295,7 +295,7 @@ UTILITY OPTIONS:
 PASS-THROUGH ARGUMENTS:
 
   Any option not listed above is passed directly to whichever binary
-  --claude/--opencode selects (`claude` or `opencode2`) — only meaningful
+  --claude/--opencode selects (`claude` or `opencode`) — only meaningful
   alongside one of those two flags, since --viewer (the default) never
   execs either binary directly; passthrough args given alongside --viewer
   are ignored, with a warning, rather than silently dropped. For
@@ -308,7 +308,7 @@ PASS-THROUGH ARGUMENTS:
     --agent AGENT_NAME               Launch a specific subagent at startup.
 
   For --opencode, these are opencode's own flags instead (see
-  `opencode2 --help`), for example:
+  `opencode --help`), for example:
 
     --continue                       Continue the last session.
     --model PROVIDER/MODEL           Use a specific model for this run.
@@ -345,9 +345,9 @@ PERSISTENT STATE:
   the host's own ~/.config/opencode/, ~/.local/share/opencode/,
   ~/.local/state/opencode/, and ~/.cache/opencode/ is bind-mounted straight
   onto the identical default path inside the container (no XDG_*_HOME
-  redirection needed — that's already where a plain `opencode2` looks; see
-  `opencode2 debug paths`). A login done via `--opencode`'s TUI is
-  what --viewer's headless `opencode2 serve` then uses too, and vice versa,
+  redirection needed — that's already where a plain `opencode` looks; see
+  `opencode debug paths`). A login done via `--opencode`'s TUI is
+  what --viewer's headless `opencode serve` then uses too, and vice versa,
   since both get the same four mounts.
 
   PodPrompt's own state — the deployed viewer app (server.py, viewer.html,
@@ -423,7 +423,7 @@ VIEWER_DRIVER_PORT=7844
 CONFIG_DIR="$HOME/.claude"
 # OpenCode's own config/data/state/cache — real, standard host locations
 # (matching what a native, non-Docker opencode install already uses; see
-# `opencode2 debug paths`), independent of CONFIG_DIR. Kept separate so
+# `opencode debug paths`), independent of CONFIG_DIR. Kept separate so
 # OpenCode's state doesn't get bundled with Claude Code's, and so it can be
 # inspected/backed up on its own terms.
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
@@ -864,15 +864,10 @@ TUI_BACKEND=""      # "" (viewer, the default), "claude-code", or "opencode"
 
 # Which binary each TUI backend actually execs.
 #
-# `opencode2` IS OpenCode, and the only one. The 1.x line (`opencode-ai`) is
-# gone. The binary keeps the `2` suffix purely because 2.x ships as a
-# different npm package (`@opencode/cli`) that also declares a bin named
-# `opencode`; the image installs it under its own prefix and symlinks it here
-# so npm never has to arbitrate that collision. Nothing a user types says 2.
 tui_cmd_for() {
     case "$1" in
-        opencode) echo "opencode2" ;;
-        *)        echo "claude"    ;;
+        opencode) echo "opencode" ;;
+        *)        echo "claude"   ;;
     esac
 }
 VIEWER_ENABLED=1    # the viewer is now the default interface; --claude/--opencode flip this off below
@@ -1032,7 +1027,7 @@ fi
 
 # --direct-api only ever configures Claude Code's own credentials
 # (ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL below) — meaningless, not just
-# unused, for a plain `--opencode` TUI launch, which execs `opencode2`
+# unused, for a plain `--opencode` TUI launch, which execs `opencode`
 # directly and never reads those env vars at all. Only checked for that
 # direct-TUI case: under --viewer, a claude-code-backed session can still
 # exist alongside opencode ones and would legitimately use this config,
@@ -1051,7 +1046,7 @@ if [ -n "$TUI_BACKEND" ] && [ "$TUI_BACKEND" != "claude-code" ] \
    && [ "$PROVIDER_EXPLICIT" = 1 ] && [ "$PROVIDER" = "direct-api" ]; then
     echo "Error: --direct-api configures Claude Code's own credentials and has no effect on --opencode." >&2
     echo "OpenCode manages its own provider auth — run 'podprompt --opencode' and use its" >&2
-    echo "TUI's own first-run login (or 'opencode2 auth login' inside the container); it persists to this host's" >&2
+    echo "TUI's own first-run login (or 'opencode auth login' inside the container); it persists to this host's" >&2
     echo "own ~/.config/opencode/ and ~/.local/share/opencode/, independent of ~/.claude/." >&2
     exit 1
 fi
@@ -1196,7 +1191,7 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     # server.py is a plain broadcast relay; driver.mjs (Agent SDK-based) is
     # what actually drives either backend and is what the browser will talk
     # to once it has an input box; start-viewer.sh also launches a headless
-    # `opencode2 serve` alongside them, loopback-only, so the opencode backend
+    # `opencode serve` alongside them, loopback-only, so the opencode backend
     # is always usable regardless of which backend any given session picks.
     # All three start inside the container.
     echo "Viewer: opening http://localhost:$VIEWER_PORT in your browser once it's up..."
@@ -1244,7 +1239,7 @@ fi
 # ── Interface (plain terminal) ────────────────────────────────────────────────
 # The base image's Node entrypoint execs any bare command that's actually on
 # PATH as-is (falls back to prefixing `node` only for things it can't find,
-# or scripts without +x) — `claude` and `opencode2` both work as bare
+# or scripts without +x) — `claude` and `opencode` both work as bare
 # commands unmodified. Only --viewer needs --entrypoint, since it launches a
 # custom script instead of a single binary.
 
@@ -1259,11 +1254,11 @@ else
     RUN_CMD=(claude "${PASSTHROUGH_ARGS[@]}")
 fi
 
-# OpenCode's own credentials/config/sessions (see `opencode2 debug paths`)
+# OpenCode's own credentials/config/sessions (see `opencode debug paths`)
 # persist by bind-mounting this host's own standard XDG directories
 # straight onto opencode's identical default paths inside the container —
 # no XDG_*_HOME override needed, since that's already where a plain
-# `opencode2` looks. Populated whenever opencode might actually run in this
+# `opencode` looks. Populated whenever opencode might actually run in this
 # container: --viewer (the default) always starts a headless `opencode
 # serve` regardless of which backend any given session picks, and a plain
 # --opencode launch runs its TUI directly. A container that's neither

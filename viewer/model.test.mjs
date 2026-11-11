@@ -233,7 +233,7 @@ const realish = {
   const cc = readFileSync(new URL("./backends/claude-code.mjs", import.meta.url), "utf8");
   const oc = readFileSync(new URL("./opencode-plugin.ts", import.meta.url), "utf8");
   const ccDelegate = cc.slice(cc.indexOf('"delegate_session"'));
-  // v2 registers tools by name on an editor rather than as a keyed object,
+  // OpenCode registers tools by name on an editor rather than as a keyed object,
   // and declares arguments as JSON Schema rather than with schema builders.
   const ocDelegate = oc.slice(oc.indexOf('name: "delegate_session"'));
 

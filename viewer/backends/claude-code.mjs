@@ -1201,7 +1201,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // once the tool call in flight returns — with nothing aborted and no work
     // discarded. Measured 2026-11-11: injected 5s into a three-step turn
     // whose first step had 9s left to run, and step two obeyed it. That is
-    // the same semantics OpenCode v2 gives `delivery: "steer"`, which is not
+    // the same semantics OpenCode gives `delivery: "steer"`, which is not
     // a coincidence: an agent loop is inference -> tools -> inference, and a
     // step boundary is the only place a message can enter without throwing
     // away the work in progress.

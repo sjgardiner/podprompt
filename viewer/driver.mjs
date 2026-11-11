@@ -481,28 +481,22 @@ function noteRateLimitInfo(backendId, info) {
   }
 }
 
-// OpenCode v2 protects its API with HTTP Basic auth. The username is always
-// "opencode" (v2 dropped OPENCODE_SERVER_USERNAME entirely); only the password
-// can be set. Left unset, the server mints a fresh one per start and PRINTS it
-// — which nothing here could read back — so one is generated and injected
-// instead, exactly as PODPROMPT_TOKEN is for the v1 plugin.
+// OpenCode protects its API with HTTP Basic auth. The username is always
+// "opencode" and only the password can be set. Left unset, the server mints a
+// fresh one per start and PRINTS it — which nothing here could read back — so
+// one is generated and injected instead, exactly as PODPROMPT_TOKEN is for
+// the plugin.
 //
 // Per process, never persisted: it only has to outlive the child it guards,
 // and a password on disk is a password to leak.
 //
 // Defined up here rather than beside PODPROMPT_TOKEN because the backend map
 // below closes over it, and a `const` is not hoisted into use.
-// OpenCode always uses HTTP Basic auth with the username "opencode"; only
-// the password is settable, and OPENCODE_SERVER_USERNAME does not exist in
-// the binary at all.
 const OPENCODE_SERVER_PASSWORD = randomUUID();
 
-// The binary is `opencode2`: OpenCode 2.x ships as @opencode/cli, a different
-// npm package from the 1.x `opencode-ai`, and BOTH declare a bin named
-// `opencode`. The image installs 2.x under its own prefix and symlinks it
-// here so npm never has to arbitrate that collision. One constant, so the
-// day the name settles there is a single line to change.
-const OPENCODE_BIN = "opencode2";
+// One constant for the binary, so the day its name changes there is a single
+// line to edit rather than a search.
+const OPENCODE_BIN = "opencode";
 
 const backendHooks = {
   cwdRoot: args.cwd, broadcast, broadcastStatus, requestApproval,
@@ -533,10 +527,7 @@ const backendHooks = {
 const backends = {
   "claude-code": createClaudeCodeBackend(backendHooks),
   // "opencode" IS OpenCode 2. The 1.x backend is gone; there is no second
-  // OpenCode and nothing in the UI, the CLI or the docs says "v2", because
-  // from a user's point of view there is only one and this is it.
-  //
-  // driver.mjs itself spawns and supervises the headless `opencode2 serve`
+  // driver.mjs itself spawns and supervises the headless `opencode serve`
   // this talks to (see the process-ownership block after this map), so
   // baseUrl only needs to agree with the port that child is started on.
   "opencode": createOpenCodeBackend({
@@ -545,8 +536,7 @@ const backends = {
     password: OPENCODE_SERVER_PASSWORD,
     // clientId -> the id the server minted. Durable because the mapping
     // cannot be recomputed: see that backend's header for why the server has
-    // to mint it. The filename is unchanged from when this backend was
-    // registered as "opencode-v2", so existing sessions keep working.
+    // to mint it.
     stateFile: nodePath.join(PODPROMPT_STATE_DIR, "viewer-opencode-sessions.json"),
   }),
 };
@@ -1769,11 +1759,11 @@ function parkUnapproved(sessionId, group, reason, approved) {
 // specified to refuse rather than to swallow, and the caller above re-queues
 // on false rather than marking delivered.
 //
-// Backends without the capability (opencode v1) simply do not define the
-// method, and their mail queues exactly as it always did. That asymmetry is
-// deliberate and visible rather than papered over: v1 is on a deprecation
-// path, and pretending otherwise would mean the same action silently
-// behaving differently depending on a backend the sender cannot see.
+// A backend without the capability simply does not define the method, and
+// its mail queues instead — the receipt then says "queued" rather than
+// claiming a fold that never happened. Both current backends implement it;
+// the check stays because a receipt that lies about delivery is the precise
+// hazard receipts exist to prevent.
 async function foldIntoRunningTurn(sessionId, body, originLabel) {
   const state = sessions.get(sessionId);
   const backend = state?.backend;
@@ -1898,7 +1888,7 @@ async function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
       // only cares whether anything moved still reads this as truthy.
       return "folded";
     }
-    // The backend cannot fold (opencode v1), or the turn ended between the
+    // The backend cannot fold, or the turn ended between the
     // check above and the push. Either way the message is still OURS — it was
     // never handed over — so it stays queued and the turn-end drain takes it.
     console.log(`[driver] mail ${sessionId}: ${group.length} msg(s) queued, cannot fold into this turn`);
@@ -1931,7 +1921,7 @@ async function maybeDrainInbox(sessionId, { userDirected = false } = {}) {
 
 function drainAllInboxes() {
   for (const sessionId of inbox.sessionsWithPending()) {
-    // Fire-and-forget: a drain can now await a backend (opencode v2 posts a
+    // Fire-and-forget: a drain can now await a backend (OpenCode posts a
     // steer over HTTP), and nothing here has an answer to wait for. Failures
     // are logged rather than swallowed -- mail stays queued either way.
     maybeDrainInbox(sessionId).catch((e) =>
@@ -3213,9 +3203,9 @@ function writeOpencodeConfigDoc() {
   try {
     mkdirSync(PODPROMPT_STATE_DIR, { recursive: true });
     // The same paragraph Claude Code gets through its MCP server, written
-    // where OpenCode will read it. v1 pulled this over HTTP from a system
-    // prompt hook that v2 removed; `instructions` is the replacement, and it
-    // keeps the text single-sourced from messagingSystemPrompt either way.
+    // where OpenCode will read it. `instructions` is the mechanism OpenCode
+    // offers for this, and it keeps the text single-sourced from
+    // messagingSystemPrompt.
     writeFileSync(OPENCODE_INSTRUCTIONS_DOC, messagingSystemPrompt({ prefix: "" }));
     writeFileSync(OPENCODE_CONFIG_DOC, JSON.stringify({
       permission: {

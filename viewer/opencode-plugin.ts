@@ -2,7 +2,7 @@
 // implementation.
 //
 // Claude Code gets the same tools through an in-process SDK MCP server built
-// per turn. OpenCode runs in its own process (`opencode2 serve`, spawned and
+// per turn. OpenCode runs in its own process (`opencode serve`, spawned and
 // supervised by driver.mjs), so this reaches the identical driver functions
 // over HTTP instead. Deliberately thin: it contributes identity and nothing
 // else. Every decision — resolution, authorization, budgets, parking — lives
@@ -17,32 +17,20 @@
 // downstream trust rule decorative. Verified against 2.2.7: `execute(input,
 // ctx)` receives ctx.sessionID, ctx.agent, ctx.messageID and an AbortSignal.
 //
-// ── written for the v2 plugin API ──────────────────────────────────────────
-// v2 rewrote this API and refuses a v1 plugin outright ("Plugin must export a
-// default definition with an id and an effect or setup function"), which left
-// v2 sessions with no messaging tools at all. The differences that matter:
-//
-//   v1                                  v2
-//   export default (async () => ({…}))  export default { id, setup(ctx) }
-//   return { tool: { name: tool({…}) } } ctx.tool.transform(e => e.add({…}))
-//   args: { x: tool.schema.string() }   input: { JSON Schema }
-//   context.ask({permission, patterns}) ctx.permission.assert({sessionID,
-//                                         action, resources})
-//
 // Deliberately NO `@opencode/plugin` import. The documented `Plugin.define()`
-// helper is a typing convenience, and a plain object loads identically — so
+// helper is a typing convenience, and a plain object loads identically -- so
 // this file has no npm dependency and the config directory needs no
 // node_modules installed into it.
 //
 // One thing this file CANNOT do: make an action prompt for permission.
 // `assert` only asks if a config rule says to, and a plugin cannot install
 // one (ctx.agent.transform accepts the edit and drops it; ctx.permission.hook
-// never fires for assert — both measured). driver.mjs therefore ships a
+// never fires for assert -- both measured). driver.mjs therefore ships a
 // config document declaring `podprompt-message` and `podprompt-delegate` as
-// "ask". If that document is missing, these tools still work — they just stop
-// asking, which is why the driver logs loudly when it cannot write it.
+// "ask". If that document is missing, these tools still work -- they just
+// stop asking, which is why the driver logs loudly when it cannot write it.
 
-// Injected by driver.mjs when it spawns `opencode2 serve`. The token is
+// Injected by driver.mjs when it spawns `opencode serve`. The token is
 // minted per driver start and never written to disk, so it rotates on every
 // restart. It identifies this plugin as a local-realm caller; see PD10 for
 // why the driver's routes need that at all.
@@ -73,11 +61,10 @@ async function driverFetch(path: string, init?: RequestInit) {
   return { status: res.status, body }
 }
 
-// A v2 tool returns structured content. The driver already renders every
-// outcome as prose, so there is exactly one shape here and the title/metadata
-// that v1 returned are dropped rather than faked: nothing downstream reads
-// them on v2, because driver.mjs knows the parent/child pairing from its own
-// /delegate call and never needed to recover it off a tool part.
+// A tool returns structured content. The driver already renders every outcome
+// as prose, so there is exactly one shape here: no title and no metadata,
+// because driver.mjs knows the parent/child pairing from its own /delegate
+// call and never needs to recover it off a tool part.
 const say = (text: string) => ({ content: text })
 
 // Asks the user, via PodPrompt's own approval card, before an action that
@@ -94,14 +81,14 @@ export default {
   id: "podprompt",
 
   async setup(ctx: any) {
-    // Inert unless driver.mjs spawned this `opencode2 serve`. The plugin lives
+    // Inert unless driver.mjs spawned this `opencode serve`. The plugin lives
     // in OpenCode's global plugin directory because that is the only location
     // OpenCode actually auto-discovers, and that directory is shared with the
     // user's own OpenCode — including native, non-Docker installs on the same
     // host.
     //
     // So it registers NOTHING unless the driver put it there and set this
-    // variable. Otherwise a plain `opencode2` run would advertise tools that
+    // variable. Otherwise a plain `opencode` run would advertise tools that
     // cannot reach any driver, and a model would waste turns discovering that
     // for itself.
     if (!process.env.PODPROMPT_DRIVER_URL) return

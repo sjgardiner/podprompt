@@ -1,24 +1,7 @@
 // OpenCode backend.
 //
-// Drives OpenCode 2 (`@opencode/cli`, exposed in the image as `opencode2`)
-// over its HTTP API, against a server driver.mjs spawns and supervises.
-//
-// WHY THE BINARY HAS A 2 IN IT AND NOTHING ELSE DOES
-// --------------------------------------------------
-// OpenCode 2 ships as a SEPARATE npm package from the 1.x line (`opencode-ai`)
-// with an independent version number, and BOTH declare a bin named `opencode`.
-// The image installs 2.x under its own prefix and exposes it as `opencode2` so
-// npm never has to arbitrate that collision. That suffix is a packaging
-// detail: there is one OpenCode here, and this is it.
-//
-// It is also worth knowing why the move happened, because the symptom was
-// confusing. The 1.x line advertised `delivery: "steer"` -- admitting a
-// message into a turn that is ALREADY RUNNING, folded in at the next step
-// boundary with nothing aborted -- and silently dropped it. Its model resolver
-// only understood the legacy `aisdk` provider descriptors while every active
-// model is published against the native `@opencode/ai/providers/*` adapters,
-// so no turn ever ran on that path. "We are already on the latest opencode"
-// was true of 1.x and said nothing about 2.x.
+// Drives OpenCode over its HTTP API, against a server driver.mjs spawns and
+// supervises. `opencode serve`, the TUI and the CLI are all the one binary.
 //
 // WHY THERE IS AN ID MAP HERE
 // ---------------------------
@@ -35,7 +18,7 @@
 //     server-minted  ses_e34e511b2ffexq1C7R2GQICzx2  -> succeeded
 //     client-supplied ses_557cc71f92ac7d7a           -> provider.free-limit
 //
-// Isolated by pointing `opencode2 run --server` at this very server, where it
+// Isolated by pointing `opencode run --server` at this very server, where it
 // worked: the server was never the problem. The gateway appears to attribute
 // free usage via something carried in a server-minted id (they are
 // time-ordered, and the server forwards the id to the provider in an
@@ -515,10 +498,11 @@ export function createOpenCodeBackend({
   // failed at something, with no card and no reason.
   //
   // Both routes are SESSION-scoped (/api/session/{id}/permission/{req}/reply),
-  // and the event carries location.directory with it. v1 had neither: a bare
-  // reply resolved against the server's default directory and silently found
-  // nothing, which is why that backend caches a directoryForSession map. That
-  // whole class of bug cannot occur here, so nothing models it.
+  // and the event carries location.directory with it, so neither a directory
+  // cache nor a
+  // directory-scoped reply is needed -- a reply that resolved against the
+  // server's default directory would silently find nothing, and that whole
+  // class of bug cannot occur with a session-scoped route.
   async function replyPermission(realId, requestID, decision) {
     // The reply vocabulary is the server's: "once" | "always" | "reject" --
     // so the viewer's existing decision shape maps over unchanged.
@@ -717,7 +701,7 @@ export function createOpenCodeBackend({
         //                  model: {providerID, id}, time }
         //   user      -> { type, text, time }   // no parts array at all
         // `parts`/`payload` are kept as fallbacks so this keeps working if a
-        // later version converges on the v1 shape.
+        // later version changes its mind.
         const parts = Array.isArray(m.parts) ? m.parts
           : Array.isArray(m.content) ? m.content
           : [];

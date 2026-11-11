@@ -113,7 +113,7 @@ function bodyOf(name) {
     /typeof backend\?\.injectIntoTurn !== "function"/.test(fold));
   check("...and a backend throwing is treated as a refusal, not a crash",
     /catch \(e\) \{[\s\S]*?return false;/.test(fold));
-  // Awaited, because a backend may answer over HTTP (opencode v2 posts a
+  // Awaited, because a backend may answer over HTTP (OpenCode posts a
   // steer). Still compared with === true: a promise, a truthy string or an
   // undefined from a backend that does not implement it must all read as
   // "not taken", or mail would be marked delivered on a guess.

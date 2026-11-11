@@ -2,7 +2,7 @@
 //
 // Run: node viewer/opencode.test.mjs
 //
-// Hermetic: a tiny fake server stands in for `opencode2 serve`, so this
+// Hermetic: a tiny fake server stands in for `opencode serve`, so this
 // runs without that binary installed and without touching anything live. The
 // EVENT FRAMES it replays were captured from a real 2.2.7 server, including
 // the failure path, so the parsing is tested against what the server actually
@@ -118,10 +118,8 @@ const server = createServer((req, res) => {
           cursor: { previous: null, next: end < all.length ? Buffer.from(String(end)).toString("base64") : null },
         });
       }
-      // Replies are SESSION-scoped in v2. Recording the full path matters:
-      // addressing one of these to the wrong session is a 404, and v1's
-      // equivalent bug (a reply resolved against the server's default
-      // directory) is exactly the class this shape was chosen to avoid.
+      // Replies are SESSION-scoped. Recording the full path matters:
+      // addressing one of these to the wrong session is a 404.
       let r = rest.match(/^\/permission\/([^/]+)\/reply$/);
       if (r) { state.permissionReplies.push({ sid, id: r[1], body: json }); return send(204, {}); }
       r = rest.match(/^\/form\/([^/]+)\/reply$/);
@@ -140,7 +138,7 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const PORT = server.address().port;
 
-const MAP = "/tmp/pp-oc2-map-test.json";
+const MAP = "/tmp/pp-opencode-map-test.json";
 try { (await import("node:fs")).rmSync(MAP); } catch { /* fine */ }
 
 function make(extra = {}) {
@@ -165,7 +163,7 @@ function make(extra = {}) {
 {
   const { b } = make({ stateFile: MAP });
   state.clientSuppliedIds.length = 0;
-  const cid = "oc2-map-a";
+  const cid = "oc-map-a";
   check("a fresh client id has no real id yet", b._ids.toReal(cid) === null);
 
   const real = await b.setModel(cid, "opencode/big-pickle").then(() => b._ids.toReal(cid));
@@ -201,11 +199,11 @@ function make(extra = {}) {
 // existence: a renamed method here is the same outage.
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-whoami", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-whoami");
+  await b.setModel("oc-whoami", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-whoami");
   check("the backend can translate a server id back to ours",
     typeof b.clientIdForReal === "function");
-  check("...and it round-trips", b.clientIdForReal(real) === "oc2-whoami", b.clientIdForReal?.(real));
+  check("...and it round-trips", b.clientIdForReal(real) === "oc-whoami", b.clientIdForReal?.(real));
   check("an id we never minted translates to nothing, not to itself",
     b.clientIdForReal("ses_somebodyelse") === null, b.clientIdForReal?.("ses_somebodyelse"));
 
@@ -232,7 +230,7 @@ function make(extra = {}) {
     { type: "session.idle", data: { sessionID: "SID" } },
   ];
   const { b, bubbles } = make();
-  const sid = "oc2-happy";
+  const sid = "oc-happy";
   state.events.forEach((e) => { if (e.data) e.data.sessionID = b._ids.toReal(sid); });
   const st = { cwd: "/tmp" };
   const outcome = await b.runTurn(sid, "hello", st);
@@ -248,7 +246,7 @@ function make(extra = {}) {
 // ── THE HANG: a failed turn emits no session.idle ──────────────────────────
 {
   const { b } = make();
-  const sid = "oc2-fail";
+  const sid = "oc-fail";
   state.events = [
     { type: "session.execution.started", data: { sessionID: b._ids.toReal(sid) } },
     { type: "session.step.failed", data: { sessionID: b._ids.toReal(sid), error: { type: "provider.free-limit", message: "Free usage limit reached." } } },
@@ -270,7 +268,7 @@ function make(extra = {}) {
 // ── interruption ───────────────────────────────────────────────────────────
 {
   const { b } = make();
-  const sid = "oc2-int";
+  const sid = "oc-int";
   state.events = [
     { type: "session.execution.started", data: { sessionID: b._ids.toReal(sid) } },
     { type: "session.execution.interrupted", data: { sessionID: b._ids.toReal(sid) } },
@@ -286,7 +284,7 @@ function make(extra = {}) {
 // ── steer: the reason this backend exists ──────────────────────────────────
 {
   const { b } = make({ stateFile: MAP });
-  const sid = "oc2-steer";
+  const sid = "oc-steer";
   // A session with a RUNNING turn necessarily has a real id already; mint one
   // the way driving it would.
   await b.setModel(sid, "opencode/big-pickle");
@@ -302,7 +300,7 @@ function make(extra = {}) {
     last?.delivery === "steer", last);
   check("...to the right session", last?.sid === b._ids.toReal(sid));
   check("a session we have never driven is refused, not invented",
-    (await b.injectIntoTurn("oc2-never-seen", { turnInFlight: true }, "hi")) === false);
+    (await b.injectIntoTurn("oc-never-seen", { turnInFlight: true }, "hi")) === false);
 
   // A refusal must be reported, never thrown: the driver re-queues on false,
   // and an exception would escape into the delivery path instead.
@@ -317,7 +315,7 @@ function make(extra = {}) {
 // ── listings ───────────────────────────────────────────────────────────────
 {
   const { b } = make();
-  await b.setModel("oc2-listed", "opencode/big-pickle");
+  await b.setModel("oc-listed", "opencode/big-pickle");
   // THE SHAPE IS THE CONTRACT. gatherAllSessions() does
   // `perBackend.flatMap((r) => r.sessions)`, so returning the array directly
   // yields [undefined] and kills every /sessions poll with an error naming a
@@ -325,15 +323,15 @@ function make(extra = {}) {
   // The driver passes its live session index and the pending-approval lookup;
   // a backend that ignores them reports every session as idle forever, which
   // silently disables mid-turn delivery for that backend.
-  const idx = new Map([["oc2-listed", { turnInFlight: true }]]);
+  const idx = new Map([["oc-listed", { turnInFlight: true }]]);
   const listed = await b.listSessions({}, idx, () => "permission");
   check("listSessions returns an ENVELOPE, not a bare array",
     !Array.isArray(listed) && Array.isArray(listed.sessions), listed);
   check("...with the unreachable fields gatherAllSessions reduces over",
     typeof listed.unreachableCount === "number" && Array.isArray(listed.unreachableSessions));
   const sessions = listed.sessions;
-  check("our own sessions are listed", sessions.some((s) => s.sessionId === "oc2-listed"), sessions);
-  const row = sessions.find((s) => s.sessionId === "oc2-listed");
+  check("our own sessions are listed", sessions.some((s) => s.sessionId === "oc-listed"), sessions);
+  const row = sessions.find((s) => s.sessionId === "oc-listed");
   check("a busy session is reported as inFlight, or mail can never fold into it",
     row?.inFlight === true, row);
   check("...and a pending approval is reported too", row?.pendingKind === "permission", row);
@@ -366,7 +364,7 @@ function make(extra = {}) {
   // Enough sessions to need several pages at the fake server's page size.
   const ids = [];
   for (let i = 0; i < 7; i++) {
-    const cid = `oc2-page-${i}`;
+    const cid = `oc-page-${i}`;
     await b.setModel(cid, "opencode/big-pickle");
     ids.push(cid);
   }
@@ -384,7 +382,7 @@ function make(extra = {}) {
   // added nothing new ends the walk" -- without it this hangs until the page
   // cap, re-fetching the same rows every time.
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-stuck-page", "opencode/big-pickle");
+  await b.setModel("oc-stuck-page", "opencode/big-pickle");
   state.pageSize = 2;
   state.stuckCursor = true;
   state.listCalls = 0;
@@ -405,15 +403,15 @@ function make(extra = {}) {
 // archived sessions. Paging surfaces all of them.
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-arch", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-arch");
+  await b.setModel("oc-arch", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-arch");
   state.sessions.get(real).time.archived = 1794358597744;
   state.pageSize = 50;
   const { sessions } = await b.listSessions({}, new Map(), () => null);
-  const row = sessions.find((s) => s.sessionId === "oc2-arch");
+  const row = sessions.find((s) => s.sessionId === "oc-arch");
   check("an archived session is reported as archived", row?.archived === true, row);
   check("...and tagged for the panel", row?.tag === "archived", row?.tag);
-  const live = sessions.find((s) => s.sessionId === "oc2-page-0");
+  const live = sessions.find((s) => s.sessionId === "oc-page-0");
   check("...while a live one is not", live?.archived === false && live?.tag === null, live);
 
   const models = await b.listModels();
@@ -436,7 +434,7 @@ function make(extra = {}) {
 
 // ── permissions ────────────────────────────────────────────────────────────
 //
-// v2 BLOCKS the tool call and emits permission.asked. Before this was wired,
+// OpenCode BLOCKS the tool call and emits permission.asked. Before this was wired,
 // nothing listened: pending-approvals stayed empty and the turn died minutes
 // later with an unexplained tool failure. So the failure this guards against
 // is not a crash — it is silence.
@@ -445,44 +443,44 @@ function make(extra = {}) {
 // reply vocabulary is "once" | "always" | "reject".
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: false }) });
-  await b.setModel("oc2-perm", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm");
+  await b.setModel("oc-perm", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "session.execution.started", data: { sessionID: real } },
     { type: "permission.asked", data: { sessionID: real, id: "per_1", action: "read", resources: [".env"] } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-perm", "x", {});
+  await b.runTurn("oc-perm", "x", {});
   check("a permission ask produces exactly one reply", state.permissionReplies.length === 1, state.permissionReplies);
   check("...addressed to the SESSION that asked", state.permissionReplies[0]?.sid === real, state.permissionReplies[0]);
   check("...naming the request it answers", state.permissionReplies[0]?.id === "per_1");
-  check("allow-once maps to the v2 decision \"once\"",
+  check("allow-once maps to the decision \"once\"",
     state.permissionReplies[0]?.body?.decision === "once", state.permissionReplies[0]?.body);
 }
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: true, always: true }) });
-  await b.setModel("oc2-perm-always", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm-always");
+  await b.setModel("oc-perm-always", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm-always");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_2", action: "read", resources: [".env"] } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-perm-always", "x", {});
+  await b.runTurn("oc-perm-always", "x", {});
   check("allow-always widens the scope to \"always\"",
     state.permissionReplies[0]?.body?.decision === "always", state.permissionReplies[0]?.body);
 }
 {
   const { b } = make({ stateFile: MAP, requestApproval: async () => ({ allow: false }) });
-  await b.setModel("oc2-perm-deny", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm-deny");
+  await b.setModel("oc-perm-deny", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm-deny");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_3", action: "podprompt-message", resources: ["@x"] } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-perm-deny", "x", {});
+  await b.runTurn("oc-perm-deny", "x", {});
   check("a denial maps to \"reject\"",
     state.permissionReplies[0]?.body?.decision === "reject", state.permissionReplies[0]?.body);
 }
@@ -496,14 +494,14 @@ function make(extra = {}) {
     requestApproval: async () => { asked++; return { allow: true }; },
     autoApproveForSession: () => true,
   });
-  await b.setModel("oc2-perm-auto", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm-auto");
+  await b.setModel("oc-perm-auto", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm-auto");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_4", action: "read", resources: [".env"] } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-perm-auto", "x", {});
+  await b.runTurn("oc-perm-auto", "x", {});
   check("auto-approve answers without raising a card at all", asked === 0, asked);
   check("...and still replies, or the turn stays blocked forever",
     state.permissionReplies[0]?.body?.decision === "once", state.permissionReplies[0]);
@@ -525,8 +523,8 @@ function make(extra = {}) {
       return true;
     },
   });
-  await b.setModel("oc2-perm-ext", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm-ext");
+  await b.setModel("oc-perm-ext", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm-ext");
   state.permissionReplies.length = 0;
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_5", action: "read", resources: [".env"] } },
@@ -534,7 +532,7 @@ function make(extra = {}) {
     { type: "session.idle", data: { sessionID: real } },
   ];
   const outcome = await Promise.race([
-    b.runTurn("oc2-perm-ext", "x", {}),
+    b.runTurn("oc-perm-ext", "x", {}),
     new Promise((r) => setTimeout(() => r({ reason: "HUNG" }), 8000)),
   ]);
   check("an externally-answered request retracts our card", resolved.includes("per_5"), resolved);
@@ -551,15 +549,15 @@ function make(extra = {}) {
     requestApproval: () => new Promise(() => {}),   // never settles, ever
     approvalDrainMs: 200,
   });
-  await b.setModel("oc2-perm-stuck", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-perm-stuck");
+  await b.setModel("oc-perm-stuck", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-perm-stuck");
   state.events = [
     { type: "permission.asked", data: { sessionID: real, id: "per_6", action: "read", resources: [".env"] } },
     { type: "session.execution.interrupted", data: { sessionID: real } },
   ];
   const st = {};
   const outcome = await Promise.race([
-    b.runTurn("oc2-perm-stuck", "x", st),
+    b.runTurn("oc-perm-stuck", "x", st),
     new Promise((r) => setTimeout(() => r({ reason: "HUNG" }), 8000)),
   ]);
   check("an unanswered card does not pin the turn open", outcome.reason !== "HUNG", outcome);
@@ -568,8 +566,8 @@ function make(extra = {}) {
 
 // ── questions (AskUserQuestion) ────────────────────────────────────────────
 //
-// v2 models a question as a FORM with typed fields, which is a richer shape
-// than v1's question event. The viewer card reads Claude's QuestionInfo[],
+// A question is modelled as a FORM with typed fields. The viewer card reads
+// Claude's QuestionInfo[],
 // so the mapping is asserted in both directions: fields -> card, answer ->
 // {answer: {fieldKey: value}}.
 {
@@ -593,8 +591,8 @@ function make(extra = {}) {
       return { text: "inbox", structured: [{ header: "Module name", answer: "inbox" }] };
     },
   });
-  await b.setModel("oc2-form", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-form");
+  await b.setModel("oc-form", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-form");
   form.sessionID = real;
   state.formReplies.length = 0;
   // NESTED, exactly as the server sends it. permission.asked puts its
@@ -607,7 +605,7 @@ function make(extra = {}) {
     { type: "form.created", data: { form: { ...form } } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-form", "x", {});
+  await b.runTurn("oc-form", "x", {});
   check("a question form raises a question card, not a permission one",
     seenCard?.kind === "question" && seenCard?.toolName === "AskUserQuestion", seenCard);
   check("the field becomes a question the viewer can render",
@@ -624,14 +622,14 @@ function make(extra = {}) {
   // were multiple-choice would write nonsense into it.
   let asked = 0;
   const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
-  await b.setModel("oc2-form-other", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-form-other");
+  await b.setModel("oc-form-other", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-form-other");
   state.formReplies.length = 0;
   state.events = [
     { type: "form.created", data: { form: { sessionID: real, id: "frm_2", metadata: { kind: "login" }, fields: [] } } },
     { type: "session.idle", data: { sessionID: real } },
   ];
-  await b.runTurn("oc2-form-other", "x", {});
+  await b.runTurn("oc-form-other", "x", {});
   check("a non-question form is left alone", asked === 0 && state.formReplies.length === 0,
     { asked, replies: state.formReplies.length });
 }
@@ -642,8 +640,8 @@ function make(extra = {}) {
   // one session's question on another session's screen.
   let asked = 0;
   const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
-  await b.setModel("oc2-form-mine", "opencode/big-pickle");
-  const mine = b._ids.toReal("oc2-form-mine");
+  await b.setModel("oc-form-mine", "opencode/big-pickle");
+  const mine = b._ids.toReal("oc-form-mine");
   state.formReplies.length = 0;
   state.events = [
     { type: "form.created", data: { form: {
@@ -652,7 +650,7 @@ function make(extra = {}) {
     } } },
     { type: "session.idle", data: { sessionID: mine } },
   ];
-  await b.runTurn("oc2-form-mine", "x", {});
+  await b.runTurn("oc-form-mine", "x", {});
   check("another session's question never reaches this one",
     asked === 0 && state.formReplies.length === 0, { asked, replies: state.formReplies.length });
 }
@@ -665,54 +663,55 @@ function make(extra = {}) {
 // resolve to a dead session instead of creating a live one.
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-doomed", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-doomed");
+  await b.setModel("oc-doomed", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-doomed");
   check("the session is mapped before deletion", typeof real === "string");
-  await b.deleteSession("oc2-doomed");
-  check("the mapping is gone afterwards", b._ids.toReal("oc2-doomed") === null);
+  await b.deleteSession("oc-doomed");
+  check("the mapping is gone afterwards", b._ids.toReal("oc-doomed") === null);
   check("...in both directions", b._ids.toClient(real) === null);
   // Durability: the forget must reach disk, or a restart resurrects it.
   const { b: b2 } = make({ stateFile: MAP });
-  check("...and the forget survives a restart", b2._ids.toReal("oc2-doomed") === null);
+  check("...and the forget survives a restart", b2._ids.toReal("oc-doomed") === null);
 }
 {
   // A FAILED delete must NOT forget: the session is still there, and losing
   // the mapping would strand it with no way to address it again.
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-keeper", "opencode/big-pickle");
-  const real = b._ids.toReal("oc2-keeper");
+  await b.setModel("oc-keeper", "opencode/big-pickle");
+  const real = b._ids.toReal("oc-keeper");
   state.failDeletes = true;
   let threw = false;
-  try { await b.deleteSession("oc2-keeper"); } catch { threw = true; }
+  try { await b.deleteSession("oc-keeper"); } catch { threw = true; }
   state.failDeletes = false;
   check("a failed delete is reported, not swallowed", threw);
-  check("...and the mapping survives it", b._ids.toReal("oc2-keeper") === real);
+  check("...and the mapping survives it", b._ids.toReal("oc-keeper") === real);
 }
 
 // ── history ordering ───────────────────────────────────────────────────────
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-hist", "opencode/big-pickle");   // mint its real id
-  state.messages = [ // v2 returns NEWEST first
+  await b.setModel("oc-hist", "opencode/big-pickle");   // mint its real id
+  state.messages = [ // the server returns NEWEST first
     { type: "assistant", info: { id: "a2", modelID: "m" }, parts: [{ type: "text", text: "second", id: "p2" }] },
     { type: "user", info: { id: "u1" }, parts: [{ type: "text", text: "first" }] },
   ];
-  const h = await b.getSessionHistory("oc2-hist");
+  const h = await b.getSessionHistory("oc-hist");
   check("history for an unknown session is empty, not an error",
-    (await b.getSessionHistory("oc2-no-such")).length === 0);
+    (await b.getSessionHistory("oc-no-such")).length === 0);
   check("history is re-ordered oldest-first for the viewer",
     h[0]?.text === "first" && h[1]?.text === "second", h.map((x) => x.text));
 }
 
 // ── history: the REAL 2.2.7 wire shape ─────────────────────────────────────
 // The block above encodes the shape this backend was *written against*, which
-// is the v1 shape. A live 2.2.7 server does not send that, and the mismatch is
+// is the shape this backend was first written against. A live server does not
+// send that, and the mismatch is
 // silent: every field reads back undefined, so the viewer showed an EMPTY
-// transcript for every v2 session rather than a broken one. These rows are
+// transcript for every session rather than a broken one. These rows are
 // copied verbatim from a real server, so the assumption cannot drift back.
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-real", "opencode/big-pickle");
+  await b.setModel("oc-real", "opencode/big-pickle");
   state.messages = [ // newest first, exactly as the server returns them
     { id: "m4", type: "idle", content: null, time: { created: 40 } },
     { id: "m3", type: "assistant", time: { created: 30 },
@@ -724,8 +723,8 @@ function make(extra = {}) {
     { id: "m2", type: "user", text: "the question", time: { created: 20 } },
     { id: "m1", type: "model-switched", content: null, time: { created: 10 } },
   ];
-  const h = await b.getSessionHistory("oc2-real");
-  check("a real v2 transcript is not empty (parts live under `content`)",
+  const h = await b.getSessionHistory("oc-real");
+  check("a real transcript is not empty (parts live under `content`)",
     h.length === 3, h);
   check("user text is read from the row itself, which has no parts array",
     h[0]?.role === "user" && h[0]?.text === "the question", h[0]);
@@ -753,7 +752,7 @@ function make(extra = {}) {
 // the end is correct. Reversing per page would interleave them.
 {
   const { b } = make({ stateFile: MAP });
-  await b.setModel("oc2-long", "opencode/big-pickle");
+  await b.setModel("oc-long", "opencode/big-pickle");
   // 9 user messages, newest first, as the server would hand them over.
   state.messages = [];
   for (let i = 9; i >= 1; i--) {
@@ -761,7 +760,7 @@ function make(extra = {}) {
   }
   state.msgPageSize = 2;
   state.msgCalls = 0;
-  const h = await b.getSessionHistory("oc2-long");
+  const h = await b.getSessionHistory("oc-long");
   check("the whole transcript is read, not just the first page",
     h.length === 9, { got: h.length, want: 9, calls: state.msgCalls });
   check("...which takes more than one request", state.msgCalls > 1, state.msgCalls);

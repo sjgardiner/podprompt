@@ -235,13 +235,21 @@ function make(extra = {}) {
   // `perBackend.flatMap((r) => r.sessions)`, so returning the array directly
   // yields [undefined] and kills every /sessions poll with an error naming a
   // property rather than a backend. That happened; this pins it.
-  const listed = await b.listSessions();
+  // The driver passes its live session index and the pending-approval lookup;
+  // a backend that ignores them reports every session as idle forever, which
+  // silently disables mid-turn delivery for that backend.
+  const idx = new Map([["oc2-listed", { turnInFlight: true }]]);
+  const listed = await b.listSessions({}, idx, () => "permission");
   check("listSessions returns an ENVELOPE, not a bare array",
     !Array.isArray(listed) && Array.isArray(listed.sessions), listed);
   check("...with the unreachable fields gatherAllSessions reduces over",
     typeof listed.unreachableCount === "number" && Array.isArray(listed.unreachableSessions));
   const sessions = listed.sessions;
   check("our own sessions are listed", sessions.some((s) => s.sessionId === "oc2-listed"), sessions);
+  const row = sessions.find((s) => s.sessionId === "oc2-listed");
+  check("a busy session is reported as inFlight, or mail can never fold into it",
+    row?.inFlight === true, row);
+  check("...and a pending approval is reported too", row?.pendingKind === "permission", row);
   check("every row names its backend, or the session becomes unroutable",
     sessions.every((s) => s.backend === "opencode-v2"), sessions.map((s) => s.backend));
   check("sessions belonging to other clients are filtered out",

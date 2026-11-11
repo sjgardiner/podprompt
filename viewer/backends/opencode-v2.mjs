@@ -32,15 +32,26 @@
 //     client-supplied ses_557cc71f92ac7d7a           -> provider.free-limit
 //
 // Isolated by pointing `opencode2 run --server` at this very server, where it
-// worked: the server was never the problem, the ids were. The gateway appears
-// to attribute free usage via something carried in a server-minted id (they
-// are time-ordered, and the server also forwards the id to the provider in an
+// worked: the server was never the problem. The gateway appears to attribute
+// free usage via something carried in a server-minted id (they are
+// time-ordered, and the server forwards the id to the provider in an
 // `x-opencode-session` header); an arbitrary id it did not issue gets no
 // entitlement.
 //
-// So the server mints, we record, and the map is persisted -- which is what
-// v1 has been doing all along. The apparently-clunky bookkeeping was load
-// bearing, and the elegant version was a bug.
+// HONEST CAVEAT ON THAT EVIDENCE. The free quota is ALSO genuinely
+// intermittent and account-wide -- the native CLI, which has nothing to do
+// with any of this, fails the same way when it is spent. So the A/B pairs
+// above are suggestive rather than conclusive: two back-to-back comparisons
+// both favoured server-minted ids, and across roughly forty minutes of trying
+// a client-supplied id NEVER once succeeded while server-minted ids and the
+// CLI succeeded several times -- but a bursty quota could in principle produce
+// that pattern by chance. Settling it properly needs an interleaved run of
+// several alternating pairs while quota is available.
+//
+// The change is kept regardless, because it is also simply what v1 does and
+// what the API documents: the server owns its ids. Relying on an undocumented
+// willingness to accept arbitrary ones was the riskier design even if it
+// turns out not to have been the cause.
 //
 // WHAT IS STILL MISSING
 // ---------------------
@@ -410,23 +421,36 @@ export function createOpenCodeV2Backend({
     // populate sessionIdToBackend, which is how a session is routed back to
     // the runtime that owns it. Without it a v2 session becomes unroutable
     // the moment the in-memory state is lost.
-    async listSessions() {
+    // The driver hands every backend its own live session index and the
+    // pending-approval lookup, and both v1 backends use them. Omitting
+    // `inFlight` here did not break the listing -- it just made every v2
+    // session look permanently idle, to the browser and to anything asking
+    // "is this session busy?", which is the question the whole mid-turn
+    // delivery path turns on.
+    async listSessions(opts, sessionsIndex, pendingKindForSession) {
       const rows = await api("/api/session", { timeoutMs: 15000 });
       const out = [];
       for (const s of rows || []) {
-        // Only sessions PodPrompt created: anything else decodes to null and
-        // belongs to another client of the same server.
+        // Only sessions PodPrompt drove: anything else is another client's
+        // and has no entry in our map.
         const clientId = fromV2(s.id);
         if (!clientId) continue;
+        const cwd = s.location?.directory || cwdRoot;
         out.push({
           sessionId: clientId,
           backend: "opencode-v2",
           summary: s.title || null,
           customTitle: s.title || null,
+          firstPrompt: s.title || null,
           lastModified: s.time?.updated || s.time?.created || null,
           createdAt: s.time?.created || null,
-          cwd: s.location?.directory || cwdRoot,
+          cwd,
+          projectLabel: cwd === cwdRoot ? "(root)" : cwd,
+          unreachable: false,
+          inFlight: !!sessionsIndex?.get?.(clientId)?.turnInFlight,
+          pendingKind: pendingKindForSession?.(clientId) ?? null,
           archived: !!s.archived,
+          tag: s.archived ? "archived" : null,
         });
       }
       return { sessions: out, unreachableCount: 0, unreachableSessions: [] };

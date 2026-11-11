@@ -225,7 +225,13 @@ export function createOpenCodeV2Backend({
         try { ev = JSON.parse(data); } catch { continue; }
         // Session id lives on `data.sessionID` for session events; anything
         // else is server-wide chatter we do not care about mid-turn.
-        const sid = ev?.data?.sessionID;
+        //
+        // Form events are the exception and nest everything a level deeper,
+        // under `data.form` -- so their session id has to be looked for
+        // there too. Without this a form raised in ANOTHER session reads as
+        // having no session id at all and is let through to this turn's
+        // watch, which would put one session's question on another's screen.
+        const sid = ev?.data?.sessionID ?? ev?.data?.form?.sessionID;
         if (sid && sid !== v2id) continue;
         yield ev;
       }
@@ -348,21 +354,29 @@ export function createOpenCodeV2Backend({
           case "permission.replied":
           case "permission.rejected":
           case "form.replied":
-          case "form.cancelled":
-            if (d.id) {
-              resolveApprovalExternally?.(d.id,
+          case "form.cancelled": {
+            const extId = d.id || d.form?.id || d.formID;
+            if (extId) {
+              resolveApprovalExternally?.(extId,
                 "This request was already answered or withdrawn in OpenCode.");
             }
             break;
+          }
           case "form.created": {
+            // THE PAYLOAD IS NESTED. permission.asked puts its request
+            // directly under `data`; a form event wraps it in `data.form`.
+            // Reading it the same way as a permission finds undefined
+            // everywhere, so the card silently never appears and the turn
+            // blocks on a question nobody was shown.
+            const form = d.form || d;
             // Only a question form is a question; v2 uses forms for other
             // things too, and answering one of those as if it were a
             // multiple-choice prompt would put nonsense into it.
-            if (d.metadata?.kind !== "question") break;
+            if (form.metadata?.kind !== "question") break;
             pendingApprovals.push(
               requestApproval?.(sessionId, "question", "AskUserQuestion",
-                { questions: questionsFromForm(d) }, { externalId: d.id })
-                .then((answer) => (answer?.cancelled ? undefined : replyForm(v2id, d, answer))),
+                { questions: questionsFromForm(form) }, { externalId: form.id })
+                .then((answer) => (answer?.cancelled ? undefined : replyForm(v2id, form, answer))),
             );
             break;
           }

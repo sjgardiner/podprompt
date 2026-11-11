@@ -438,8 +438,14 @@ function make(extra = {}) {
   const real = b._ids.toV2("oc2-form");
   form.sessionID = real;
   state.formReplies.length = 0;
+  // NESTED, exactly as the server sends it. permission.asked puts its
+  // request directly under `data`; a form event wraps it in `data.form`.
+  // Reading a form the same way as a permission finds undefined everywhere,
+  // the card silently never appears, and the turn blocks on a question
+  // nobody was shown — which is what happened, against a real server, with
+  // this test passing on an invented flat shape.
   state.events = [
-    { type: "form.created", data: { ...form } },
+    { type: "form.created", data: { form: { ...form } } },
     { type: "session.idle", data: { sessionID: real } },
   ];
   await b.runTurn("oc2-form", "x", {});
@@ -463,12 +469,33 @@ function make(extra = {}) {
   const real = b._ids.toV2("oc2-form-other");
   state.formReplies.length = 0;
   state.events = [
-    { type: "form.created", data: { sessionID: real, id: "frm_2", metadata: { kind: "login" }, fields: [] } },
+    { type: "form.created", data: { form: { sessionID: real, id: "frm_2", metadata: { kind: "login" }, fields: [] } } },
     { type: "session.idle", data: { sessionID: real } },
   ];
   await b.runTurn("oc2-form-other", "x", {});
   check("a non-question form is left alone", asked === 0 && state.formReplies.length === 0,
     { asked, replies: state.formReplies.length });
+}
+{
+  // A form belonging to a DIFFERENT session must not reach this turn's
+  // watch. Its session id is nested too, so filtering only on
+  // data.sessionID sees no id at all and lets it through -- which would put
+  // one session's question on another session's screen.
+  let asked = 0;
+  const { b } = make({ stateFile: MAP, requestApproval: async () => { asked++; return {}; } });
+  await b.setModel("oc2-form-mine", "opencode/big-pickle");
+  const mine = b._ids.toV2("oc2-form-mine");
+  state.formReplies.length = 0;
+  state.events = [
+    { type: "form.created", data: { form: {
+      sessionID: "ses_somebodyelse", id: "frm_3", metadata: { kind: "question" },
+      fields: [{ key: "q0", title: "T", description: "?", type: "string", options: [] }],
+    } } },
+    { type: "session.idle", data: { sessionID: mine } },
+  ];
+  await b.runTurn("oc2-form-mine", "x", {});
+  check("another session's question never reaches this one",
+    asked === 0 && state.formReplies.length === 0, { asked, replies: state.formReplies.length });
 }
 
 // ── history ordering ───────────────────────────────────────────────────────

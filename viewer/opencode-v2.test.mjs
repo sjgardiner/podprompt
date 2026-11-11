@@ -27,7 +27,7 @@ function check(name, cond, detail) {
 
 // ── a fake v2 server ───────────────────────────────────────────────────────
 const PASSWORD = "testpw";
-const state = { sessions: new Map(), prompts: [], events: [], interrupts: [] };
+const state = { sessions: new Map(), prompts: [], events: [], interrupts: [], minted: 1, clientSuppliedIds: [] };
 
 function sse(res, frames) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
@@ -53,8 +53,13 @@ const server = createServer((req, res) => {
     const json = body ? JSON.parse(body) : {};
     if (p === "/api/event") return sse(res, state.events);
     if (p === "/api/session" && req.method === "POST") {
-      state.sessions.set(json.id, { id: json.id, title: json.title || null, time: { created: Date.now() } });
-      return send(200, { data: state.sessions.get(json.id) });
+      // The real server MINTS the id; a client-supplied one loses free-model
+      // access entirely (see the backend header). The fake mints too, and
+      // records whether anyone tried to supply one.
+      if (json.id) state.clientSuppliedIds.push(json.id);
+      const id = `ses_${(state.minted++).toString(16).padStart(8, "0")}sv`;
+      state.sessions.set(id, { id, title: json.title || null, time: { created: Date.now() } });
+      return send(200, { data: state.sessions.get(id) });
     }
     if (p === "/api/session" && req.method === "GET") return send(200, { data: [...state.sessions.values()] });
     const m = p.match(/^\/api\/session\/([^/]+)(\/.*)?$/);
@@ -84,6 +89,9 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const PORT = server.address().port;
 
+const MAP = "/tmp/pp-oc2-map-test.json";
+try { (await import("node:fs")).rmSync(MAP); } catch { /* fine */ }
+
 function make(extra = {}) {
   const bubbles = [];
   const b = createOpenCodeV2Backend({
@@ -96,16 +104,30 @@ function make(extra = {}) {
   return { b, bubbles };
 }
 
-// ── ids: the state v1 needed and this backend does not ─────────────────────
+// ── ids: the server mints, we remember ────────────────────────────────────
+//
+// A session created with a CLIENT-SUPPLIED id cannot use the free models --
+// it fails every time with provider.free-limit, while a server-minted one
+// succeeds. Reproduced repeatedly against a real server, seconds apart, same
+// model and project. So this asserts the thing that was got wrong: we must
+// never hand the server an id of our own.
 {
-  const { b } = make();
-  const cid = "oc2-d0e00319-106d-4a5d-a897-8c5e5821e1a1";
-  check("a client id round-trips through the v2 id", b._ids.fromV2(b._ids.toV2(cid)) === cid);
-  check("the encoded id satisfies the server's ^ses constraint", b._ids.toV2(cid).startsWith("ses"));
-  check("a session created by someone else decodes to null, not mojibake",
-    b._ids.fromV2("ses_e37f07de1ffewLqnoD06wIWnYx") === null);
-  check("a non-session id is rejected", b._ids.fromV2("msg_123") === null);
-  check("undefined is safe", b._ids.fromV2(undefined) === null);
+  const { b } = make({ stateFile: MAP });
+  state.clientSuppliedIds.length = 0;
+  const cid = "oc2-map-a";
+  check("a fresh client id has no real id yet", b._ids.toV2(cid) === null);
+
+  const real = await b.setModel(cid, "opencode/big-pickle").then(() => b._ids.toV2(cid));
+  check("driving a session mints a real id", typeof real === "string" && real.startsWith("ses_"), real);
+  check("...and the client NEVER supplies one",
+    state.clientSuppliedIds.length === 0, state.clientSuppliedIds);
+  check("the map resolves both ways", b._ids.fromV2(real) === cid);
+  check("an unknown real id resolves to null", b._ids.fromV2("ses_somebodyelse") === null);
+
+  // Durability: the mapping cannot be recomputed, so losing it loses the
+  // session. A second backend over the same file must see it.
+  const { b: b2 } = make({ stateFile: MAP });
+  check("the map survives a restart", b2._ids.toV2(cid) === real);
 }
 
 // ── a successful turn ──────────────────────────────────────────────────────
@@ -176,8 +198,11 @@ function make(extra = {}) {
 
 // ── steer: the reason this backend exists ──────────────────────────────────
 {
-  const { b } = make();
+  const { b } = make({ stateFile: MAP });
   const sid = "oc2-steer";
+  // A session with a RUNNING turn necessarily has a real id already; mint one
+  // the way driving it would.
+  await b.setModel(sid, "opencode/big-pickle");
   state.prompts.length = 0;
   check("refused when no turn is running",
     (await b.injectIntoTurn(sid, { turnInFlight: false }, "hi")) === false);
@@ -189,6 +214,8 @@ function make(extra = {}) {
   check("...posted with delivery \"steer\", not as a fresh prompt",
     last?.delivery === "steer", last);
   check("...to the right session", last?.sid === b._ids.toV2(sid));
+  check("a session we have never driven is refused, not invented",
+    (await b.injectIntoTurn("oc2-never-seen", { turnInFlight: true }, "hi")) === false);
 
   // A refusal must be reported, never thrown: the driver re-queues on false,
   // and an exception would escape into the delivery path instead.
@@ -231,12 +258,15 @@ function make(extra = {}) {
 
 // ── history ordering ───────────────────────────────────────────────────────
 {
-  const { b } = make();
+  const { b } = make({ stateFile: MAP });
+  await b.setModel("oc2-hist", "opencode/big-pickle");   // mint its real id
   state.messages = [ // v2 returns NEWEST first
     { type: "assistant", info: { id: "a2", modelID: "m" }, parts: [{ type: "text", text: "second", id: "p2" }] },
     { type: "user", info: { id: "u1" }, parts: [{ type: "text", text: "first" }] },
   ];
   const h = await b.getSessionHistory("oc2-hist");
+  check("history for an unknown session is empty, not an error",
+    (await b.getSessionHistory("oc2-no-such")).length === 0);
   check("history is re-ordered oldest-first for the viewer",
     h[0]?.text === "first" && h[1]?.text === "second", h.map((x) => x.text));
 }

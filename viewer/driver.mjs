@@ -542,6 +542,10 @@ const backends = {
     ...backendHooks,
     baseUrl: `http://127.0.0.1:${args.opencodeV2Port}`,
     password: OPENCODE_V2_PASSWORD,
+    // clientId -> the id the v2 server minted. Durable because the mapping
+    // cannot be recomputed: see that backend's header for why the server has
+    // to mint it.
+    stateFile: nodePath.join(PODPROMPT_STATE_DIR, "viewer-opencode-v2-sessions.json"),
   }),
 };
 

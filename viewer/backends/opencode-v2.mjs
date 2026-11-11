@@ -16,19 +16,31 @@
 // while every active model is now published against the native
 // `@opencode/ai/providers/*` adapters, so no turn ever runs on that path.
 //
-// WHAT IS SIMPLER HERE THAN IN v1
-// -------------------------------
-// v1 keeps three maps and a startup reseed (clientToReal, realToClient,
-// childRealToPod, seedRealIds, clientIdForReal, noteRealSessionId) because
-// `POST /session` always mints its own id and PodPrompt keys everything by an
-// id it minted itself. v2's `POST /api/session` ACCEPTS an id, and the only
-// constraint is that it start with "ses". So the two ids are one reversible
-// encoding of each other and none of that state exists:
+// WHY THERE IS AN ID MAP HERE, THE SAME AS IN v1
+// ----------------------------------------------
+// v2's `POST /api/session` ACCEPTS a caller-supplied id, which looked like an
+// invitation to drop v1's clientToReal/realToClient bookkeeping and derive one
+// id from the other with a pure, reversible function. That was built, it
+// round-tripped, and it was WRONG.
 //
-//     ses + hex(clientId)   <->   clientId
+// A session created with a CLIENT-SUPPLIED id cannot use the free models. It
+// fails every time with `provider.free-limit`, while a session the server
+// minted itself succeeds -- same server, same model, same project, seconds
+// apart, reproduced repeatedly:
 //
-// Verified round-tripping through the real server. A pure function cannot
-// drift, cannot be lost by a restart, and needs no reseed.
+//     server-minted  ses_e34e511b2ffexq1C7R2GQICzx2  -> succeeded
+//     client-supplied ses_557cc71f92ac7d7a           -> provider.free-limit
+//
+// Isolated by pointing `opencode2 run --server` at this very server, where it
+// worked: the server was never the problem, the ids were. The gateway appears
+// to attribute free usage via something carried in a server-minted id (they
+// are time-ordered, and the server also forwards the id to the provider in an
+// `x-opencode-session` header); an arbitrary id it did not issue gets no
+// entitlement.
+//
+// So the server mints, we record, and the map is persisted -- which is what
+// v1 has been doing all along. The apparently-clunky bookkeeping was load
+// bearing, and the elegant version was a bug.
 //
 // WHAT IS STILL MISSING
 // ---------------------
@@ -37,10 +49,11 @@
 // additive and are called out rather than stubbed silently.
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 
 export function createOpenCodeV2Backend({
   cwdRoot, broadcast, broadcastStatus, broadcastUserPrompt,
-  messaging, baseUrl, password,
+  messaging, baseUrl, password, stateFile,
 } = {}) {
   const BASE = baseUrl || "http://127.0.0.1:7856";
   // v2 always uses HTTP Basic auth with the username "opencode"; only the
@@ -51,16 +64,46 @@ export function createOpenCodeV2Backend({
   const AUTH = "Basic " + Buffer.from(`opencode:${password || ""}`).toString("base64");
 
   // ── ids ──────────────────────────────────────────────────────────────────
-  const toV2 = (clientId) => `ses${Buffer.from(String(clientId), "utf8").toString("hex")}`;
-  const fromV2 = (v2id) => {
-    if (typeof v2id !== "string" || !v2id.startsWith("ses")) return null;
+  // clientId <-> realId, persisted. See the header for why this cannot be a
+  // pure function.
+  const clientToReal = new Map();
+  const realToClient = new Map();
+
+  function loadMap() {
+    if (!stateFile) return;
     try {
-      const s = Buffer.from(v2id.slice(3), "hex").toString("utf8");
-      // A session created outside PodPrompt decodes to mojibake rather than
-      // throwing, so the result is sanity-checked rather than trusted.
-      return /^[\x20-\x7e]+$/.test(s) ? s : null;
-    } catch { return null; }
-  };
+      const raw = JSON.parse(readFileSync(stateFile, "utf8"));
+      for (const [c, r] of Object.entries(raw?.sessions || {})) {
+        if (typeof c === "string" && typeof r === "string") {
+          clientToReal.set(c, r);
+          realToClient.set(r, c);
+        }
+      }
+    } catch { /* missing or corrupt: start empty rather than fail over it */ }
+  }
+
+  function saveMap() {
+    if (!stateFile) return;
+    try {
+      const tmp = `${stateFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ sessions: Object.fromEntries(clientToReal) }, null, 2));
+      renameSync(tmp, stateFile);
+    } catch (e) {
+      console.error("[opencode-v2] failed to write the session id map:", e.message);
+    }
+  }
+
+  function remember(clientId, realId) {
+    if (clientToReal.get(clientId) === realId) return;
+    clientToReal.set(clientId, realId);
+    realToClient.set(realId, clientId);
+    saveMap();
+  }
+
+  const toV2 = (clientId) => clientToReal.get(clientId) || null;
+  const fromV2 = (realId) => realToClient.get(realId) || null;
+
+  loadMap();
 
   async function api(path, { method = "GET", body, timeoutMs = 30000, raw = false } = {}) {
     const ctl = new AbortController();
@@ -91,22 +134,45 @@ export function createOpenCodeV2Backend({
     }
   }
 
+  // THE SERVER MINTS THE ID. Never `POST /api/session` with one of ours --
+  // see the header: a client-supplied id loses free-model access entirely.
   async function ensureSession(sessionId, { title = null, cwd = null } = {}) {
-    const id = toV2(sessionId);
-    try {
-      await api(`/api/session/${id}`, { timeoutMs: 8000 });
-      return id;
-    } catch (e) {
-      if (e.status !== 404) throw e;
+    const known = toV2(sessionId);
+    if (known) {
+      try {
+        await api(`/api/session/${known}`, { timeoutMs: 8000 });
+        return known;
+      } catch (e) {
+        // Anything but "it is gone" is a live problem worth surfacing rather
+        // than papering over by silently minting a second session.
+        if (e.status !== 404) throw e;
+        clientToReal.delete(sessionId);
+        realToClient.delete(known);
+      }
     }
-    await api("/api/session", {
+    const created = await api("/api/session", {
       method: "POST",
       body: {
-        id,
         ...(title ? { title } : {}),
         location: { directory: cwd || cwdRoot || process.cwd() },
       },
     });
+    const realId = created?.id;
+    if (!realId) throw new Error("OpenCode v2 created a session with no id");
+    remember(sessionId, realId);
+    return realId;
+  }
+
+  // For the read-only calls: resolve without creating. A session PodPrompt has
+  // never driven has no real id yet, and inventing one would both fail and
+  // pollute the map.
+  function requireRealId(sessionId) {
+    const id = toV2(sessionId);
+    if (!id) {
+      const e = new Error(`OpenCode v2 has no session for ${sessionId}`);
+      e.status = 404;
+      throw e;
+    }
     return id;
   }
 
@@ -282,7 +348,7 @@ export function createOpenCodeV2Backend({
 
     abort(sessionId, state) {
       state?.abortController?.abort();
-      api(`/api/session/${toV2(sessionId)}/interrupt`, { method: "POST", body: {}, timeoutMs: 5000 })
+      api(`/api/session/${requireRealId(sessionId)}/interrupt`, { method: "POST", body: {}, timeoutMs: 5000 })
         .catch((e) => console.error(`[opencode-v2] interrupt failed for ${sessionId}:`, e.message));
     },
 
@@ -303,7 +369,7 @@ export function createOpenCodeV2Backend({
     async injectIntoTurn(sessionId, state, text) {
       if (!state?.turnInFlight || typeof text !== "string" || !text) return false;
       try {
-        await api(`/api/session/${toV2(sessionId)}/prompt`, {
+        await api(`/api/session/${requireRealId(sessionId)}/prompt`, {
           method: "POST",
           body: { text, delivery: "steer" },
           timeoutMs: 10000,
@@ -369,7 +435,7 @@ export function createOpenCodeV2Backend({
     async getSessionHistory(sessionId) {
       let rows;
       try {
-        rows = await api(`/api/session/${toV2(sessionId)}/message`, { timeoutMs: 20000 });
+        rows = await api(`/api/session/${requireRealId(sessionId)}/message`, { timeoutMs: 20000 });
       } catch (e) {
         if (e.status === 404) return [];
         throw e;
@@ -403,19 +469,19 @@ export function createOpenCodeV2Backend({
     },
 
     async archiveSession(sessionId) {
-      await api(`/api/session/${toV2(sessionId)}`, { method: "PATCH", body: { archived: true } });
+      await api(`/api/session/${requireRealId(sessionId)}`, { method: "PATCH", body: { archived: true } });
       return { ok: true };
     },
     async unarchiveSession(sessionId) {
-      await api(`/api/session/${toV2(sessionId)}`, { method: "PATCH", body: { archived: false } });
+      await api(`/api/session/${requireRealId(sessionId)}`, { method: "PATCH", body: { archived: false } });
       return { ok: true };
     },
     async deleteSession(sessionId) {
-      await api(`/api/session/${toV2(sessionId)}`, { method: "DELETE" });
+      await api(`/api/session/${requireRealId(sessionId)}`, { method: "DELETE" });
       return { ok: true };
     },
     async renameSession(sessionId, title) {
-      await api(`/api/session/${toV2(sessionId)}`, { method: "PATCH", body: { title } });
+      await api(`/api/session/${requireRealId(sessionId)}`, { method: "PATCH", body: { title } });
       return { ok: true };
     },
 
@@ -435,8 +501,8 @@ export function createOpenCodeV2Backend({
       const [providerID, ...rest] = String(modelId || "").split("/");
       const id = rest.join("/");
       if (!providerID || !id) return { ok: false, reason: "bad-model-id" };
-      await ensureSession(sessionId);
-      await api(`/api/session/${toV2(sessionId)}/model`, { method: "POST", body: { model: { providerID, id } } });
+      const realId = await ensureSession(sessionId);
+      await api(`/api/session/${realId}/model`, { method: "POST", body: { model: { providerID, id } } });
       return { ok: true };
     },
 

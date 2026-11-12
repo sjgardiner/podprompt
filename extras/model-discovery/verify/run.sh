@@ -62,7 +62,17 @@ cat > "$XDG/opencode/model-discovery.json" <<JSON
 }
 JSON
 
-OPENCODE_SERVER_PASSWORD="$PW" OPENCODE_CONFIG="$ROOT/config.json" XDG_CONFIG_HOME="$XDG" \
+# The providers live in the CONFIG DIRECTORY's file, while OPENCODE_CONFIG
+# points at a different file carrying something else — which is exactly how
+# PodPrompt runs OpenCode. A plugin that reads only one of the two finds no
+# providers and silently discovers nothing; this is the arrangement that
+# caught that.
+mv "$ROOT/config.json" "$XDG/opencode/opencode.jsonc"
+cat > "$ROOT/host-config.json" <<JSON
+{ "permission": { "example-rule": "ask" } }
+JSON
+
+OPENCODE_SERVER_PASSWORD="$PW" OPENCODE_CONFIG="$ROOT/host-config.json" XDG_CONFIG_HOME="$XDG" \
     opencode serve --hostname 127.0.0.1 --port "$OC_PORT" > "$ROOT/serve.log" 2>&1 &
 disown 2>/dev/null || true
 
@@ -101,5 +111,16 @@ print("PASS: every shape was discovered and parsed." if not bad
 raise SystemExit(1 if bad else 0)
 PY
 status=$?
-[ "$status" -ne 0 ] && { echo; echo "--- plugin output ---"; grep "model-discovery" "$ROOT/serve.log" | tail -10; }
+if [ "$status" -ne 0 ]; then
+    echo
+    echo "--- plugin output ---"
+    if grep -q "model-discovery" "$ROOT/serve.log"; then
+        grep "model-discovery" "$ROOT/serve.log" | tail -10
+    else
+        # Silence here is itself the finding: the plugin either never loaded or
+        # found nothing to poll. Both look identical from the catalog alone.
+        echo "(none — the plugin logged nothing. It either failed to load, or"
+        echo " resolved no providers to poll from the config it could see.)"
+    fi
+fi
 exit "$status"

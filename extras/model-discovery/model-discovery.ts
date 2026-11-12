@@ -120,16 +120,34 @@ function configDir(): string {
   return xdg ? `${xdg}/opencode` : `${home}/.config/opencode`
 }
 
-function loadOpencodeConfig(): any {
-  // OPENCODE_CONFIG wins when set — that is the file the running server was
-  // actually started with.
-  const explicit = process.env.OPENCODE_CONFIG
-  if (explicit) {
-    const cfg = readJsonish(explicit)
-    if (cfg) return cfg
-  }
+// EVERY source, merged — not the first one that parses.
+//
+// OPENCODE_CONFIG does not REPLACE the config directory's file, it merges with
+// it, and a host that sets it may well put something else entirely in there.
+// PodPrompt does exactly that: it points OPENCODE_CONFIG at a generated file
+// carrying only permission rules and an instructions path. Reading that and
+// stopping finds no providers at all, so discovery silently did nothing for
+// every PodPrompt-launched session — which is how this was found.
+//
+// Later sources win per provider id, matching how OpenCode layers them.
+function collectProviders(): Record<string, any> {
   const dir = configDir()
-  return readJsonish(`${dir}/opencode.jsonc`) ?? readJsonish(`${dir}/opencode.json`) ?? {}
+  const sources = [
+    `${dir}/opencode.json`,
+    `${dir}/opencode.jsonc`,
+    process.env.OPENCODE_CONFIG,
+  ].filter((p): p is string => typeof p === "string" && p.length > 0)
+
+  const merged: Record<string, any> = {}
+  for (const path of sources) {
+    const cfg = readJsonish(path)
+    if (!cfg) continue
+    // 2.x normalises `provider` to `providers`; a file on disk may use either.
+    const providers = cfg.providers ?? cfg.provider
+    if (!providers || typeof providers !== "object") continue
+    for (const [id, provider] of Object.entries<any>(providers)) merged[id] = provider
+  }
+  return merged
 }
 
 function loadOverrides(): { intervalSeconds?: number; providers?: Record<string, Override> } {
@@ -155,10 +173,7 @@ export function joinUrl(baseURL: string, endpoint: string): string {
 }
 
 export function resolveTargets(): Target[] {
-  const cfg = loadOpencodeConfig()
-  // 2.x normalises `provider` to `providers`; accept either, since the file on
-  // disk may be written in either form.
-  const providers: Record<string, any> = cfg.providers ?? cfg.provider ?? {}
+  const providers = collectProviders()
   const overrides = loadOverrides().providers ?? {}
   const targets: Target[] = []
 

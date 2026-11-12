@@ -31,7 +31,7 @@ import { z } from "zod";
 // turn-binding decides which `result` ends our turn — read its header first,
 // it explains the failure this whole arrangement exists to prevent.
 // permission-channel is the alarm for that failure happening anyway.
-import { resultBelongsToTurn, safetyNetAction } from "../turn-binding.mjs";
+import { resultBelongsToTurn, safetyNetAction, outstandingWork } from "../turn-binding.mjs";
 import { countPermissionChannelFailures } from "../permission-channel.mjs";
 
 // How long a turn keeps listening after a result that is not its own before
@@ -1238,8 +1238,24 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
       let wake = null;
       let closed = false;
       function bump() { const w = wake; wake = null; if (w) w(); }
+      // DELIVERED BUT NOT YET ANSWERED. A result names the user messages it
+      // consumed (`user_message_uuids`), so this set is the exact answer to
+      // "has the model finished everything we handed it?" -- and the reason
+      // the turn can tell "my work is done" apart from "a result arrived".
+      // Without it, a message folded in microseconds before the result is
+      // handed to the model in the same breath as stdin closing, and every
+      // permission-gated thing it then does fails.
+      const outstanding = new Set();
       return {
         accepting: () => !closed,
+        pendingCount: () => pending.length,
+        outstandingCount: () => outstanding.size,
+        // Everything this result accounts for is answered. Unknown uuids are
+        // ignored rather than treated as an error: the CLI legitimately
+        // reports internally-enqueued ones we never sent.
+        settle(uuids) {
+          for (const u of uuids || []) outstanding.delete(u);
+        },
         push(text) {
           if (closed) return false;
           pending.push({
@@ -1259,7 +1275,16 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         open() { closed = true; bump(); },
         stream: (async function* () {
           for (;;) {
-            while (pending.length) yield pending.shift();
+            while (pending.length) {
+              const next = pending.shift();
+              // Recorded as it goes out, not as it goes in: a message still
+              // in `pending` has not reached the model and must not hold the
+              // turn open on its own account -- pendingCount() covers that
+              // case, and conflating the two is how the race survives a fix
+              // that only tracks what was delivered.
+              if (next.uuid) outstanding.add(next.uuid);
+              yield next;
+            }
             if (closed) return;
             await new Promise((resolve) => { wake = resolve; });
           }
@@ -1284,6 +1309,107 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
     // used to hold off the safety net: a human taking their time over an
     // approval card is not a stall.
     let pendingPermissionCount = 0;
+
+    // ── What the turn still has outstanding ─────────────────────────────────
+    // A result is not the end of a turn; it is the end of a BATCH OF WORK.
+    // The turn is over when the model has nothing left that we or the CLI
+    // handed it. Three sources, each read from something the runtime states
+    // about itself -- no timing anywhere in this decision:
+    //
+    //   1. our queue still holds a message (pendingCount)
+    //   2. a message we delivered is unanswered  (outstandingCount)
+    //   3. the CLI has a live background task that will notify it later
+    //
+    // (3) is the one that actually bit on 2026-11-11: a backgrounded Bash job
+    // reported in six milliseconds after the turn's result, the gate had
+    // already opened, and every permission-gated tool call for the rest of
+    // that work failed. Measured: a `sleep 12` run in the background leaves
+    // `background_tasks_changed` holding one live task across the result that
+    // follows it, and clears it 11 seconds later.
+    //
+    // REPLACE SEMANTICS, per the SDK: "Every live background task after the
+    // change. REPLACE semantics: swap your set for this payload." So this is
+    // a snapshot, never a counter -- there is no decrement to miss and no way
+    // for it to drift into holding a turn open forever.
+    let liveBackgroundTasks = [];
+    // `ambient` is the SDK's own flag for work that is "not activity ... hosts
+    // should exclude them from activity indicators" -- live-update watchers
+    // and housekeeping, which may never finish. Counting those would hold
+    // every turn open until the safety net fired. This file already honours
+    // exactly this distinction when deciding what is a real sub-agent.
+    // Set once our own result has been seen. Needed because the gate can
+    // become closeable at a moment when NO result is arriving -- the last
+    // background task finishing, for instance -- and without this the turn
+    // would sit until the safety net ended it.
+    let sawOurResult = false;
+
+    function outstanding(gate) {
+      return outstandingWork({
+        queued: gate.pendingCount(),
+        unanswered: gate.outstandingCount(),
+        backgroundTasks: liveBackgroundTasks,
+      });
+    }
+    const turnStillHasWork = (gate) => outstanding(gate).total > 0;
+
+    // Opens the gate only when there is nothing left. Returns whether it did,
+    // so the caller can tell "the turn ended" from "the turn continues".
+    // Takes the gate rather than closing over one: the bootstrap retry builds
+    // a SECOND queue, and a helper bound to the first would quietly decide
+    // the second attempt's turn using the dead attempt's state.
+    // The ONE bound in all of this, and it is the pre-existing one: a turn
+    // held open must still end if nothing ever arrives. Armed from two
+    // places now -- a foreign result, and a turn held open for outstanding
+    // work -- because both are states where our own result alone will not
+    // end the turn.
+    //
+    // A REPEATING check, not a one-shot. The first draft was a single
+    // setTimeout that returned early when a permission card was outstanding,
+    // which silently retired the net for the rest of the turn since nothing
+    // re-armed it. Waiting on a human counts as activity rather than as a
+    // reason to skip a tick, so a slow human cannot shorten the grace of
+    // whatever follows.
+    function armSafetyNet(gate, q, why) {
+      if (foreignResultTimer) return;
+      foreignResultTimer = setInterval(() => {
+        const action = safetyNetAction({
+          msSinceLastMessage: Date.now() - lastMessageAt,
+          pendingPermissions: pendingPermissionCount,
+          graceMs: FOREIGN_RESULT_GRACE_MS,
+        });
+        if (action === "defer") { lastMessageAt = Date.now(); return; }
+        if (action === "wait") return;
+        console.error(`[claude-code] session ${sessionId}: ${why}, and nothing arrived for`
+          + ` ${FOREIGN_RESULT_GRACE_MS}ms. Ending the turn.`);
+        // NAMED, NOT SWALLOWED. A message still sitting in the queue here was
+        // never handed to the model, and the turn is now ending -- so it is
+        // lost. Delivering it instead is the bug this whole change exists to
+        // fix (it would arrive as stdin closes), and dropping it silently is
+        // what the delivery core is built to prevent. The expected count is
+        // zero: the gate stays OPEN while anything is pending, so the
+        // generator keeps draining it.
+        if (gate.pendingCount() > 0) {
+          console.error(`[claude-code] session ${sessionId}: ${gate.pendingCount()} message(s)`
+            + " were still queued for the model when the turn was ended by the safety net."
+            + " They were not delivered. This should not happen — please report it.");
+        }
+        endedBySafetyNet = true;
+        state.turnOutcome = state.turnOutcome || {
+          reason: "error",
+          error: "turn produced no result of its own (stalled after unrelated result)",
+        };
+        disarmSafetyNet();
+        gate.open();
+        try { q.close(); } catch { /* already closed */ }
+      }, SAFETY_NET_POLL_MS);
+    }
+
+    function closeGateIfDone(gate) {
+      if (!sawOurResult || turnStillHasWork(gate)) return false;
+      disarmSafetyNet();
+      gate.open();
+      return true;
+    }
     const canUseTool = async (...args) => {
       pendingPermissionCount++;
       try {
@@ -1818,9 +1944,53 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
         // tells the SDK to close stdin and wind the turn down. Doing it on a
         // result that is not ours is precisely the original bug, so the test
         // is a structural one: does the result carry the uuid we sent?
+        // THE CLI'S OWN ACCOUNT OF ITS OWN BACKGROUND WORK. Replace
+        // semantics, so this is an assignment and never a counter.
+        if (msg.type === "system" && msg.subtype === "background_tasks_changed") {
+          liveBackgroundTasks = Array.isArray(msg.tasks) ? msg.tasks : [];
+          // DELIBERATELY NOT A PLACE THE GATE CAN CLOSE, and this was got
+          // wrong first time round. Measured ordering when a backgrounded
+          // job finishes:
+          //
+          //     background_tasks_changed -> 0 live
+          //     task_notification status=completed      <- the work is HERE
+          //     ... the model acts on it ...
+          //     result
+          //
+          // The list empties BEFORE the notification is handed to the model,
+          // so "no live tasks" does not mean "nothing more from that task".
+          // Closing here shut the gate in the window between the two, and
+          // the notification's own work then had no permission channel —
+          // reproducing the exact bug this change exists to fix, one step
+          // later. The gate closes only on a RESULT with nothing
+          // outstanding, which is after the notification has been answered.
+          //
+          // There is no hang hiding in that: a notification for a
+          // non-ambient task always produces a turn, and therefore a result.
+          // (The SDK defines ambient as covering every skip_transcript task,
+          // so a non-ambient task's notification is never the silent kind.)
+        }
         if (msg.type === "result") {
+          // Everything this result accounts for is answered, whether or not
+          // the result is "ours" -- that is what makes a coalesced batch and
+          // a folded message settle correctly.
+          gate.settle(Array.isArray(msg.user_message_uuids)
+            ? msg.user_message_uuids
+            : (msg.user_message_uuid ? [msg.user_message_uuid] : []));
           if (resultBelongsToTurn(msg, userMsgUuid)) {
-            gate.open();
+            sawOurResult = true;
+            // A RESULT IS NOT NECESSARILY THE END OF THE TURN. The generator
+            // finishing is what makes the SDK close stdin, and canUseTool's
+            // answers travel over that stdin -- so opening the gate while the
+            // model still has work hands it a task it cannot get permission
+            // to perform. Verified against the real SDK: hold the gate and
+            // the channel survives the result, including an error_max_turns
+            // one.
+            if (!closeGateIfDone(gate)) {
+              console.log(`[claude-code] session ${sessionId}: result arrived with work still`
+                + ` outstanding (${JSON.stringify(outstanding(gate))}); holding the turn open`);
+              armSafetyNet(gate, q, "work outstanding after this turn's result");
+            }
           } else {
             // SAFETY NET, and the only new way this turn can hang. Before the
             // fix, an unmatched result ended the turn (wrongly, but it ended).
@@ -1852,30 +2022,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
             console.warn(`[claude-code] session ${sessionId}: ignoring a result that is not`
               + ` this turn's (no matching user-message uuid) — Claude Code ran queued work`
               + ` of its own. Still waiting for our own result.`);
-            if (!foreignResultTimer) {
-              foreignResultTimer = setInterval(() => {
-                const action = safetyNetAction({
-                  msSinceLastMessage: Date.now() - lastMessageAt,
-                  pendingPermissions: pendingPermissionCount,
-                  graceMs: FOREIGN_RESULT_GRACE_MS,
-                });
-                // Restarting the clock is what makes a slow human cost
-                // whatever the turn does next nothing.
-                if (action === "defer") { lastMessageAt = Date.now(); return; }
-                if (action === "wait") return;
-                console.error(`[claude-code] session ${sessionId}: no result for this turn`
-                  + ` ${FOREIGN_RESULT_GRACE_MS}ms after an unrelated one, and nothing else`
-                  + ` arrived. Ending the turn.`);
-                endedBySafetyNet = true;
-                state.turnOutcome = state.turnOutcome || {
-                  reason: "error",
-                  error: "turn produced no result of its own (stalled after unrelated result)",
-                };
-                disarmSafetyNet();
-                gate.open();
-                try { q.close(); } catch { /* already closed */ }
-              }, SAFETY_NET_POLL_MS);
-            }
+            armSafetyNet(gate, q, "no result of this turn's own after an unrelated one");
           }
         }
         if (msg.type === "system" && msg.subtype === "init") {
@@ -2041,7 +2188,17 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
           // supervisor may auto-resume — re-running a turn that in fact
           // succeeded. The uuid test is the same one that decides when the
           // turn ends; see turn-binding.mjs.
+          //
+          // AND ONLY THE RESULT THAT ACTUALLY ENDS THE TURN. A turn can now
+          // span several of its own results -- it is held open while work is
+          // outstanding -- and the first one would otherwise fix the verdict
+          // permanently, since turnOutcome is assigned first-wins. A turn
+          // that ran past maxTurns, did the folded work perfectly and then
+          // finished cleanly would be recorded as failed and auto-resumed:
+          // a wasted turn re-running work that already succeeded. An
+          // intermediate result is progress, not a verdict.
           const failed = resultBelongsToTurn(msg, userMsgUuid)
+            && !turnStillHasWork(gate)
             && (msg.is_error === true
               || (msg.subtype && msg.subtype !== "success")
               || BAD_TERMINAL_REASONS.has(msg.terminal_reason));

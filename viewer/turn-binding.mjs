@@ -73,3 +73,39 @@ export function safetyNetAction({ msSinceLastMessage, pendingPermissions, graceM
   if (msSinceLastMessage < graceMs) return "wait";
   return "give-up";
 }
+
+// Does this turn still have work the model has not finished?
+//
+// A `result` is the end of a BATCH OF WORK, not necessarily the end of the
+// turn — and the difference matters because the generator finishing is what
+// makes the SDK close stdin, which is the channel canUseTool's answers travel
+// over. Open the gate while the model still has something to do and it is
+// handed work it cannot get permission to perform: every gated tool call
+// fails for the rest of that work while ungated ones keep succeeding, so the
+// turn still looks healthy. That is the failure of 2026-11-11.
+//
+// Three sources, each read from something the runtime STATES ABOUT ITSELF —
+// no timing in this decision:
+//
+//   queued         messages in our own input queue, not yet handed over.
+//                  Tracked separately from `unanswered` deliberately: a
+//                  message still queued has not been delivered, so a check
+//                  that only looked at deliveries would let the gate open and
+//                  then yield it on the way out — which is the original bug
+//                  exactly, reached by a different route.
+//   unanswered     messages we delivered that no result has accounted for
+//                  (`user_message_uuids`).
+//   backgroundTasks the CLI's own live background work, from
+//                  `background_tasks_changed` — REPLACE semantics, so it is a
+//                  snapshot rather than a counter and cannot drift.
+//
+// AMBIENT TASKS DO NOT COUNT. The SDK flags them itself: "True for tasks that
+// are not activity (every skip_transcript task, plus every live-update
+// watcher, requested or auto-started); hosts should exclude them from
+// activity indicators." Those may never finish, so counting them would hold
+// every turn open until the safety net fired.
+export function outstandingWork({ queued = 0, unanswered = 0, backgroundTasks = [] } = {}) {
+  const live = (Array.isArray(backgroundTasks) ? backgroundTasks : [])
+    .filter((t) => t && !t.ambient).length;
+  return { queued, unanswered, backgroundTasks: live, total: queued + unanswered + live };
+}

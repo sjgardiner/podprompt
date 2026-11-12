@@ -1,9 +1,22 @@
 // The alarm for a turn that has lost its permission channel — pure, no deps.
 //
-// THIS IS NOT THE FIX. The cause was found and closed off in
-// claude-code.mjs — read turn-binding.mjs for the mechanism. This module is
+// THIS IS NOT THE FIX. TWO causes have been found and closed off in
+// claude-code.mjs — read turn-binding.mjs for both mechanisms. This module is
 // what stays behind to tell us if it ever happens again, for a reason we have
 // not characterised.
+//
+// 2026-11-11: the alarm earned its keep. It fired six times in one turn and
+// said "this should be impossible", which was true of the cause then known —
+// a FOREIGN result ending the turn early. The real trigger was different and
+// is now also closed: the turn's OWN result arriving while the model still
+// had work, so the generator finished and stdin closed underneath it. The
+// trigger that day was a backgrounded Bash job reporting in six milliseconds
+// after the result. See outstandingWork() in turn-binding.mjs.
+//
+// Note what that says about the ONE unexplained failure from 2026-11-10: it
+// was single and self-recovering, which is exactly the shape this second
+// mechanism produces when the outstanding work is short. It is a plausible
+// explanation, not a confirmed one — the logs for it are long gone.
 //
 // THE FAILURE. A turn can lose the ability to obtain ANY permission decision
 // while continuing to look completely healthy. Tools the CLI permits

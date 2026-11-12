@@ -417,6 +417,11 @@ export function createOpenCodeBackend({
   // ── turns ────────────────────────────────────────────────────────────────
   async function runTurn(sessionId, promptText, state) {
     state.turnInFlight = true;
+    // Per-turn, and resetting it here is load-bearing: `state` is the
+    // driver's durable per-session bag, so a flag left set by the previous
+    // turn would make every later fold refuse and silently demote mid-turn
+    // delivery to "queued" for the rest of the session's life.
+    state.steerClosed = false;
     broadcastStatus(sessionId, { type: "turn_start", backend: "opencode" });
     const realId = await ensureSession(sessionId, { cwd: state?.cwd, title: state?.title });
     if (state?.model) {
@@ -439,6 +444,42 @@ export function createOpenCodeBackend({
     // the viewer already renders these parts.
     const text = new Map();
     const reasoning = new Map();
+
+    // ── what the SERVER still has for this session ─────────────────────────
+    // The OpenCode analogue of Claude Code's "the turn is not over just
+    // because a result arrived". Here the turn ends by aborting the event
+    // stream, and the hazard is the mirror image: a message folded in as the
+    // turn finishes is admitted to the server's DURABLE inbox, delivered at
+    // the next step boundary, and run as a fresh execution -- after we have
+    // stopped watching. Nothing is lost (the server keeps the transcript),
+    // but it runs unobserved: no turn_start, no streaming, the session reads
+    // idle in the UI, and a permission card raised inside it is shown to
+    // nobody while the tool call blocks.
+    //
+    // Measured against a live 2.2.7 server: a `delivery:"steer"` POST to an
+    // already-idle session is NOT refused -- it is accepted and executed.
+    //
+    // The server states the pending work itself, symmetrically, on the
+    // stream we already read: session.inbox.enqueued { inboxID } and
+    // session.inbox.delivered { inboxID }. Confirmed present for every entry
+    // path -- the opening prompt, a folded steer, and a sub-agent's spawn
+    // prompt -- so what is still in flight is simply the difference.
+    const inboxOutstanding = new Set();
+    let sawTerminal = false;
+
+    // Ends the turn only when the server has nothing left queued for it.
+    function endIfServerIsDone() {
+      if (!sawTerminal || inboxOutstanding.size > 0) return false;
+      // Set in the SAME TICK as the abort, which is the point: until now
+      // injectIntoTurn gated on state.turnInFlight, and that flag is cleared
+      // only at the very end of the finally below -- after an approval drain
+      // bounded at 30 seconds. That left a window up to half a minute wide
+      // in which a fold was accepted and POSTed to a session the server had
+      // already finished with.
+      state.steerClosed = true;
+      ctl.abort();
+      return true;
+    }
 
     // ── sub-agents ─────────────────────────────────────────────────────────
     // The real ids of every sub-agent this turn spawns. Also the admission
@@ -802,10 +843,32 @@ export function createOpenCodeBackend({
             outcome = { reason: "aborted" };
             ctl.abort();
             break;
+          // The server's own account of work it has accepted and not yet
+          // run. A counter would do, but a set of ids cannot double-count a
+          // repeated event or drift negative on one we never saw enqueued.
+          case "session.inbox.enqueued":
+            if (d.inboxID) inboxOutstanding.add(d.inboxID);
+            break;
+          case "session.inbox.delivered":
+            if (d.inboxID) inboxOutstanding.delete(d.inboxID);
+            // Delivery can be the moment the turn becomes endable -- the
+            // item arrived after a terminal event and its execution has now
+            // finished -- and no further idle need follow to say so.
+            if (inboxOutstanding.size === 0 && sawTerminal) {
+              // Not ended here: the execution this delivery starts is still
+              // to come. sawTerminal is reset so the NEXT terminal event is
+              // the one that ends the turn.
+              sawTerminal = false;
+            }
+            break;
           case "session.idle":
           case "session.execution.succeeded":
             // succeeded can arrive before idle; either ends our watch.
-            ctl.abort();
+            sawTerminal = true;
+            if (!endIfServerIsDone()) {
+              console.log(`[opencode] ${sessionId}: turn finished with ${inboxOutstanding.size}`
+                + " message(s) the server has queued and not yet run; staying on the stream");
+            }
             break;
           default: break;
         }
@@ -1101,7 +1164,18 @@ export function createOpenCodeBackend({
     // delivered -- exactly what the delivery core exists to prevent. So this
     // reports what actually happened rather than what is likely.
     async injectIntoTurn(sessionId, state, text) {
-      if (!state?.turnInFlight || typeof text !== "string" || !text) return false;
+      // turnInFlight is NOT the right question. The driver clears it only at
+      // the very end of runTurn's finally, after an approval drain bounded at
+      // 30 seconds -- so it stays true long after the server has finished the
+      // turn, and a steer accepted in that window runs as an execution nobody
+      // is watching. steerClosed is set in the same tick the turn stops
+      // reading the event stream, which is the honest boundary.
+      //
+      // Refusing is safe by contract: the driver re-queues whatever this
+      // declines, so the message is not lost -- it starts a fresh turn, which
+      // is exactly what it should do once the old one is over.
+      if (!state?.turnInFlight || state.steerClosed) return false;
+      if (typeof text !== "string" || !text) return false;
       try {
         await api(`/api/session/${requireRealId(sessionId)}/prompt`, {
           method: "POST",

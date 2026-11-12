@@ -1198,6 +1198,77 @@ function make(extra = {}) {
     fresh.seedRealIds([[null, real], ["x", null]]) === 0);
 }
 
+// ── a turn does not end while the server still has work for it ─────────────
+//
+// A message folded in as the turn finishes is admitted to the server's
+// DURABLE inbox and run as a fresh execution at the next step boundary. If
+// we have already stopped reading the event stream, that execution runs
+// unobserved: no turn_start, no streaming, the session reads idle while the
+// model works, and a permission card inside it is shown to nobody. Measured
+// against a live server: a steer POSTed to an already-idle session is NOT
+// refused, it is executed.
+{
+  const { b, bubbles } = make();
+  const sid = "oc-hold";
+  await b.setModel(sid, "opencode/big-pickle");
+  state.events = [
+    { type: "session.inbox.enqueued", data: { inboxID: "in-1" } },
+    { type: "session.inbox.delivered", data: { inboxID: "in-1" } },
+    // a fold lands while the turn is still running
+    { type: "session.inbox.enqueued", data: { inboxID: "in-2" } },
+    // ...and the turn's own terminal event arrives before it is delivered
+    { type: "session.idle", data: {} },
+    // the server then runs it: WE MUST STILL BE LISTENING FOR THIS
+    { type: "session.inbox.delivered", data: { inboxID: "in-2" } },
+    { type: "session.text.ended", data: { assistantMessageID: "m9", ordinal: 0, text: "LATE WORK" } },
+    { type: "session.idle", data: {} },
+  ];
+  const outcome = await b.runTurn(sid, "go", { cwd: "/tmp" });
+  check("the turn still completes", outcome.reason === "completed", outcome);
+  check("work the server ran AFTER the first idle is not missed",
+    bubbles.some((x) => x.text === "LATE WORK"), bubbles.map((x) => x.text));
+}
+
+// The ordinary case must not be held open by its own opening prompt.
+{
+  const { b } = make();
+  const sid = "oc-nohold";
+  await b.setModel(sid, "opencode/big-pickle");
+  state.events = [
+    { type: "session.inbox.enqueued", data: { inboxID: "p-1" } },
+    { type: "session.inbox.delivered", data: { inboxID: "p-1" } },
+    { type: "session.text.ended", data: { assistantMessageID: "m1", ordinal: 0, text: "hi" } },
+    { type: "session.idle", data: {} },
+  ];
+  const t0 = Date.now();
+  const outcome = await b.runTurn(sid, "go", { cwd: "/tmp" });
+  check("a turn with nothing outstanding ends at its first idle",
+    outcome.reason === "completed" && Date.now() - t0 < 4000, { outcome, ms: Date.now() - t0 });
+}
+
+// ── the steer window ───────────────────────────────────────────────────────
+//
+// injectIntoTurn used to gate on state.turnInFlight, which the driver clears
+// only at the very end of runTurn's finally -- after an approval drain
+// bounded at 30 seconds. A steer accepted in that window is POSTed to a
+// session the server has already finished with, and runs unwatched.
+{
+  const { b } = make();
+  const sid = "oc-steer-window";
+  await b.setModel(sid, "opencode/big-pickle");
+  const st = { cwd: "/tmp", turnInFlight: true };
+  check("a steer is taken while the turn is genuinely live",
+    (await b.injectIntoTurn(sid, st, "hello")) === true);
+  // What the terminal event sets, in the same tick it stops reading events.
+  st.steerClosed = true;
+  check("...and refused once the turn has seen its terminal event, even though"
+    + " turnInFlight is still set",
+    (await b.injectIntoTurn(sid, st, "too late")) === false);
+  check("refusing is not losing: the driver re-queues what this declines,"
+    + " so nothing was posted for the second one",
+    state.prompts.filter((p) => p.text === "too late").length === 0);
+}
+
 server.close();
 console.log(`\nopencode.test.mjs: ${pass} passed, ${fail} failed`);
 for (const f of failures) console.log(`  FAIL  ${f}`);

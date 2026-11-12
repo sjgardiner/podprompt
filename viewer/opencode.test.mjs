@@ -15,7 +15,8 @@
 // session busy forever with no way back.
 
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import nodePath from "node:path";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 
 let pass = 0, fail = 0;
@@ -671,17 +672,33 @@ function make(extra = {}) {
   check("a custom provider's models are offered as well",
     models.available.some((m) => m.id === "alcf-minerva/beam-1.0-bf16"), models.available);
 
-  check("resolveValidCwd keeps paths under the root", b.resolveValidCwd("/tmp/sub") === "/tmp/sub");
-  check("...and refuses an escape", b.resolveValidCwd("/etc") === null);
-  check("...the root itself is allowed", b.resolveValidCwd("/tmp") === "/tmp");
-  // THE CLASSIC startsWith TRAP, inherited from the backend this replaced
-  // and caught by porting its test: "/tmp-other" starts with "/tmp" but is a
-  // SIBLING, not a child. A bare prefix comparison accepts it and the
-  // session runs in a foreign tree.
-  check("a sibling sharing the root's prefix is refused",
-    b.resolveValidCwd("/tmp-other/x") === null, b.resolveValidCwd("/tmp-other/x"));
-  check("a relative path resolves under the root",
-    b.resolveValidCwd("sub/dir") === "/tmp/sub/dir", b.resolveValidCwd("sub/dir"));
+  // cwdRoot here is /tmp (see make()), and these now have to be REAL
+  // directories: resolveValidCwd is shared with the claude-code backend via
+  // dirscan.mjs, and the thing this copy was missing is an existence check —
+  // a typo used to be accepted here and fail much later, somewhere that could
+  // not say what was wrong. See dirscan.test.mjs for the boundary's own
+  // exhaustive tests; these are the wiring.
+  const sub = mkdtempSync("/tmp/oc-cwd-");
+  mkdirSync(nodePath.join(sub, "nested"), { recursive: true });
+  try {
+    check("resolveValidCwd keeps paths under the root", b.resolveValidCwd(sub) === sub);
+    check("...and refuses an escape", b.resolveValidCwd("/etc") === null);
+    check("...the root itself is allowed", b.resolveValidCwd("/tmp") === "/tmp");
+    // THE CLASSIC startsWith TRAP, inherited from the backend this replaced
+    // and caught by porting its test: "/tmp-other" starts with "/tmp" but is a
+    // SIBLING, not a child. A bare prefix comparison accepts it and the
+    // session runs in a foreign tree.
+    check("a sibling sharing the root's prefix is refused",
+      b.resolveValidCwd("/tmp-other/x") === null, b.resolveValidCwd("/tmp-other/x"));
+    const rel = nodePath.join(nodePath.basename(sub), "nested");
+    check("a relative path resolves under the root",
+      b.resolveValidCwd(rel) === nodePath.join(sub, "nested"), b.resolveValidCwd(rel));
+    // The bug this backend shipped with: no existence check at all.
+    check("a directory that does not exist is refused",
+      b.resolveValidCwd(nodePath.join(sub, "no-such-dir")) === null);
+  } finally {
+    rmSync(sub, { recursive: true, force: true });
+  }
 }
 
 // ── permissions ────────────────────────────────────────────────────────────

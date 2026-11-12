@@ -92,6 +92,10 @@ import nodePath from "node:path";
 import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
+// Filesystem discovery for the "+ New chat" destination picker. Backend-
+// agnostic on purpose — see dirscan.mjs's header for why one scan is correct
+// for both backends rather than a shortcut.
+import { createDirUnderRoot, scanDirs } from "./dirscan.mjs";
 import {
   createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
 } from "./autonomy.mjs";
@@ -4284,6 +4288,22 @@ function requireControl(req) {
   return true;
 }
 
+// One cached unfiltered scan for /dirs, shared by every picker open and every
+// backend. Short-lived on purpose: a directory created in a terminal should
+// show up in the picker within seconds without anyone pressing anything, but
+// re-walking the tree on each of a dozen keystrokes is what the cache is
+// there to prevent. Invalidated outright by POST /dirs, which knows it just
+// changed the answer.
+const DIR_SCAN_TTL_MS = 5000;
+let dirScanCache = null; // { at, result }
+
+function cachedDirScan() {
+  if (dirScanCache && Date.now() - dirScanCache.at < DIR_SCAN_TTL_MS) return dirScanCache.result;
+  const result = scanDirs(args.cwd);
+  dirScanCache = { at: Date.now(), result };
+  return result;
+}
+
 const server = createServer(async (req, res) => {
   sendCors(res);
 
@@ -4846,7 +4866,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/projects") {
     // Driven by an explicit ?backend= from the new-chat picker's own
     // currently-selected radio button (see viewer.html's openNewChatPicker/
-    // loadAndRenderProjects), not a single global default — each backend's
+    // loadDestinations), not a single global default — each backend's
     // project discovery differs (Claude Code scans its own multi-project
     // session history; OpenCode's is a similar scan against its own /session
     // API — see backends/opencode.mjs's listProjects), so the picker must
@@ -4860,6 +4880,72 @@ const server = createServer(async (req, res) => {
     // resolves immediately either way.
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(await backend.listProjects()));
+    return;
+  }
+
+  // The other half of /projects, and the reason the picker no longer needs
+  // anyone to type a path accurately: /projects can only ever answer "where
+  // has a session run before", so a directory that has never hosted one was
+  // previously unreachable except by hand — and a typo was not caught until
+  // the first prompt had already been submitted and lost.
+  //
+  // Deliberately NOT per-backend and NOT ?backend=-driven, unlike /projects:
+  // driver.mjs spawns `opencode serve` itself, in this container, so both
+  // backends see one filesystem, and both are handed the same cwdRoot. The
+  // browser merges this with /projects client-side.
+  //
+  // ?q= filters server-side. That is not a micro-optimisation: once a scan
+  // reports truncated:true, filtering the truncated list in the browser can
+  // never surface a match the cap cut off, so the filter has to be applied
+  // during the walk instead.
+  if (req.method === "GET" && path === "/dirs") {
+    const q = url.searchParams.get("q") || "";
+    try {
+      // The cache only holds the unfiltered scan; a filtered request walks
+      // fresh, because a filter is allowed to reach deeper than the entry cap
+      // would have let the unfiltered answer go.
+      const result = q ? scanDirs(args.cwd, { q }) : cachedDirScan();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("[driver] /dirs scan failed:", e.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end('{"error":"failed to scan directories"}');
+    }
+    return;
+  }
+
+  // Creates a destination the picker offered to create, and hands back the
+  // path a session should actually be pinned to. Done HERE, when the row is
+  // chosen, rather than lazily at the first prompt: a mkdir that fails is
+  // something to learn while still looking at the picker, which is the entire
+  // complaint this feature exists to answer.
+  //
+  // createDirUnderRoot applies the same root boundary as resolveValidCwd and
+  // re-validates strictly after creating, so there is no window in which this
+  // route can hand back something outside the workspace.
+  if (req.method === "POST" && path === "/dirs") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"invalid json"}');
+      return;
+    }
+    const created = createDirUnderRoot(body?.path, args.cwd);
+    if (!created) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end('{"error":"could not create that directory under the workspace root"}');
+      return;
+    }
+    dirScanCache = null; // this request is precisely what made the cache wrong
+    res.writeHead(200, { "Content-Type": "application/json" });
+    // Normalized the same way scanDirs reports it. The browser compares the
+    // returned cwd against this root to decide whether to send an explicit
+    // cwd at all, and a "/workspace/" here against a "/workspace" there would
+    // quietly take the wrong branch.
+    res.end(JSON.stringify({ ok: true, cwd: created, root: nodePath.resolve(args.cwd) }));
     return;
   }
 

@@ -670,20 +670,30 @@
     cursor: pointer;
   }
 
-  /* New-chat project picker: which project (existing, or a freshly typed
-     subdirectory) the new session should start in. Defaults effectively to
-     "just continue in the current project" — that row is listed first and
-     marked, so the zero-effort case is still just one extra click, not a
-     detour, while the deliberate cross-project case is right there too. */
+  /* New-chat destination picker: which directory the new session should
+     start in. Defaults effectively to "just continue in the current project"
+     — that row is listed first and marked, so the zero-effort case is still
+     just one extra click, not a detour, while the deliberate cross-project
+     case is right there too.
+
+     The list is every real directory under the workspace root (driver.mjs's
+     /dirs) merged with the backend's own known projects (/projects), filtered
+     as you type. It used to be known projects only, plus a free-text box for
+     anywhere else — which meant typing a path from memory and not finding out
+     it was wrong until the first prompt had already been sent and lost.
+
+     Flex column rather than one scrolling box: the filter input has to stay
+     put while the rows under it scroll, or the thing being typed into
+     disappears as soon as the list is longer than the popover. */
   #new-chat-picker {
     display: none;
     position: absolute;
     top: 100%;
     right: 0;
     margin-top: 6px;
-    width: 260px;
-    max-height: 280px;
-    overflow-y: auto;
+    width: 300px;
+    max-height: 380px;
+    overflow: hidden;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -693,7 +703,7 @@
     letter-spacing: normal;
     font-weight: 400;
   }
-  #new-chat-picker.show { display: block; }
+  #new-chat-picker.show { display: flex; flex-direction: column; }
   .new-chat-backend-row {
     display: flex;
     gap: 6px;
@@ -718,17 +728,42 @@
     border-color: var(--accent);
     font-weight: 600;
   }
+  /* One row shape for every destination, whether it came from /projects or
+     from the filesystem scan: they are the same kind of thing — a directory a
+     session can start in — and marking them differently would only invite the
+     question of which kind is which. */
   .new-chat-project-item {
     padding: 8px 14px;
     font-size: 13px;
     color: var(--text);
     cursor: pointer;
     border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .new-chat-project-item:hover { background: var(--code-bg); }
+  /* Keyboard highlight. Same background as :hover on purpose — one visual
+     vocabulary for "this is what Enter will take", however you got there. */
+  .new-chat-project-item.active { background: var(--code-bg); }
   .new-chat-project-item.current { color: var(--accent); font-weight: 600; }
-  .new-chat-custom-row { padding: 8px 14px; }
-  .new-chat-custom-row input {
+  /* The offer to create a directory that doesn't exist yet. Only ever shown
+     when the filter matches nothing, so it can never be the row Enter lands
+     on while a real destination is still on screen. */
+  .new-chat-create-item { color: var(--accent); }
+  .new-chat-note {
+    padding: 8px 14px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .new-chat-note.error { color: var(--danger); }
+  .new-chat-filter-row {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  .new-chat-filter-row input {
     width: 100%;
     background: var(--code-bg);
     border: 1px solid var(--border);
@@ -738,6 +773,10 @@
     font-size: 12px;
     font-family: var(--mono);
   }
+  /* min-height:0 is load-bearing: without it a flex child refuses to shrink
+     below its content height and the popover grows past its own max-height
+     instead of scrolling. */
+  .new-chat-dest-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
   #sessions-view-toggle {
     display: flex;
     gap: 2px;
@@ -5898,9 +5937,18 @@ async function submitPrompt() {
   dismissPalette();
   setTurnInFlight(true);
   // Only meaningful for a brand-new session's very first prompt (see the
-  // new-chat project picker) — consumed here regardless of outcome, so a
-  // retry after a failed attempt just falls back to the session's default
-  // cwd rather than resending a value that may have been the problem.
+  // new-chat destination picker). Both of these used to be consumed here
+  // unconditionally, on the theory that a value which had just failed was
+  // probably the problem and shouldn't be resent. That theory stopped
+  // holding once the picker started validating destinations up front: every
+  // cwd that gets this far has already been resolved server-side by /dirs,
+  // so a failure now is far more likely to be transient (the driver
+  // restarting, a dropped connection) than a bad path. Dropping it turned
+  // one failed send into a session silently landing somewhere else on the
+  // retry — a worse outcome than the one it was guarding against. They are
+  // consumed on success only; see the restore in the failure paths below.
+  const pendingCwdUsed = pendingCwdForNewSession;
+  const pendingBackendUsed = pendingBackendForNewSession;
   const cwdForThisPrompt = pendingCwdForNewSession && pendingCwdForNewSession.sessionId === currentSessionId
     ? pendingCwdForNewSession.cwd
     : undefined;
@@ -5909,6 +5957,16 @@ async function submitPrompt() {
     ? pendingBackendForNewSession.backend
     : backendForCurrentSession();
   pendingBackendForNewSession = null;
+  // Puts the message back in the box, with whatever the picker had decided,
+  // so a failed send is something to retry rather than something to retype.
+  const restoreUnsentPrompt = () => {
+    pendingCwdForNewSession = pendingCwdUsed;
+    pendingBackendForNewSession = pendingBackendUsed;
+    if (!promptInput.value.trim()) {
+      promptInput.value = text;
+      autoResizeInput();
+    }
+  };
   try {
     const body = { sessionId: currentSessionId, text };
     if (cwdForThisPrompt) body.cwd = cwdForThisPrompt;
@@ -5920,6 +5978,7 @@ async function submitPrompt() {
     });
     if (!res.ok) {
       setTurnInFlight(false);
+      restoreUnsentPrompt();
       const errText = await res.text();
       console.error('Prompt submission failed:', errText);
       showLocalNotice(`*(message not sent: ${errText})*`);
@@ -5929,6 +5988,7 @@ async function submitPrompt() {
     // since the real work happens asynchronously after this 202 response.
   } catch (e) {
     setTurnInFlight(false);
+    restoreUnsentPrompt();
     console.error('Prompt submission failed:', e);
     showLocalNotice(`*(message not sent: ${e.message})*`);
   }
@@ -6900,6 +6960,13 @@ const newChatPicker = document.getElementById('new-chat-picker');
 function dismissNewChatPicker() {
   newChatPicker.classList.remove('show');
   newChatPicker.innerHTML = '';
+  // The element refs below point into the subtree just discarded, and a
+  // debounced /dirs fetch would otherwise land on a list that no longer
+  // exists.
+  clearTimeout(newChatFilterTimer);
+  newChatFilterInput = null;
+  newChatDestList = null;
+  newChatRows = [];
 }
 
 // No server round-trip needed to actually *create* anything here — a "new
@@ -6975,45 +7042,208 @@ function updateBackendIndicator() {
 // to create the session.
 let newChatSelectedBackend = null;
 
-// Fetches /projects for one specific backend and (re-)renders just the
-// project-item list + custom-subdirectory row into `section` — pulled out
-// of openNewChatPicker so the backend-row buttons below can call this again
-// on click without disturbing the backend row itself. Each backend's own
-// project discovery is genuinely different (Claude Code's is a real
-// multi-project scan; OpenCode's is a similar scan against its own session
-// history, but can differ in what it's ever seen — see backends/
-// opencode.mjs's listProjects), so switching the picker's selected backend
-// without re-fetching would show one backend's list while the other is
-// selected right above it.
-async function loadAndRenderProjects(backend, section, currentCwd) {
-  section.innerHTML = '<div class="palette-empty">Loading…</div>';
-  try {
-    const res = await fetch(`${driverBase}/projects?backend=${encodeURIComponent(backend)}`);
-    const data = await res.json();
-    section.innerHTML = '';
-    for (const p of data.projects || []) {
-      const item = document.createElement('div');
-      const isCurrent = p.cwd === currentCwd;
-      item.className = 'new-chat-project-item' + (isCurrent ? ' current' : '');
-      item.textContent = isCurrent ? `${p.label} (current)` : p.label;
-      item.addEventListener('click', () =>
-        startNewChatInProject(p.cwd === data.root ? undefined : p.cwd, newChatSelectedBackend));
-      section.appendChild(item);
-    }
+// What the picker is currently offering, and what Enter would take. Rebuilt
+// whenever the selected backend changes or a truncated scan gets re-filtered
+// server-side; re-read on every keystroke by renderDestinations().
+let newChatDestinations = [];  // [{cwd, label, isCurrent}]
+let newChatRoot = null;        // the cwd that means "no explicit cwd at all"
+let newChatTruncated = false;  // the scan hit its cap — filter on the server
+let newChatActiveIndex = 0;    // which row Enter takes
+let newChatRows = [];          // [{el, choose}] — parallel to what's on screen
+let newChatCurrentCwd = null;
+let newChatFilterInput = null;
+let newChatDestList = null;
+let newChatFilterTimer = null;
+// Monotonic, so a slow /dirs response for an earlier keystroke can't land on
+// top of a newer one. Typing is fast and loopback latency is not reliably
+// ordered; without this the list can end up showing a stale filter's matches.
+let newChatLoadSeq = 0;
+// How many rows get built at once. See renderDestinations.
+const NEW_CHAT_RENDER_LIMIT = 200;
 
-    const customRow = document.createElement('div');
-    customRow.className = 'new-chat-custom-row';
-    const input = document.createElement('input');
-    input.placeholder = 'Or type a subdirectory path…';
-    input.addEventListener('click', (e) => e.stopPropagation());
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && input.value.trim()) startNewChatInProject(input.value.trim(), newChatSelectedBackend);
+function newChatFilterValue() {
+  return newChatFilterInput ? newChatFilterInput.value.trim() : '';
+}
+
+// One flat list of destinations out of the two sources that know about any:
+// the filesystem scan (/dirs — every real directory, including ones no
+// session has ever run in) and the backend's own project history (/projects —
+// which can still name a directory the scan's depth cap or exclude list left
+// out). Deduped by cwd, because the overlap between them is most of both.
+//
+// They are not labelled by origin. A destination is a destination; which of
+// the two happened to know about it first is an implementation detail, and
+// showing it would only raise the question of what the difference means.
+function mergeDestinations(projectsData, dirsData, currentCwd) {
+  const byCwd = new Map();
+  const add = (cwd, label) => {
+    if (!cwd || byCwd.has(cwd)) return;
+    byCwd.set(cwd, { cwd, label: label || cwd, isCurrent: cwd === currentCwd });
+  };
+  for (const d of (dirsData?.dirs || [])) add(d.cwd, d.label);
+  for (const p of (projectsData?.projects || [])) add(p.cwd, p.label);
+  return [...byCwd.values()].sort((a, b) => {
+    // The current project stays pinned to the top: continuing where you
+    // already are is the common case, and it should never require reading.
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    if ((a.cwd === newChatRoot) !== (b.cwd === newChatRoot)) return a.cwd === newChatRoot ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+}
+
+function setActiveRow(index) {
+  if (!newChatRows.length) {
+    newChatActiveIndex = 0;
+    return;
+  }
+  newChatActiveIndex = Math.max(0, Math.min(index, newChatRows.length - 1));
+  newChatRows.forEach((row, i) => {
+    const active = i === newChatActiveIndex;
+    row.el.classList.toggle('active', active);
+    if (active) row.el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function newChatNote(text, isError) {
+  const note = document.createElement('div');
+  note.className = 'new-chat-note' + (isError ? ' error' : '');
+  note.textContent = text;
+  return note;
+}
+
+// Creates a directory the picker offered to create, then starts the session
+// in it. The round trip happens HERE, on the click, rather than being left
+// for the first prompt to discover: a destination that can't be used is
+// something to find out about while still looking at the picker.
+//
+// Doubles as the escape hatch for a directory that exists but the scan
+// doesn't offer (hidden, excluded, or past the depth cap) — mkdir -p on
+// something already there succeeds and resolves to the same path.
+async function createDestinationAndStart(path) {
+  newChatDestList.appendChild(newChatNote('Creating…'));
+  try {
+    const res = await fetch(`${driverBase}/dirs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
     });
-    customRow.appendChild(input);
-    section.appendChild(customRow);
+    const data = await res.json().catch(() => ({}));
+    if (!newChatDestList) return; // dismissed while the mkdir was in flight
+    if (!res.ok || !data.cwd) {
+      renderDestinations();
+      newChatDestList.appendChild(newChatNote(data.error || 'Could not create that directory.', true));
+      return;
+    }
+    if (data.root) newChatRoot = data.root;
+    startNewChatInProject(data.cwd === newChatRoot ? undefined : data.cwd, newChatSelectedBackend);
   } catch (e) {
-    section.innerHTML = '<div class="palette-empty">Failed to load projects.</div>';
-    console.error('Failed to load /projects:', e);
+    console.error('Failed to create directory:', e);
+    if (!newChatDestList) return;
+    renderDestinations();
+    newChatDestList.appendChild(newChatNote('Could not reach the driver.', true));
+  }
+}
+
+// Paints newChatDestinations through the filter box. Pure display — no
+// fetching — so a keystroke over an already-loaded list is instant; the
+// server only gets involved again when the scan was truncated (see the input
+// handler).
+function renderDestinations() {
+  if (!newChatDestList) return;
+  const typed = newChatFilterValue();
+  const needle = typed.toLowerCase();
+  const matches = needle
+    ? newChatDestinations.filter((d) => d.label.toLowerCase().includes(needle))
+    : newChatDestinations;
+
+  newChatDestList.innerHTML = '';
+  newChatRows = [];
+
+  // A real workspace scans to ~2000 directories, and building that many rows
+  // on every keystroke is the only part of this that is not free. Filtering
+  // still runs over ALL of them — it is only the painting that stops early,
+  // so narrowing the filter always reaches anything the cap is hiding.
+  const shown = matches.slice(0, NEW_CHAT_RENDER_LIMIT);
+
+  shown.forEach((d) => {
+    const item = document.createElement('div');
+    item.className = 'new-chat-project-item' + (d.isCurrent ? ' current' : '');
+    item.textContent = d.isCurrent ? `${d.label} (current)` : d.label;
+    item.title = d.cwd; // the full path, for a label that had to be ellipsed
+    const choose = () =>
+      startNewChatInProject(d.cwd === newChatRoot ? undefined : d.cwd, newChatSelectedBackend);
+    const index = newChatRows.length;
+    item.addEventListener('click', choose);
+    // Keeps the keyboard highlight and the mouse pointer on the same row, so
+    // there is never more than one thing that looks like what Enter takes.
+    item.addEventListener('mouseenter', () => setActiveRow(index));
+    newChatDestList.appendChild(item);
+    newChatRows.push({ el: item, choose });
+  });
+
+  if (!matches.length && typed) {
+    // Nothing matched, so the typed text is read as a path to create rather
+    // than as a filter. Only reachable when the list is empty, which is what
+    // keeps Enter from ever creating a directory while a real destination was
+    // still on screen and selected.
+    const item = document.createElement('div');
+    item.className = 'new-chat-project-item new-chat-create-item';
+    item.textContent = `+ Create “${typed}” and start here`;
+    const choose = () => createDestinationAndStart(typed);
+    item.addEventListener('click', choose);
+    item.addEventListener('mouseenter', () => setActiveRow(0));
+    newChatDestList.appendChild(item);
+    newChatRows.push({ el: item, choose });
+  } else if (!matches.length) {
+    newChatDestList.appendChild(newChatNote('No directories found.'));
+  }
+
+  const notShown = matches.length - shown.length;
+  if (notShown > 0) {
+    newChatDestList.appendChild(newChatNote(
+      `${notShown} more ${notShown === 1 ? 'directory' : 'directories'} not shown — keep typing to narrow.`));
+  } else if (newChatTruncated) {
+    // A different statement from the one above, and worth its own wording:
+    // this one means the SERVER stopped walking, so what is missing was never
+    // sent and cannot be found by filtering what is already here. Typing
+    // re-runs the scan with the filter applied during the walk.
+    newChatDestList.appendChild(newChatNote(
+      'Showing part of a large workspace — keep typing to search the rest.'));
+  }
+
+  setActiveRow(0);
+}
+
+// Fetches both destination sources for one specific backend and re-renders.
+// /projects is per-backend because each backend's history is its own (Claude
+// Code scans ~/.claude/projects; OpenCode asks its own server), so switching
+// the picker's selected backend without re-fetching would show one backend's
+// list while the other is selected right above it. /dirs is not per-backend
+// at all — one filesystem, one answer, see driver.mjs's own note on the route.
+async function loadDestinations(backend, { q = '' } = {}) {
+  const seq = ++newChatLoadSeq;
+  try {
+    const [projectsRes, dirsRes] = await Promise.all([
+      fetch(`${driverBase}/projects?backend=${encodeURIComponent(backend)}`).catch(() => null),
+      // Tolerate an older driver.mjs without this route — the picker then
+      // degrades to exactly its previous behaviour (known projects only),
+      // rather than showing nothing.
+      fetch(`${driverBase}/dirs${q ? `?q=${encodeURIComponent(q)}` : ''}`).catch(() => null),
+    ]);
+    const projectsData = projectsRes && projectsRes.ok ? await projectsRes.json() : null;
+    const dirsData = dirsRes && dirsRes.ok ? await dirsRes.json() : null;
+    if (seq !== newChatLoadSeq) return; // a newer keystroke already won
+    if (!newChatDestList) return; // picker dismissed while this was in flight
+    if (!projectsData && !dirsData) throw new Error('neither /projects nor /dirs answered');
+    newChatRoot = dirsData?.root || projectsData?.root || null;
+    newChatTruncated = !!dirsData?.truncated;
+    newChatDestinations = mergeDestinations(projectsData, dirsData, newChatCurrentCwd);
+    renderDestinations();
+  } catch (e) {
+    if (seq !== newChatLoadSeq || !newChatDestList) return;
+    newChatDestList.innerHTML = '<div class="palette-empty">Failed to load destinations.</div>';
+    newChatRows = [];
+    console.error('Failed to load new-chat destinations:', e);
   }
 }
 
@@ -7027,7 +7257,7 @@ async function openNewChatPicker() {
   newChatPicker.classList.add('show');
   try {
     // Backend choice needs to be known before the first /projects fetch
-    // (which now depends on it) rather than fired in parallel with it —
+    // (which depends on it) rather than fired in parallel with it —
     // negligible added latency (loopback), and correctness beats shaving
     // one round trip here.
     // Tolerate an older driver.mjs without this route — falls back to a
@@ -7040,12 +7270,13 @@ async function openNewChatPicker() {
     // Best-effort only — if the current session isn't in the cached list
     // yet (e.g. panel never opened this tab load), nothing gets marked
     // "current" here, which is purely cosmetic, not a correctness issue.
-    const currentCwd = lastSessionsResult?.sessions?.find((s) => s.sessionId === currentSessionId)?.cwd;
+    newChatCurrentCwd = lastSessionsResult?.sessions
+      ?.find((s) => s.sessionId === currentSessionId)?.cwd || null;
 
     newChatPicker.innerHTML = '';
-
-    const projectSection = document.createElement('div');
-    projectSection.className = 'new-chat-project-section';
+    newChatDestinations = [];
+    newChatRows = [];
+    newChatTruncated = false;
 
     // Backend row — only worth showing a choice at all when more than one
     // backend is actually registered (a single-backend deployment just
@@ -7064,17 +7295,65 @@ async function openNewChatPicker() {
           newChatSelectedBackend = b;
           backendRow.querySelectorAll('.new-chat-backend-btn')
             .forEach((el) => el.classList.toggle('selected', el === btn));
-          loadAndRenderProjects(b, projectSection, currentCwd);
+          // Whatever was typed survives the switch — the filter is about
+          // where you're going, not about which runtime takes you there.
+          loadDestinations(b, { q: newChatTruncated ? newChatFilterValue() : '' });
         });
         backendRow.appendChild(btn);
       }
       newChatPicker.appendChild(backendRow);
     }
 
-    newChatPicker.appendChild(projectSection);
-    await loadAndRenderProjects(newChatSelectedBackend, projectSection, currentCwd);
+    const filterRow = document.createElement('div');
+    filterRow.className = 'new-chat-filter-row';
+    newChatFilterInput = document.createElement('input');
+    newChatFilterInput.placeholder = 'Filter or type a path…';
+    newChatFilterInput.setAttribute('spellcheck', 'false');
+    newChatFilterInput.addEventListener('click', (e) => e.stopPropagation());
+    newChatFilterInput.addEventListener('input', () => {
+      // A truncated scan can't be filtered in the browser: the match being
+      // looked for may be one the entry cap cut off, so the walk has to be
+      // re-run server-side with the filter applied during it. Debounced,
+      // and the local render still happens immediately so typing never
+      // feels like it's waiting on anything.
+      if (newChatTruncated) {
+        clearTimeout(newChatFilterTimer);
+        const q = newChatFilterValue();
+        newChatFilterTimer = setTimeout(() => loadDestinations(newChatSelectedBackend, { q }), 150);
+      }
+      renderDestinations();
+    });
+    newChatFilterInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveRow(newChatActiveIndex + 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveRow(newChatActiveIndex - 1);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        // Only ever the highlighted row — never the raw text. A path that
+        // doesn't exist reaches the server as an explicit "create this",
+        // which is the one thing the old free-text box could not do: it
+        // sent whatever was typed and let the first prompt fail on it.
+        newChatRows[newChatActiveIndex]?.choose();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        dismissNewChatPicker();
+      }
+    });
+    filterRow.appendChild(newChatFilterInput);
+    newChatPicker.appendChild(filterRow);
+
+    newChatDestList = document.createElement('div');
+    newChatDestList.className = 'new-chat-dest-list';
+    newChatDestList.innerHTML = '<div class="palette-empty">Loading…</div>';
+    newChatPicker.appendChild(newChatDestList);
+
+    newChatFilterInput.focus();
+    await loadDestinations(newChatSelectedBackend);
   } catch (e) {
-    newChatPicker.innerHTML = '<div class="palette-empty">Failed to load projects.</div>';
+    newChatPicker.innerHTML = '<div class="palette-empty">Failed to load destinations.</div>';
     console.error('Failed to load new-chat picker:', e);
   }
 }

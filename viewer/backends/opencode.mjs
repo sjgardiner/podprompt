@@ -57,6 +57,9 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
+// dirscan owns the workspace-root boundary for BOTH backends — see its header
+// for the three ways the two hand-rolled copies used to disagree.
+import { resolveUnderRoot } from "../dirscan.mjs";
 
 export function createOpenCodeBackend({
   cwdRoot, broadcast, broadcastStatus, broadcastUserPrompt,
@@ -1294,16 +1297,15 @@ export function createOpenCodeBackend({
 
     cwdForSession(sessionId, fallbackCwd) { return fallbackCwd || cwdRoot; },
 
+    // Separator-anchored containment ("/workspace-other" starts with
+    // "/workspace" and is a sibling, not a child), plus the check this copy
+    // was missing entirely: that the directory EXISTS. Without it a typo was
+    // accepted here and only failed later, from somewhere that could not say
+    // what was actually wrong — the destination picker's whole reason for
+    // being. Shared with the claude-code backend so the two cannot drift
+    // apart again.
     resolveValidCwd(candidate) {
-      if (!candidate) return null;
-      const root = cwdRoot || process.cwd();
-      const abs = candidate.startsWith("/") ? candidate : `${root}/${candidate}`;
-      // Separator-anchored, NOT a bare startsWith: "/workspace-other" starts
-      // with "/workspace" and is a sibling, not a child. That comparison is
-      // the only thing standing between us and running a session in a
-      // foreign tree, and the plain prefix test silently accepts it.
-      const base = root.endsWith("/") ? root.slice(0, -1) : root;
-      return abs === base || abs.startsWith(`${base}/`) ? abs : null;
+      return resolveUnderRoot(candidate, cwdRoot || process.cwd());
     },
 
     // THE SHAPE IS THE CONTRACT, the third time in this file. The picker reads

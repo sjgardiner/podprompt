@@ -33,6 +33,9 @@ import { z } from "zod";
 // permission-channel is the alarm for that failure happening anyway.
 import { resultBelongsToTurn, safetyNetAction, outstandingWork } from "../turn-binding.mjs";
 import { countPermissionChannelFailures } from "../permission-channel.mjs";
+// dirscan owns the workspace-root boundary for BOTH backends — see its header
+// for the three ways the two hand-rolled copies used to disagree.
+import { resolveUnderRoot } from "../dirscan.mjs";
 
 // How long a turn keeps listening after a result that is not its own before
 // giving up. Generous on purpose: in every observed case the next message
@@ -345,23 +348,26 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   // it — the same boundary the SDK itself enforces for its own
   // --add-dir/additionalDirectories option (a related but distinct concept:
   // that widens one session's tool-access scope, this decides which
-  // project's session storage a session belongs to). Returns the original
-  // candidate string (not the realpath — the session keeps using exactly
-  // what the browser asked for) or null if invalid.
+  // project's session storage a session belongs to).
+  //
+  // The boundary itself now lives in dirscan.mjs, shared with the opencode
+  // backend, because the two hand-rolled copies each let something different
+  // through — this one accepted a FILE (existsSync with no isDirectory check)
+  // and returned the candidate verbatim, so a relative path was resolved
+  // against the driver process's cwd rather than cwdRoot and then stored
+  // unnormalized. Returns the normalized absolute path (not the realpath —
+  // the session keeps using the path the user actually asked for) or null.
   function resolveValidCwd(candidate) {
-    if (!candidate || typeof candidate !== "string") return null;
-    if (!existsSync(candidate)) return null;
-    const real = safeRealpath(candidate);
-    const rootReal = safeRealpath(cwdRoot);
-    if (!real || !rootReal || !isUnderRoot(real, rootReal)) return null;
-    if (!knownProjects.reachable.has(candidate)) {
+    const resolved = resolveUnderRoot(candidate, cwdRoot);
+    if (!resolved) return null;
+    if (!knownProjects.reachable.has(resolved)) {
       // Registered immediately rather than waiting for the next scan —
       // anything this backend creates itself is already known the moment it
       // happens; discovery/rescan only exists for finding pre-existing
       // sessions this process didn't create.
-      knownProjects.reachable.set(candidate, null);
+      knownProjects.reachable.set(resolved, null);
     }
-    return candidate;
+    return resolved;
   }
 
   // Best-known cwd for a session id we may never have run a turn for

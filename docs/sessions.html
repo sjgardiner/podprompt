@@ -221,10 +221,37 @@
 
       <p>
         <strong>+ New chat</strong> opens a picker rather than immediately
-        creating anything. You choose a backend and a project, with the current
-        one listed first. You can type a custom subdirectory path instead and
-        confirm it with <kbd>Enter</kbd>.
+        creating anything. You choose a backend and a directory to work in,
+        with the current one listed first.
       </p>
+
+      <p>
+        The list is every directory under <code>/workspace</code> — not only
+        the ones a session has run in before — so a new project does not have
+        to be typed from memory. Start typing to filter it, use
+        <kbd>&uarr;</kbd> and <kbd>&darr;</kbd> to move through the matches,
+        and <kbd>Enter</kbd> to start there. <kbd>Esc</kbd> closes the picker.
+      </p>
+
+      <p>
+        If what you typed matches nothing, the picker offers to
+        <strong>create that directory and start there</strong> instead. That is
+        the only way a path you typed is used, so a typo cannot quietly send a
+        session somewhere unintended: it either names a directory that is in
+        the list, or it is an explicit request to make a new one.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Very large workspaces</div>
+        <p>
+          The scan skips the usual noise (<code>node_modules</code>,
+          <code>.git</code>, build output, hidden directories) and stops six
+          levels down. If a workspace is big enough that the list is cut short,
+          the picker says so and searches the rest on the server as you type.
+          A directory it skipped can still be reached by typing its path — the
+          offer to create it resolves to the existing one.
+        </p>
+      </div>
 
       <table class="data-table">
         <thead><tr><th>Backend</th><th>What it is</th></tr></thead>

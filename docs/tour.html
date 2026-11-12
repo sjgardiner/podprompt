@@ -229,7 +229,11 @@
           </tr>
           <tr>
             <td>plan usage</td>
-            <td>Subscription allowance, e.g. <code>42% · resets 2:20 PM</code>. Turns red at 70% and over. Only appears on a subscription that reports a five-hour or seven-day window.</td>
+            <td><span class="badge badge--claude">Claude Code</span> Subscription allowance, e.g. <code>42% · resets 2:20 PM</code>. Turns red at 70% and over. Only appears on a subscription that reports a five-hour or seven-day window.</td>
+          </tr>
+          <tr>
+            <td>session spend</td>
+            <td><span class="badge badge--opencode">OpenCode</span> What this session has cost so far, e.g. <code>$0.42 session</code>. Shares the slot with plan usage — a session shows whichever one fits its backend.</td>
           </tr>
           <tr>
             <td>status</td>
@@ -344,7 +348,7 @@
         <tbody>
           <tr>
             <td>model</td>
-            <td>Which model this session uses. Hidden until the list loads, or entirely if the backend has no such concept.</td>
+            <td>Which model this session uses. Hidden until the list loads. On Claude Code the choice applies from the next turn; on OpenCode it switches live.</td>
           </tr>
           <tr>
             <td>mode</td>
@@ -364,7 +368,7 @@
       <div class="callout warn">
         <div class="callout-label">Gotcha · Auto-approve does not survive a restart</div>
         <p>
-          It is deliberately held in memory only. If the driver restarts, every
+          It is held in memory only. If the driver restarts, every
           session reverts to asking. Do not rely on it as the thing that keeps
           an overnight run unattended — use <strong>Always allow</strong> on the
           cards themselves, which the backend remembers.
@@ -395,7 +399,7 @@
         <thead><tr><th>Button</th><th>Effect</th></tr></thead>
         <tbody>
           <tr><td>Allow</td><td>Permits this one call.</td></tr>
-          <tr><td>Always allow</td><td>Widens the backend's own rules so calls like this stop asking in this session. <span class="badge badge--differs">Backend-dependent</span> — the button only exists if the backend can do it.</td></tr>
+          <tr><td>Always allow</td><td>Widens the backend's own rules so calls like this stop asking in this session. Offered on both backends, though not on every card — it appears when the backend can name a rule that would cover the call.</td></tr>
           <tr><td>Deny</td><td>Refuses the call. The agent is told and carries on.</td></tr>
         </tbody>
       </table>
@@ -429,9 +433,9 @@
       <div class="callout info">
         <div class="callout-label">If the driver restarts mid-request</div>
         <p>
-          Anything still waiting is reported in the transcript as abandoned,
-          rather than quietly reappearing as though it were still live. A card
-          whose request has since died is retracted on its own.
+          Anything still waiting is marked abandoned in the transcript, so you
+          can see what went unanswered. A card whose request has since died is
+          retracted on its own.
         </p>
       </div>
     </section>
@@ -487,7 +491,7 @@
           <tr>
             <td>Load full history <span class="badge badge--claude">Claude Code only</span></td>
             <td><span class="default">off</span></td>
-            <td>Loads the complete transcript rather than a recent window. The OpenCode row is disabled, because it always loads everything anyway.</td>
+            <td>Loads the complete transcript rather than a recent window. OpenCode sessions ignore it — they always load everything.</td>
           </tr>
         </tbody>
       </table>
@@ -497,9 +501,8 @@
         <p>
           It is stored by the driver, once per install, so it follows you
           between browsers rather than per tab. Switching it <em>on</em> reloads
-          the page immediately. Switching it <em>off</em> only takes effect on
-          the next load — the current feed is deliberately left alone rather
-          than being emptied under you.
+          the page immediately. Switching it <em>off</em> takes effect on the
+          next load, so the feed you are reading stays as it is.
         </p>
       </div>
 
@@ -537,12 +540,11 @@
       </p>
 
       <div class="callout info">
-        <div class="callout-label">Two deliberate silences</div>
+        <div class="callout-label">Two things that never notify you</div>
         <p>
-          <strong>Your own Stop never notifies you</strong> — you know, you did
-          it. And a turn is only announced by a tab that watched it
-          <em>start</em>, so reconnecting or switching session mid-turn stays
-          quiet rather than announcing a "finished" turn from replayed history.
+          <strong>Your own Stop</strong>, and a turn you did not see start —
+          so reconnecting, or switching to a session that is already mid-turn,
+          will not announce a finish you were not waiting for.
         </p>
       </div>
     </section>

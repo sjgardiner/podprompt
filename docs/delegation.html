@@ -146,9 +146,8 @@
         A report is sent when the child is genuinely <strong>finished</strong> —
         not merely when one of its turns has ended. A child that hits a provider
         rate limit is retried automatically, and the parent hears nothing until
-        the retry has played out. This matters because the alternative is worse
-        than silence: the parent would be told the work <em>failed</em>, and
-        then the retry's real answer would have nowhere to go.
+        the retry has played out, so a slow child reads as quiet rather than as
+        failed.
       </p>
 
       <p>
@@ -160,9 +159,8 @@
       </p>
 
       <p>
-        Async also means the user is not left staring at a spinner. A parent that
-        delegates three jobs and ends its turn lets you keep working while they
-        run.
+        Because delegation is async, a parent that hands out three jobs and ends
+        its turn leaves you free to keep working while they run.
       </p>
     </section>
 

@@ -21,12 +21,12 @@
 # driver.mjs is the only thing that talks to it, and they share this
 # container's network namespace.
 #
-# No XDG_*_HOME overrides needed here: podprompt.sh bind-mounts this host's
+# No XDG_*_HOME overrides needed here: podprompt bind-mounts this host's
 # own ~/.config/opencode, ~/.local/share/opencode, ~/.local/state/opencode,
 # and ~/.cache/opencode directly onto opencode's own real default paths
 # inside the container (see `opencode debug paths`), so credentials/config/
 # sessions created via `opencode auth login` (either through that serve
-# instance, or through `./podprompt.sh --opencode`'s own TUI, which
+# instance, or through `./podprompt --opencode`'s own TUI, which
 # gets the identical mounts) persist across container restarts in their own
 # standard host locations — independent of Claude Code's own ~/.claude and
 # of PodPrompt's own ~/.local/{share,state}/podprompt, not nested inside
@@ -45,7 +45,7 @@
 # Paths below are deliberately $HOME-relative, not hardcoded to a specific
 # username's home directory — this exact script used to hardcode
 # /home/claude/... literally, which silently broke when the container's OS
-# user was later renamed. $HOME is set explicitly by podprompt.sh regardless
+# user was later renamed. $HOME is set explicitly by podprompt regardless
 # of which user the image defines, so this stays correct across that kind of
 # rename with no edit needed here.
 
@@ -106,11 +106,11 @@ python3 "$HOME/.local/share/podprompt/viewer/server.py" --port "${VIEWER_PORT:-7
 # pre-seed here, unlike the single-session driver this replaced. That also
 # means any --session-id/--resume/--continue/--fork-session/-r/-c passed
 # through to this script (from pinning the CONTAINER's own launch, e.g.
-# `./podprompt.sh --viewer --resume <id>`) is simply irrelevant now — those
+# `./podprompt --viewer --resume <id>`) is simply irrelevant now — those
 # flags only ever meant anything to the TUI process this script used to
 # also launch, which doesn't exist in viewer mode at all anymore.
 #
-# No --backend flag anymore either: podprompt.sh's own --claude/--opencode
+# No --backend flag anymore either: podprompt's own --claude/--opencode
 # now only ever select a direct TUI launch (a different, mutually exclusive
 # interface from --viewer, which this script is the entrypoint for) — there
 # is no more command-line "default backend" for the viewer. driver.mjs

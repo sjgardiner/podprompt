@@ -97,8 +97,8 @@ PROVIDER OPTIONS (mutually exclusive; --direct is the default):
 INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
 
   (default)       Start PodPrompt's browser-based viewer/driver UI (see
-  --viewer        --viewer below) — a bare `podprompt` with no interface
-                  flag now gives you this, not a terminal session.
+  --viewer        --viewer below). This is what a bare `podprompt` gives
+                  you; the terminal interfaces are opt-in.
 
   --claude, --claude-code
                   Skip the viewer and drop straight into Claude Code's own
@@ -137,34 +137,27 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                         "models": { "your-model-name": {} } } } }
 
                   List what LiteLLM actually exposes first with
-                  --list-models. If {env:...} substitution for apiKey
-                  doesn't seem to take (a known rough edge in some OpenCode
-                  versions), store the key via the TUI's /connect flow under
-                  the same provider id instead and drop apiKey from the
-                  config entirely.
+                  --list-models. If {env:...} substitution for apiKey does
+                  not take effect, store the key through OpenCode's own
+                  /connect flow under the same provider id and drop apiKey
+                  from the config entirely.
 
   --viewer        Start PodPrompt, the browser-based viewer/driver UI — the
                   default (this flag only ever needs to be explicit, e.g.
                   from a script). Opens a rendered view of the agent's
                   responses (markdown, math, syntax-highlighted code) at
-                  http://localhost:VIEWER_PORT, with a bidirectional driver
-                  (built on the Claude Agent SDK) so the browser drives
-                  prompts directly — no terminal UI is attached at all.
-                  Requires the viewer/ app files (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, backends/) to be copied into
+                  http://localhost:VIEWER_PORT. The browser drives prompts
+                  directly; no terminal UI is attached at all. Requires the
+                  viewer app files to be installed into
                   ~/.local/share/podprompt/viewer/ first (see
-                  --deploy-viewer below). The viewer's Node dependency (the
-                  Claude Agent SDK) is baked into the Docker image itself,
-                  not part of this copy — see --deploy-viewer. Both the
-                  claude-code and opencode backends are always available to
-                  pick per-session from the browser's "+ New chat" picker —
-                  this also starts a
-                  headless `opencode serve` instance inside the container
-                  for you, so nothing needs to be started by hand first.
-                  There is no command-line flag for "the default backend"
-                  anymore: the new-chat picker just remembers whichever
-                  backend you started your last new chat with, falling back
-                  to Claude Code on a fresh install with no history yet.
+                  --deploy-viewer below); their Node dependencies are baked
+                  into the Docker image, not part of that copy.
+
+                  Both the claude-code and opencode backends are available,
+                  chosen per session from the browser's "+ New chat" picker,
+                  which remembers whichever you used last. OpenCode's
+                  background server is started and supervised for you inside
+                  the container, so nothing needs starting by hand.
 
   --viewer-port PORT
                   Port for the viewer server (browser page + SSE feed).
@@ -252,10 +245,6 @@ INTERFACE OPTIONS (mutually exclusive; --viewer is the default):
                   agent runs inside the container, same as any other -e var
                   already passed today (e.g. LITELLM_API_KEY).
 
-                  Out of scope for now: a --env-file passthrough for
-                  batching multiple variables from a file instead of
-                  repeating this flag.
-
 UTILITY OPTIONS:
 
   --build         Build the 'podprompt' Docker image from this checkout and
@@ -274,8 +263,7 @@ UTILITY OPTIONS:
                   and exit. Does not start a Claude Code session.
                   Requires LITELLM_URL and LITELLM_API_KEY.
 
-  --deploy-viewer Copy this repo's viewer/ app files (server.py, viewer.html,
-                  start-viewer.sh, driver.mjs, backends/) into
+  --deploy-viewer Copy this repo's viewer/ app files into
                   ~/.local/share/podprompt/viewer/. This is the supported
                   way to deploy the viewer's app code — run it after pulling
                   updated viewer code, then start with --viewer (which
@@ -350,15 +338,13 @@ PERSISTENT STATE:
   what --viewer's headless `opencode serve` then uses too, and vice versa,
   since both get the same four mounts.
 
-  PodPrompt's own state — the deployed viewer app (server.py, viewer.html,
-  driver.mjs, etc.) and its bookkeeping files (viewer-session-hosts.json,
-  viewer-model-picks.json, viewer-last-backend.json) — lives in its own
-  XDG-style directories, independent of both of the above, so neither Claude
-  Code's nor OpenCode's own config directory gets polluted with
-  PodPrompt-internal files:
+  PodPrompt's own state — the deployed viewer app, and bookkeeping such as
+  your session list, model choices, inbox and autonomy settings — lives in
+  its own XDG-style directories, independent of both of the above, so
+  neither Claude Code's nor OpenCode's own config directory gets polluted
+  with PodPrompt-internal files:
   ~/.local/share/podprompt/viewer/ (the deployed app, --viewer only) and
-  ~/.local/state/podprompt/ (bookkeeping). ~/.config/podprompt/ is reserved
-  for future use; nothing reads it yet.
+  ~/.local/state/podprompt/ (bookkeeping).
 
   All of the above directories are created by Docker on first use if they
   don't already exist on the host, and all of it persists across container
@@ -522,10 +508,22 @@ wait_and_open_viewer() {
 }
 
 fetch_litellm_models() {
+    # Both are required, and both are checked — the placeholder in
+    # podprompt.env.template counts as "set" for the shell but is not a usable
+    # URL, so an unedited copy would otherwise fail later with a confusing
+    # parse error that never mentions LITELLM_URL.
     if [ -z "$LITELLM_API_KEY" ]; then
         echo "Error: LITELLM_API_KEY is not set." >&2
+        echo "Set it in your environment (e.g. source ~/.podprompt.env) and try again." >&2
         exit 1
     fi
+    case "${LITELLM_URL:-}" in
+        ""|"<MY-LITELLM-URL>")
+            echo "Error: LITELLM_URL is not set to a real URL (found: '${LITELLM_URL:-}')." >&2
+            echo "Set it in your environment (e.g. source ~/.podprompt.env) and try again." >&2
+            exit 1
+            ;;
+    esac
     local result
     result=$(curl -s "$LITELLM_URL/v1/models" \
         -H "Authorization: Bearer $LITELLM_API_KEY")
@@ -538,8 +536,12 @@ fetch_litellm_models() {
 }
 
 list_models() {
+    # Fetch first: the header names the URL, and printing it above a
+    # "LITELLM_URL is not set" error reads as though the fetch succeeded.
+    local models
+    models=$(fetch_litellm_models) || exit 1
     echo "Models available on $LITELLM_URL:"
-    fetch_litellm_models | jq -r '.data[].id' | sort
+    echo "$models" | jq -r '.data[].id' | sort
 }
 
 build_image() {
@@ -699,7 +701,7 @@ deploy_viewer() {
     # in the deployed copy. Harmless for something nothing imports — chains.mjs
     # sat here long after it was deleted — but a RENAME leaves both the old and
     # the new file present, and which one wins is then down to whatever still
-    # references the old name.
+    # references the old name. The scan below reports both cases.
     #
     # Reported, never removed. A file here that this deploy does not manage is
     # just as likely to be something put there deliberately to patch a running
@@ -731,11 +733,8 @@ deploy_viewer() {
 
     # ONE LEVEL DOWN, TOO. The manifest names top-level entries, and `backends`
     # is one of them — so the scan above compares whole directories and never
-    # looks inside. The worked example in the comment above (a RENAME leaving
-    # both names present) is exactly what happened there: backends/opencode-v2.mjs
-    # survived the rename to backends/opencode.mjs, sat in the deployed copy
-    # unreferenced, and this check could not see it because it only ever looked
-    # at the top level.
+    # looks inside. A module renamed inside a subdirectory therefore leaves a
+    # stray the top-level scan cannot see.
     #
     # Same policy as above, deliberately: reported, never removed.
     local sub subname
@@ -1211,12 +1210,11 @@ if [ "$VIEWER_ENABLED" = 1 ]; then
     free_host_port "$VIEWER_PORT" || exit 1
     free_host_port "$VIEWER_DRIVER_PORT" || exit 1
 
-    # server.py is a plain broadcast relay; driver.mjs (Agent SDK-based) is
-    # what actually drives either backend and is what the browser will talk
-    # to once it has an input box; start-viewer.sh also launches a headless
-    # `opencode serve` alongside them, loopback-only, so the opencode backend
-    # is always usable regardless of which backend any given session picks.
-    # All three start inside the container.
+    # Two services start inside the container: server.py, a plain broadcast
+    # relay serving the browser page, and driver.mjs, which drives both
+    # backends and is what the browser talks to. driver.mjs also spawns and
+    # supervises OpenCode's own `opencode serve`, loopback-only, so the
+    # opencode backend is usable whichever backend a session picks.
     echo "Viewer: opening http://localhost:$VIEWER_PORT in your browser once it's up..."
     wait_and_open_viewer "$VIEWER_PORT" &
     VIEWER_OPEN_PID=$!

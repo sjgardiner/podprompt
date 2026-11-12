@@ -87,16 +87,16 @@
         <tbody>
           <tr><td>--direct</td><td>Claude subscription via OAuth, reading credentials from the mounted <code>~/.claude</code>. <strong>The default.</strong> Needs a one-time terminal sign-in first.</td></tr>
           <tr><td>--direct-api</td><td>Anthropic API key from <code>ANTHROPIC_API_KEY</code>, billed per token. No interactive login. <strong>Rejected with <code>--opencode</code>.</strong></td></tr>
-          <tr><td>--litellm</td><td>Route through a LiteLLM proxy. Requires <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. Runs a model picker unless the interface is <code>--opencode</code>.</td></tr>
+          <tr><td>--litellm</td><td>Route through a LiteLLM proxy. Requires <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. Prompts you to pick a model for Claude Code to use; with <code>--opencode</code> it skips that, since OpenCode takes its model list from <code>opencode.jsonc</code>. Sessions in the browser have their own model picker either way.</td></tr>
         </tbody>
       </table>
 
       <div class="callout warn">
-        <div class="callout-label">Gotcha · These are not actually enforced as exclusive</div>
+        <div class="callout-label">Gotcha · Pass exactly one</div>
         <p>
-          The usage text calls them mutually exclusive, but passing several does
-          not error — <strong>the last one silently wins</strong>. Pass exactly
-          one.
+          These choose where your model requests go, so only one can apply. If
+          you pass several, <strong>the last one wins</strong> and the others
+          are ignored without a warning.
         </p>
       </div>
 
@@ -139,7 +139,7 @@
       </table>
 
       <div class="callout info">
-        <div class="callout-label">These three find the checkout themselves</div>
+        <div class="callout-label">These two find the checkout themselves</div>
         <p>
           <code>--build</code> and <code>--deploy-viewer</code> resolve the
           checkout from the command's own location, following symlinks. You
@@ -299,17 +299,21 @@
       <h2>How a backend is chosen</h2>
 
       <p>
-        A session's backend is fixed for its lifetime. It is resolved in this
-        order, first match winning:
+        A session's backend is fixed for its lifetime, and you only ever choose
+        it once:
       </p>
 
-      <ol>
-        <li>Whatever the driver already knows, for a session it has handled this run.</li>
-        <li>An explicit choice from the caller — which is what <strong>+ New chat</strong> always provides.</li>
-        <li>The stored relationship record, for a child or delegated session.</li>
-        <li>What the backends themselves report when their sessions are listed.</li>
-        <li>Failing all of that, the last backend you deliberately chose for a new chat, and failing even that, Claude Code.</li>
-      </ol>
+      <ul>
+        <li><strong>A new chat</strong> uses whichever backend you pick in the
+        <strong>+ New chat</strong> panel. It starts on the one you chose last
+        time, or Claude Code on a fresh install.</li>
+        <li><strong>A delegated session</strong> uses whatever the delegating
+        agent asked for — delegation takes the backend as an argument, so a
+        Claude Code session can hand work to an OpenCode one and the other way
+        round.</li>
+        <li><strong>An existing session</strong> keeps the backend it was
+        created with, including across restarts.</li>
+      </ul>
 
       <div class="callout info">
         <div class="callout-label">--claude and --opencode do not set a viewer default</div>
@@ -324,23 +328,26 @@
       <h2>Backend parity</h2>
 
       <p>
-        Both backends appear in the same interface and are driven the same way,
-        but they are not identical. Everything that differs:
+        Both backends appear in the same interface and are driven the same way.
+        Sessions, mail, delegation, sub-agents, permission cards, slash
+        commands, projects, archiving and mid-job delivery all work the same on
+        either. Pick whichever agent you prefer; you can run both at once, and
+        they can message each other.
       </p>
+
+      <p>The short list of real differences:</p>
 
       <table class="data-table">
         <thead><tr><th>Capability</th><th>Claude Code</th><th>OpenCode</th></tr></thead>
         <tbody>
-          <tr><td>Model selection</td><td>Yes</td><td>Yes, switchable live</td></tr>
+          <tr><td>Model selection</td><td>Yes, applies to the next turn</td><td>Yes, switchable live</td></tr>
           <tr><td>Agent / mode selection</td><td>—</td><td>Yes, switchable live</td></tr>
-          <tr><td>Load full history setting</td><td>Yes</td><td>Not needed — always loads everything</td></tr>
-          <tr><td>“Always allow” on a permission card</td><td>Yes</td><td>Yes</td></tr>
-          <tr><td>Sub-agents in the roster</td><td>Yes</td><td>—</td></tr>
-          <tr><td>Stop one sub-agent</td><td>Yes</td><td>—</td></tr>
-          <tr><td>Live status in a delegation bubble</td><td>Yes</td><td>— use the nested session row</td></tr>
+          <tr><td>Load full history setting</td><td>Applies</td><td>Not needed — always loads everything</td></tr>
+          <tr><td>Cost display</td><td>Plan usage against your subscription</td><td>Running cost for the session</td></tr>
+          <tr><td>Live status in a delegation bubble</td><td>Yes</td><td>Use the nested session row instead</td></tr>
           <tr><td>Messaging tool names</td><td><code>mcp__podprompt__*</code></td><td>bare names, via a plugin</td></tr>
           <tr><td>Permission prompts</td><td>Raised by the runtime</td><td>Raised by the runtime, and by the messaging tools for themselves</td></tr>
-          <tr><td>Provider flags apply</td><td>Yes</td><td>— manages its own credentials</td></tr>
+          <tr><td>Provider flags</td><td>Apply</td><td>Not used — OpenCode manages its own credentials</td></tr>
         </tbody>
       </table>
 
@@ -406,7 +413,7 @@
           <tr><td>Thinking blocks / tool calls</td><td><span class="default">collapsed / shown</span></td></tr>
           <tr><td>Timestamps</td><td><span class="default">time only, 12-hour, no zone</span></td></tr>
           <tr><td>Notifications / sound</td><td><span class="default">off / off</span></td></tr>
-          <tr><td>Load full history</td><td><span class="default">off</span></td></tr>
+          <tr><td>Load full history</td><td><span class="default">off</span> — Claude Code sessions only</td></tr>
           <tr><td>Context bar turns amber / red</td><td><span class="default">70% / 90%</span></td></tr>
           <tr><td>Plan usage turns red</td><td><span class="default">70%</span></td></tr>
           <tr><td>Tool output before it scrolls</td><td><span class="default">400px</span></td></tr>

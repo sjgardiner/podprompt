@@ -63,8 +63,9 @@
       <h1>Many sessions</h1>
       <p class="subtitle">
         Sessions run side by side, in different projects, on either backend.
-        Some of them have children. This page covers the list, the two
-        different kinds of child, and what each Stop button actually stops.
+        Some of them have children. This page covers the session list, the two
+        different kinds of child, what each Stop button stops, and how to
+        archive, delete or detach a session.
       </p>
     </header>
 
@@ -383,11 +384,10 @@
         <div class="callout-label">Gotcha · A kept sub-agent starts with an empty context</div>
         <p>
           The transcript is preserved and you can read all of it, but the model
-          has not. A sub-agent ran inside its parent's process, so promoting it
-          gives you a fresh session that happens to have a transcript attached —
-          the new session knows nothing of what is written there. Treat the
-          transcript as reference material, and re-state anything the agent
-          needs to act on.
+          cannot — you get a fresh session with that transcript attached, and it
+          starts knowing nothing of what is written there. Treat the transcript
+          as reference material, and re-state anything the agent needs to act
+          on.
         </p>
       </div>
 
@@ -404,9 +404,8 @@
         <div class="callout-label">Detach does not reset how deep it is</div>
         <p>
           Sessions can only be spawned six levels deep along the chain that
-          actually created them. Detaching changes the display and the
-          lifecycle, not that lineage — a detached session still counts as
-          however deep it was born. See
+          created them, and detaching does not reset that — a detached session
+          still counts as however deep it was born. See
           <a href="unattended.html#limits">Running unattended</a>.
         </p>
       </div>
@@ -440,21 +439,20 @@
       </table>
 
       <div class="callout info">
-        <div class="callout-label">Why Stop spares older delegated children</div>
+        <div class="callout-label">Stop leaves older delegated sessions alone</div>
         <p>
-          A delegated session you started yesterday is doing its own work, not
-          this turn's. Stopping an unrelated turn today should not kill it. If
-          you do want it stopped, stop it from its own session, or use Stop
-          subtree.
+          Stop ends the current turn and whatever that turn started. A
+          delegated session from an earlier turn keeps running — to stop one of
+          those, open it and stop it there, or use <strong>Stop subtree</strong>
+          to take down the whole tree at once.
         </p>
       </div>
 
       <p>
-        Only sub-agents that are genuinely running get stopped, so finishing
-        work is never retroactively relabelled as killed. If a backend cannot
-        stop a particular sub-agent the row says <code>can't stop</code> rather
-        than pretending. <span class="badge badge--claude">Claude Code only</span>
-        — stopping an individual sub-agent is a Claude Code capability.
+        Sub-agent rows carry their own <strong>Stop</strong>, so you can end one
+        without touching the rest of the turn. It works on both backends. Only
+        sub-agents still running are affected; one that has already finished
+        keeps its result.
       </p>
 
       <div class="callout warn">

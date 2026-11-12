@@ -174,8 +174,8 @@
       <h2>The five ideas</h2>
 
       <p>
-        Everything else in these docs is a detail of one of these. Read them
-        once and the rest of the interface explains itself.
+        These five carry most of the interface. Read them once and the rest
+        largely explains itself.
       </p>
 
       <div class="concept-grid">
@@ -190,9 +190,10 @@
         <div class="concept">
           <div class="concept-name">backend</div>
           <p>
-            Claude Code or OpenCode. Both appear in the same interface and are
-            driven the same way, but they are not at feature parity — the docs
-            flag each difference where you would hit it.
+            Claude Code or OpenCode. You pick one per session, both appear in
+            the same interface and are driven the same way, and sessions on
+            either can message each other. A short list of differences is in
+            the <a href="reference.html#parity">reference</a>.
           </p>
         </div>
         <div class="concept">
@@ -242,7 +243,9 @@
 
       <p>
         Set up once, then run it from whichever project you want to work on.
-        Assumes Docker and a Claude subscription or API key.
+        You need Docker, plus credentials for at least one backend — a Claude
+        subscription or API key for Claude Code, or your existing OpenCode
+        setup, which brings its own.
         <a href="install.html">Install &amp; launch</a> has the prerequisites,
         the credential options, and what each flag does.
       </p>
@@ -276,8 +279,8 @@ podprompt</pre>
       <p>
         That opens <code>http://localhost:7843</code> in your browser. The
         viewer is the default interface — there is no terminal UI unless you
-        ask for one. Both ports bind to <code>127.0.0.1</code> only, so nothing
-        is exposed to your network.
+        ask for one. Everything PodPrompt opens binds to
+        <code>127.0.0.1</code> only, so nothing is exposed to your network.
       </p>
 
       <p>

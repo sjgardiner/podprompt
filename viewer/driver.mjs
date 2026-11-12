@@ -117,7 +117,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-// PodPrompt's own bookkeeping directory (podprompt.sh's PODPROMPT_STATE_DIR)
+// PodPrompt's own bookkeeping directory (podprompt's PODPROMPT_STATE_DIR)
 // — deliberately NOT under either backend's own config directory (see
 // MODEL_PICKS_FILE/LAST_BACKEND_FILE/SESSION_HOSTS_FILE below), since those
 // are shared with native, non-Docker installs on the same host and should
@@ -572,7 +572,7 @@ function getBackend(id) {
 }
 
 // ── Default backend for a brand-new session's picker only ───────────────
-// There is no more CLI-level "default backend" for --viewer (podprompt.sh's
+// There is no more CLI-level "default backend" for --viewer (podprompt's
 // --claude/--opencode only ever govern the non-viewer direct-TUI launch
 // path now — see its own header comment). Every *session* either already
 // has a fixed backend (existing/resumed — resolved via sessionIdToBackend
@@ -616,7 +616,7 @@ function defaultBackendId() {
 }
 
 // ── Which host path a session was last touched from ─────────────────────
-// podprompt.sh threads its own $(pwd) at launch through as HOST_WORKSPACE_PATH
+// podprompt threads its own $(pwd) at launch through as HOST_WORKSPACE_PATH
 // — nothing inside the container can otherwise ever learn the host-side path
 // a Docker bind mount came from. Generic across both backends (stamped once
 // per turn from the shared runTurn() wrapper below, not per-backend) since
@@ -6126,7 +6126,7 @@ const server = createServer(async (req, res) => {
 // at all; the publish itself (-p 127.0.0.1:PORT:PORT) is what scopes it. Under
 // --host-network there is no namespace and no publish, so 0.0.0.0 would put
 // THIS control plane — pause, delete, auto-approve, and everything §10 adds —
-// on every host interface. podprompt.sh sets PODPROMPT_BIND_ADDR=127.0.0.1 in
+// on every host interface. podprompt sets PODPROMPT_BIND_ADDR=127.0.0.1 in
 // that mode. Defaulted rather than required so running the driver by hand, or
 // from an older launcher, behaves as it always did.
 const BIND_ADDR = process.env.PODPROMPT_BIND_ADDR || "0.0.0.0";

@@ -35,13 +35,13 @@ interactive TUI session) — that mode is retired as of the bidirectional
 driver work; the read-only tailer is preserved in git history if ever
 needed again, not in this file.
 
-Usage (managed by podprompt.sh — you don't normally call this):
+Usage (managed by podprompt — you don't normally call this):
   python3 server.py --port 7843
 
 The server binds to 0.0.0.0 so it is reachable via Docker's port mapping — a
 service bound to 127.0.0.1 inside a container is not reachable through -p at
 all, and the publish (-p 127.0.0.1:PORT:PORT) is what scopes it to the host.
-Under --host-network there is neither a namespace nor a publish, so podprompt.sh
+Under --host-network there is neither a namespace nor a publish, so podprompt
 sets PODPROMPT_BIND_ADDR=127.0.0.1 and this honours it.
 Open http://localhost:7843 (or whichever host port is mapped) in your browser.
 """
@@ -667,7 +667,7 @@ def main():
 
     # See the module docstring: 0.0.0.0 is required for Docker's -p publish to
     # work at all, and is scoped by that publish. Under --host-network there is
-    # no publish and no namespace, so podprompt.sh sets this to 127.0.0.1.
+    # no publish and no namespace, so podprompt sets this to 127.0.0.1.
     bind_addr = os.environ.get("PODPROMPT_BIND_ADDR") or "0.0.0.0"
     server = ThreadingHTTPServer((bind_addr, args.port), Handler)
     print(f"[viewer] open http://localhost:{args.port} in your browser")

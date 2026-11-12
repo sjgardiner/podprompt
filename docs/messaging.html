@@ -143,9 +143,9 @@
       <h2>What agents can do</h2>
 
       <p>
-        Four tools, identical on both backends. You will see them in Tool
-        bubbles, and knowing their options is useful because you can ask an
-        agent to use them better.
+        Four tools, with the same options and the same behaviour on both
+        backends. You will see them in Tool bubbles, and knowing their options
+        is useful because you can ask an agent to use them better.
       </p>
 
       <h3>Find the others</h3>
@@ -227,7 +227,14 @@
           <span class="badge badge--claude">Claude Code</span> exposes them
           prefixed, as <code>mcp__podprompt__list_sessions</code> and so on.
           <span class="badge badge--opencode">OpenCode</span> registers them
-          under bare names. Same tools, same behaviour.
+          under bare names, through a plugin PodPrompt installs for you. If an
+          OpenCode session says it has no messaging tools, redeploy the viewer
+          — see <a href="reference.html#parity">the reference</a>.
+        </p>
+        <p>
+          One behavioural difference: on OpenCode, sending a message can raise
+          a permission card of its own, so the first <code>message</code> call
+          in a session may ask you before it goes out.
         </p>
       </div>
     </section>
@@ -356,10 +363,10 @@
 
       <p>
         <strong>Auto-deliver</strong>, next to the composer, switches this off
-        for a session: mail arrives even while you watch. It is
+        for a session: mail arrives even while you watch. Turn it on for any
+        session meant to work on its own. It is
         <strong>on by default for delegated sessions</strong> and off for
-        everything else, on the reasoning that a session you spawned to do a job
-        should get on with it.
+        everything else.
       </p>
 
       <div class="callout warn">
@@ -423,11 +430,10 @@
       <div class="callout">
         <div class="callout-label">Why this matters for long jobs</div>
         <p>
-          It used to be that a session waiting on a reply had to end its turn to
-          receive one. If the thing it was waiting for never came back, nobody
-          was waiting and the work simply stopped — the sort of thing you
-          discover the next morning. A session that never has to stop listening
-          cannot get stuck that way.
+          A session waiting on a reply does not have to stop working to receive
+          one, so a long job cannot stall just because the thing it was waiting
+          for is slow. You can also redirect a session mid-job without stopping
+          it — send it a message and it picks it up at its next step.
         </p>
       </div>
 
@@ -440,9 +446,8 @@
       </p>
 
       <p>
-        Both backends work this way, so it is not something to plan a session
-        around: whichever agent you pick, a long-running one stays reachable
-        while it works.
+        This works on both backends, so a long-running session stays reachable
+        whichever agent you gave it.
       </p>
     </section>
 

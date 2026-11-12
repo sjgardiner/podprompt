@@ -36,9 +36,10 @@ import { countPermissionChannelFailures } from "../permission-channel.mjs";
 
 // How long a turn keeps listening after a result that is not its own before
 // giving up. Generous on purpose: in every observed case the next message
-// arrived within 6ms, and this only runs when something is already wrong. The
-// value matches the opencode backend's inactivity window so the two backends
-// give up on a wedged turn on the same timescale.
+// arrived within 6ms, and this only runs when something is already wrong.
+// (The opencode backend's own inactivity window is 10 minutes; the two are
+// not the same number and do not need to be — this one only ever watches the
+// silence after a specific anomaly, while that one watches a whole turn.)
 const FOREIGN_RESULT_GRACE_MS = 5 * 60 * 1000;
 // How often that grace is re-evaluated. Matches the opencode backend's
 // inactivity poll. The net must TICK rather than fire once, so that a
@@ -116,7 +117,7 @@ export function createClaudeCodeBackend({ cwdRoot, broadcast, broadcastStatus, r
   const uuidToBubbleId = new Map(); // uuid -> { text: id|null, thinking: [id,...] }
 
   // Same config directory Claude Code's own session storage uses (and the
-  // same real ~/.claude podprompt.sh bind-mounts — shared with any native,
+  // same real ~/.claude podprompt bind-mounts — shared with any native,
   // non-Docker `claude` install on this host, not a container-only copy) —
   // stable across container relaunches regardless of what /workspace
   // currently points at, which is exactly why the cross-project bookkeeping

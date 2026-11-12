@@ -257,6 +257,16 @@
         <code>~/.podprompt.env</code>.
       </p>
 
+      <div class="callout warn">
+        <div class="callout-label">Load the file before you launch</div>
+        <p>
+          PodPrompt reads credentials from your environment; it does not read
+          the file for you. Source it in the shell you launch from, or add the
+          line to your shell profile so every new shell has it:
+        </p>
+        <div class="code-block"><pre>source ~/.podprompt.env</pre></div>
+      </div>
+
       <ul class="env-list">
         <li>
           <span class="env-name">ANTHROPIC_API_KEY<span class="env-required req">required</span></span>
@@ -282,8 +292,11 @@
       <h3>OpenCode</h3>
 
       <p>
-        OpenCode signs in on its own, and the Claude Code provider flags do not
-        affect it. Log in through a terminal session once:
+        OpenCode keeps its own credentials, so the provider flags above —
+        which configure Claude Code — do not apply to it. (The one exception is
+        <code>--litellm</code>, whose proxy details are passed through for
+        OpenCode to use as well; see <a href="#litellm">Using a LiteLLM
+        proxy</a>.) Log in through a terminal session once:
       </p>
 
       <div class="code-block">
@@ -293,6 +306,13 @@
         </div>
 <pre>podprompt --opencode</pre>
       </div>
+
+      <p>
+        That is the only manual step. Once you are signed in, OpenCode sessions
+        in the browser just work — PodPrompt starts and supervises OpenCode's
+        background server for you inside the container, and restarts it if it
+        stops.
+      </p>
 
       <div class="callout danger">
         <div class="callout-label">Not a valid combination</div>
@@ -612,7 +632,7 @@ USER agent</pre>
           </tr>
           <tr>
             <td>Told the image does not exist</td>
-            <td>Run <code>podprompt --build</code>. This is checked before anything else happens, so it is safe to hit.</td>
+            <td>Run <code>podprompt --build</code>.</td>
           </tr>
           <tr>
             <td>No <code>viewer/</code> in this checkout</td>
@@ -620,7 +640,7 @@ USER agent</pre>
           </tr>
           <tr>
             <td>Told to run <code>--deploy-viewer</code></td>
-            <td>The viewer app isn't on your machine yet, or its files are incomplete. Run <a href="#deploy">step 2</a> again from the repository root.</td>
+            <td>The viewer app isn't on your machine yet, or its files are incomplete. Run <a href="#deploy">step 3</a> again — from anywhere, it finds the checkout itself.</td>
           </tr>
           <tr>
             <td>Claude Code sessions have no credentials</td>
@@ -632,7 +652,7 @@ USER agent</pre>
           </tr>
           <tr>
             <td>OpenCode sessions have no messaging tools</td>
-            <td>The deployed viewer is missing <code>opencode-plugin.ts</code>. Redeploy with <a href="#deploy">step 2</a> rather than copying files by hand.</td>
+            <td>The deployed viewer is missing <code>opencode-plugin.ts</code>. Redeploy with <a href="#deploy">step 3</a> rather than copying files by hand.</td>
           </tr>
           <tr>
             <td>Arguments seem to be ignored</td>

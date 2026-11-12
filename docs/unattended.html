@@ -330,13 +330,17 @@
       </p>
 
       <p>
-        Turns that go silent are noticed too. An
+        Turns that go silent are noticed too, on both backends. An
         <span class="badge badge--opencode">OpenCode</span> turn that produces
         nothing at all for <span class="default">10 minutes</span> is treated as
         wedged and ended, so it becomes something you can resume rather than
-        sitting there forever. A turn waiting on a permission or a question is
-        exempt for as long as it waits &mdash; that is not a stall, and the clock
-        would otherwise run out while the card sat on your screen.
+        sitting there forever. <span class="badge badge--claude">Claude Code</span>
+        turns get the same treatment after <span class="default">5 minutes</span>,
+        but only once something has already looked wrong &mdash; there is no
+        general per-turn time limit on either backend, so a long job that is
+        genuinely working is never cut off. A turn waiting on a permission or a
+        question is exempt for as long as it waits &mdash; that is not a stall,
+        and the clock would otherwise run out while the card sat on your screen.
       </p>
 
       <div class="callout warn">
@@ -364,7 +368,7 @@
 
       <ol>
         <li><strong>Set the window first.</strong> Pick an unattended duration that covers the work, from the autonomy control. Doing this afterwards means hitting the wall, then lifting the cap, then waiting again.</li>
-        <li><strong>Deal with permissions.</strong> Use <strong>Always allow</strong> on the cards for things the work needs — it persists. Auto-approve does not survive a driver restart, so it is the weaker choice here.</li>
+        <li><strong>Deal with permissions.</strong> Answer anything already waiting, and use <strong>Always allow</strong> where it is offered so the same call stops asking. It is not offered on every card — the backend has to be able to name a rule that covers the call — so for a session that will touch a lot of different things, turn on auto-approve as well. Auto-approve is cleared if the driver restarts, so re-check it after a restart.</li>
         <li><strong>Turn on auto-delivery</strong> for any session that should receive mail while you are not watching. Delegated sessions already have it.</li>
         <li><strong>Enable notifications</strong> if you want to be told about a question that blocks everything.</li>
         <li><strong>Check nothing is already flapping</strong>, since retries share the budget with the work you are setting up.</li>

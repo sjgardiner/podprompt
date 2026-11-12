@@ -13,43 +13,32 @@
 // standing anything up. Same arrangement as turn-binding.mjs and
 // permission-channel.mjs.
 //
-// Both backends share one scan. That is not a shortcut: driver.mjs spawns
+// Both backends share one listing. That is not a shortcut: driver.mjs spawns
 // `opencode serve` as its own child in this very container, so the two
 // runtimes see the same filesystem, and cwdRoot is the same `args.cwd` for
-// both (see driver.mjs's backendHooks). A per-backend scan would do identical
-// work twice and could only ever differ by being stale.
+// both (see driver.mjs's backendHooks). A per-backend listing would do
+// identical work twice and could only ever differ by being stale.
+//
+// ONE LEVEL AT A TIME. This started out as a recursive walk of the whole
+// workspace, which worked and was fast (~2000 directories in ~35ms) and was
+// still wrong: it answered a question nobody asked. A picker offering every
+// directory six levels down is not more helpful than one offering the four
+// you actually keep projects in — it is a wall of paths to read past. So the
+// listing is now per-directory, the browser asks for the next level when the
+// typed path gains a "/", and everything that existed to survive a recursive
+// walk (entry caps, a visit budget, truncation signalling, a server-side
+// filter) went with it. A readdir of one directory needs none of that.
 
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import nodePath from "node:path";
 
-// Directories that are never a sensible place to start a session and are
-// usually the bulk of the tree. Excluding them is what keeps a scan of a
-// workspace full of checkouts cheap enough to run on every picker open.
+// Directories that are never a sensible place to start a session. Short on
+// purpose now that only one level is ever listed: this is about not putting
+// `node_modules` in front of someone, not about keeping a walk affordable.
 export const DEFAULT_EXCLUDES = new Set([
   "node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build",
   "target", ".next", ".cache", ".mypy_cache", ".pytest_cache", ".tox",
 ]);
-
-// Depth is counted from the root: depth 1 is an immediate child. Six is deep
-// enough for the nested-monorepo shapes seen in practice without inviting a
-// walk of somebody's data directory.
-export const DEFAULT_MAX_DEPTH = 6;
-// Caps the RESULT list. Hitting it sets `truncated`, which is the browser's
-// signal to stop filtering locally and let the server do it instead (see the
-// `q` option below).
-//
-// Measured against a real multi-repo workspace: the whole tree inside the
-// exclude list is ~2000 directories and ~35ms to walk, so this is set well
-// clear of that. The point is not to trim a normal workspace down to a
-// readable list — the browser's own render cap does that, and filtering a
-// complete list locally is both instant and exact. This only exists so a
-// genuinely pathological tree degrades to server-side filtering instead of
-// shipping a megabyte of JSON per picker open.
-export const DEFAULT_MAX_ENTRIES = 5000;
-// Caps the WORK. maxEntries alone does not: a narrow `q` matches almost
-// nothing, so without this a filtered scan would still walk the entire tree
-// on every keystroke before returning three rows.
-export const DEFAULT_MAX_VISITED = 20000;
 
 function safeRealpath(p) {
   try {
@@ -153,104 +142,80 @@ export function createDirUnderRoot(candidate, root) {
   return resolveUnderRoot(abs, root, { mustExist: true });
 }
 
-// Breadth-first walk of the real directories under `root`.
+// The immediate subdirectories of ONE directory — `scope`, given relative to
+// the root ("" being the root itself).
 //
-// BFS rather than DFS specifically because of truncation: when the caps bite,
-// what survives should be the shallow directories somebody is most likely to
-// be looking for, not an exhaustive listing of whatever the first child
-// happened to contain.
+// Returns:
+//   {
+//     root:   "/workspace",                       the boundary, normalized
+//     scope:  { cwd, label, parent },             where this listing is of
+//     dirs:   [{ cwd, name, label }],             its immediate children
+//   }
+// or null if `scope` is not a real directory under the root — the caller
+// turns that into a 404 rather than quietly listing somewhere else, which
+// would silently relocate the session someone was about to start.
 //
-// `q` filters case-insensitively on the root-relative label and is applied to
-// RESULTS only — the walk still descends through non-matching directories,
-// because "viewer" matches a child of a directory that does not. That is the
-// whole reason filtering is offered server-side at all: once a scan is
-// truncated, filtering the truncated list in the browser can never find a
-// match that the cap cut off.
+// `name` is the bare directory name (what a row shows, since the path above
+// it is already in the filter box) and `label` is the full root-relative path
+// (what gets typed, compared and created). `parent` is the scope's own
+// root-relative parent, or null at the root.
 //
-// Returns { root, dirs: [{cwd, label}], truncated }. The root itself is
-// always the first entry (labelled "(root)", matching both backends'
-// projectLabelFor), because it is the one destination guaranteed to exist and
-// the picker must always be able to offer it.
-export function scanDirs(root, {
-  maxDepth = DEFAULT_MAX_DEPTH,
-  maxEntries = DEFAULT_MAX_ENTRIES,
-  maxVisited = DEFAULT_MAX_VISITED,
-  excludes = DEFAULT_EXCLUDES,
-  includeHidden = false,
-  q = "",
-} = {}) {
+// `includeHidden` exists because the browser asks for it the moment the user
+// types a leading dot, which is how shells have always behaved: dotfolders
+// stay out of the way until you say the word.
+export function listDirs(root, scope = "", { excludes = DEFAULT_EXCLUDES, includeHidden = false } = {}) {
   const base = stripTrailingSep(nodePath.resolve(root));
-  const rootReal = safeRealpath(base);
-  const needle = String(q || "").trim().toLowerCase();
+  const scopeAbs = resolveUnderRoot(scope === "" ? base : scope, base);
+  if (!scopeAbs) return null;
+
   const excludeSet = excludes instanceof Set ? excludes : new Set(excludes || []);
   const dirs = [];
-  let truncated = false;
 
-  if (!rootReal) return { root: base, dirs, truncated };
+  let entries = [];
+  try {
+    entries = readdirSync(scopeAbs, { withFileTypes: true });
+  } catch {
+    // Unreadable (permissions, or it vanished between the resolve and here).
+    // An empty listing, not a failure: the scope itself is still a valid
+    // place to start a session, and the picker still offers it.
+    entries = [];
+  }
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  const matches = (label) => !needle || label.toLowerCase().includes(needle);
-  const push = (cwd, label) => {
-    if (!matches(label)) return;
-    if (dirs.length >= maxEntries) {
-      truncated = true;
-      return;
-    }
-    dirs.push({ cwd, label });
-  };
-
-  push(base, "(root)");
-
-  let visited = 1;
-  let frontier = [base];
-
-  for (let depth = 1; depth <= maxDepth && frontier.length && !truncated; depth++) {
-    const next = [];
-    for (const dir of frontier) {
-      if (truncated) break;
-      let entries;
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        continue; // unreadable (permissions, vanished mid-scan) — not fatal
-      }
-      // Sorted so an identical tree always produces an identical list; the
-      // browser sorts for display, but a stable server answer makes the
-      // truncation boundary reproducible rather than readdir-order roulette.
-      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      for (const entry of entries) {
-        if (truncated) break;
-        const name = entry.name;
-        if (!includeHidden && name.startsWith(".")) continue;
-        if (excludeSet.has(name)) continue;
-        const full = nodePath.join(dir, name);
-        // Symlinked directories are never listed and never descended into.
-        // Both kinds are wrong to offer, for different reasons:
-        //
-        //   out of the tree — resolveUnderRoot refuses it, so the row could
-        //                     not be chosen even if it were shown;
-        //   back INTO the tree — the real directory is already listed under
-        //                     its canonical path, and the two rows are NOT
-        //                     interchangeable: claude-code keys a project's
-        //                     session storage by the cwd STRING, so starting
-        //                     one session via the alias and the next via the
-        //                     real path splits one project's history in two.
-        //
-        // Skipping them also removes the only way this walk could revisit a
-        // subtree, so no cycle/alias bookkeeping is needed. Typing an alias
-        // by hand still works — resolveUnderRoot judges safety, this judges
-        // what is worth offering.
-        if (entry.isSymbolicLink()) continue;
-        if (!entry.isDirectory()) continue;
-        if (++visited > maxVisited) {
-          truncated = true;
-          break;
-        }
-        push(full, nodePath.relative(base, full));
-        next.push(full);
-      }
-    }
-    frontier = next;
+  for (const entry of entries) {
+    const name = entry.name;
+    if (!includeHidden && name.startsWith(".")) continue;
+    if (excludeSet.has(name)) continue;
+    // Symlinked directories are never listed. Both kinds are wrong to offer,
+    // for different reasons:
+    //
+    //   out of the tree — resolveUnderRoot refuses it, so the row could not
+    //                     be chosen even if it were shown;
+    //   back INTO the tree — the real directory is already reachable under
+    //                     its canonical path, and the two are NOT
+    //                     interchangeable: claude-code keys a project's
+    //                     session storage by the cwd STRING, so starting one
+    //                     session via the alias and the next via the real
+    //                     path splits one project's history in two.
+    //
+    // Typing an alias by hand still works — resolveUnderRoot judges safety,
+    // this judges what is worth offering.
+    if (entry.isSymbolicLink()) continue;
+    if (!entry.isDirectory()) continue;
+    const full = nodePath.join(scopeAbs, name);
+    dirs.push({ cwd: full, name, label: nodePath.relative(base, full) });
   }
 
-  return { root: base, dirs, truncated };
+  const scopeLabel = nodePath.relative(base, scopeAbs);
+  return {
+    root: base,
+    scope: {
+      cwd: scopeAbs,
+      // "(root)" matches what both backends' projectLabelFor calls it, so the
+      // same directory never reads two different ways across the UI.
+      label: scopeLabel || "(root)",
+      parent: scopeAbs === base ? null : nodePath.relative(base, nodePath.dirname(scopeAbs)),
+    },
+    dirs,
+  };
 }

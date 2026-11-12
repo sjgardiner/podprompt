@@ -93,9 +93,9 @@ import os from "node:os";
 import { createClaudeCodeBackend } from "./backends/claude-code.mjs";
 import { createOpenCodeBackend } from "./backends/opencode.mjs";
 // Filesystem discovery for the "+ New chat" destination picker. Backend-
-// agnostic on purpose — see dirscan.mjs's header for why one scan is correct
-// for both backends rather than a shortcut.
-import { createDirUnderRoot, scanDirs } from "./dirscan.mjs";
+// agnostic on purpose — see dirscan.mjs's header for why one listing is
+// correct for both backends rather than a shortcut.
+import { createDirUnderRoot, listDirs } from "./dirscan.mjs";
 import {
   createAutonomy, FANOUT_CAP_PER_TURN, MAX_CREATION_DEPTH, DEFAULT_PAUSE_AFTER,
 } from "./autonomy.mjs";
@@ -4288,22 +4288,6 @@ function requireControl(req) {
   return true;
 }
 
-// One cached unfiltered scan for /dirs, shared by every picker open and every
-// backend. Short-lived on purpose: a directory created in a terminal should
-// show up in the picker within seconds without anyone pressing anything, but
-// re-walking the tree on each of a dozen keystrokes is what the cache is
-// there to prevent. Invalidated outright by POST /dirs, which knows it just
-// changed the answer.
-const DIR_SCAN_TTL_MS = 5000;
-let dirScanCache = null; // { at, result }
-
-function cachedDirScan() {
-  if (dirScanCache && Date.now() - dirScanCache.at < DIR_SCAN_TTL_MS) return dirScanCache.result;
-  const result = scanDirs(args.cwd);
-  dirScanCache = { at: Date.now(), result };
-  return result;
-}
-
 const server = createServer(async (req, res) => {
   sendCors(res);
 
@@ -4894,24 +4878,36 @@ const server = createServer(async (req, res) => {
   // backends see one filesystem, and both are handed the same cwdRoot. The
   // browser merges this with /projects client-side.
   //
-  // ?q= filters server-side. That is not a micro-optimisation: once a scan
-  // reports truncated:true, filtering the truncated list in the browser can
-  // never surface a match the cap cut off, so the filter has to be applied
-  // during the walk instead.
+  // ONE LEVEL per request. ?under= is the root-relative directory being
+  // listed (absent or empty meaning the root itself), and the browser asks
+  // again each time the typed path gains or loses a "/". Not cached: a
+  // readdir of one directory is well under a millisecond, and a cache here
+  // would only buy the chance to show a directory that no longer exists.
+  //
+  // ?hidden=1 when the user has typed a leading dot, which is how shells
+  // have always behaved — dotfolders stay out of the way until asked for.
   if (req.method === "GET" && path === "/dirs") {
-    const q = url.searchParams.get("q") || "";
+    const under = url.searchParams.get("under") || "";
+    const includeHidden = url.searchParams.get("hidden") === "1";
+    let result;
     try {
-      // The cache only holds the unfiltered scan; a filtered request walks
-      // fresh, because a filter is allowed to reach deeper than the entry cap
-      // would have let the unfiltered answer go.
-      const result = q ? scanDirs(args.cwd, { q }) : cachedDirScan();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result));
+      result = listDirs(args.cwd, under, { includeHidden });
     } catch (e) {
-      console.error("[driver] /dirs scan failed:", e.message);
+      console.error("[driver] /dirs listing failed:", e.message);
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end('{"error":"failed to scan directories"}');
+      res.end('{"error":"failed to list directories"}');
+      return;
     }
+    // A scope that does not resolve is the browser asking about a directory
+    // that is not there (or not ours) — said plainly rather than answered
+    // with a listing of somewhere else.
+    if (!result) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"error":"no such directory under the workspace root"}');
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result));
     return;
   }
 
@@ -4939,9 +4935,8 @@ const server = createServer(async (req, res) => {
       res.end('{"error":"could not create that directory under the workspace root"}');
       return;
     }
-    dirScanCache = null; // this request is precisely what made the cache wrong
     res.writeHead(200, { "Content-Type": "application/json" });
-    // Normalized the same way scanDirs reports it. The browser compares the
+    // Normalized the same way listDirs reports it. The browser compares the
     // returned cwd against this root to decide whether to send an explicit
     // cwd at all, and a "/workspace/" here against a "/workspace" there would
     // quietly take the wrong branch.

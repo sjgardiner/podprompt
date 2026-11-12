@@ -226,30 +226,74 @@
       </p>
 
       <p>
-        The list is every directory under <code>/workspace</code> — not only
-        the ones a session has run in before — so a new project does not have
-        to be typed from memory. Start typing to filter it, use
-        <kbd>&uarr;</kbd> and <kbd>&darr;</kbd> to move through the matches,
-        and <kbd>Enter</kbd> to start there. <kbd>Esc</kbd> closes the picker.
+        The box at the top holds a <strong>path</strong>, and the list under it
+        is always the contents of one directory — the one named by everything
+        up to the last <code>/</code>. It opens on the top level of
+        <code>/workspace</code>, so a project that has never hosted a session
+        is there to be picked rather than typed from memory.
+      </p>
+
+      <p>
+        Each folder row does two things, and they are separate targets:
+      </p>
+
+      <table class="data-table">
+        <thead><tr><th>To do this</th><th>Click</th><th>Or press</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Start a session in a folder</strong></td>
+            <td>the folder's name</td>
+            <td><kbd>Enter</kbd></td>
+          </tr>
+          <tr>
+            <td><strong>Look inside a folder</strong></td>
+            <td>the <strong>&rsaquo;</strong> on its right</td>
+            <td><kbd>Tab</kbd></td>
+          </tr>
+          <tr>
+            <td><strong>Go back up a level</strong></td>
+            <td>&mdash;</td>
+            <td><kbd>Backspace</kbd> over the <code>/</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The directory you have navigated into is always the first row, marked
+        <strong>start here</strong>, so accepting it never means backing out of
+        anything. <kbd>&uarr;</kbd> and <kbd>&darr;</kbd> move through the rows
+        and <kbd>Esc</kbd> closes the picker. Typing filters the current level
+        only &mdash; it is a folder name you are completing, not a search of the
+        whole workspace.
+      </p>
+
+      <p>
+        At the top level with nothing typed, directories that have actually
+        hosted sessions are listed first under <strong>Recent</strong>, even
+        when they sit two or three levels down. Typing anything hands the list
+        back to plain path completion.
       </p>
 
       <p>
         If what you typed matches nothing, the picker offers to
         <strong>create that directory and start there</strong> instead. That is
         the only way a path you typed is used, so a typo cannot quietly send a
-        session somewhere unintended: it either names a directory that is in
-        the list, or it is an explicit request to make a new one.
+        session somewhere unintended: it either names a folder in the list, or
+        it is an explicit request to make a new one.
       </p>
 
       <div class="callout info">
-        <div class="callout-label">Very large workspaces</div>
+        <div class="callout-label">What the list leaves out</div>
         <p>
-          The scan skips the usual noise (<code>node_modules</code>,
-          <code>.git</code>, build output, hidden directories) and stops six
-          levels down. If a workspace is big enough that the list is cut short,
-          the picker says so and searches the rest on the server as you type.
-          A directory it skipped can still be reached by typing its path — the
-          offer to create it resolves to the existing one.
+          Build and dependency directories (<code>node_modules</code>,
+          <code>.git</code>, <code>dist</code>, <code>__pycache__</code> and
+          friends) are never offered, and neither are symlinks &mdash; an alias
+          and its target are different strings, and starting sessions through
+          both would split one project's history in two. Dotfolders appear as
+          soon as you type a leading <code>.</code>, the way they do in a shell.
+          Anything else can still be reached by typing its path: the offer to
+          create a directory resolves to the existing one if it is already
+          there.
         </p>
       </div>
 

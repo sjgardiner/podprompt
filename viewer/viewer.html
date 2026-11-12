@@ -728,21 +728,59 @@
     border-color: var(--accent);
     font-weight: 600;
   }
-  /* One row shape for every destination, whether it came from /projects or
-     from the filesystem scan: they are the same kind of thing — a directory a
-     session can start in — and marking them differently would only invite the
-     question of which kind is which. */
+  /* A destination row has two targets, not one: the name starts a session
+     there, the "›" looks inside it. Flex so the chevron can sit hard right
+     and keep a generous hit area, while a long name ellipses instead of
+     pushing it off the row. */
   .new-chat-project-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 8px 14px;
     font-size: 13px;
     color: var(--text);
     cursor: pointer;
     border-bottom: 1px solid var(--border);
+  }
+  .new-chat-row-name {
+    flex: 1 1 auto;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* "start here" on the scope row. Quiet: it names what the row already does,
+     for the one row where that isn't obvious from the path alone. */
+  .new-chat-row-hint {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+  }
+  .new-chat-chevron {
+    flex: 0 0 auto;
+    /* Negative margin pulls the padding back out to the row edge, so the
+       whole right-hand strip is the chevron's, not a sliver of glyph. */
+    margin: -8px -14px -8px 0;
+    padding: 8px 14px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1;
+  }
+  .new-chat-chevron:hover { color: var(--accent); }
   .new-chat-project-item:hover { background: var(--code-bg); }
+  /* The directory currently navigated to. A heavier top border sets it apart
+     from the children listed below it without needing a second row style. */
+  .new-chat-scope-item { border-bottom: 1px solid var(--border); }
+  .new-chat-section-label {
+    padding: 8px 14px 4px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    background: var(--bg);
+  }
   /* Keyboard highlight. Same background as :hover on purpose — one visual
      vocabulary for "this is what Enter will take", however you got there. */
   .new-chat-project-item.active { background: var(--code-bg); }
@@ -6960,10 +6998,9 @@ const newChatPicker = document.getElementById('new-chat-picker');
 function dismissNewChatPicker() {
   newChatPicker.classList.remove('show');
   newChatPicker.innerHTML = '';
-  // The element refs below point into the subtree just discarded, and a
-  // debounced /dirs fetch would otherwise land on a list that no longer
+  // The element refs below point into the subtree just discarded, and an
+  // in-flight /dirs fetch would otherwise land on a list that no longer
   // exists.
-  clearTimeout(newChatFilterTimer);
   newChatFilterInput = null;
   newChatDestList = null;
   newChatRows = [];
@@ -7042,53 +7079,60 @@ function updateBackendIndicator() {
 // to create the session.
 let newChatSelectedBackend = null;
 
-// What the picker is currently offering, and what Enter would take. Rebuilt
-// whenever the selected backend changes or a truncated scan gets re-filtered
-// server-side; re-read on every keystroke by renderDestinations().
-let newChatDestinations = [];  // [{cwd, label, isCurrent}]
-let newChatRoot = null;        // the cwd that means "no explicit cwd at all"
-let newChatTruncated = false;  // the scan hit its cap — filter on the server
-let newChatActiveIndex = 0;    // which row Enter takes
-let newChatRows = [];          // [{el, choose}] — parallel to what's on screen
+// What the picker is currently offering, and what Enter would take.
+//
+// THE MODEL. The filter box holds a path, and the list under it is always
+// exactly one directory's contents — the directory named by everything up to
+// the last "/". Typing a "/" descends; deleting it comes back up. Nothing is
+// ever more than one level deep from what is written in the box, which is the
+// whole correction to the first version of this: a recursive scan offered
+// every directory in the workspace at once, which is not more helpful than
+// offering the handful you keep projects in, just longer.
+//
+// Each row therefore has up to two meanings, and they are separate targets
+// rather than one guess: the label starts a session there, the "›" descends
+// into it. The directory currently scoped to gets its own "start here" row at
+// the top, so accepting a parent is never something you have to back out of a
+// descent to do.
+let newChatRoot = null;         // absolute cwd that means "no explicit cwd at all"
+let newChatScope = null;        // {cwd, label, parent} of the level on screen, or null if it doesn't exist
+let newChatScopeRel = null;     // the root-relative scope string that produced it
+let newChatScopeHidden = false; // whether that listing included dotfolders
+let newChatChildren = [];       // [{cwd, name, label}] — that level's subdirectories
+let newChatRecents = [];        // [{cwd, label, isCurrent}] from /projects, offered at the root only
+let newChatActiveIndex = 0;     // which row Enter takes
+let newChatRows = [];           // [{el, choose, descend}] — parallel to what's on screen
 let newChatCurrentCwd = null;
 let newChatFilterInput = null;
 let newChatDestList = null;
-let newChatFilterTimer = null;
 // Monotonic, so a slow /dirs response for an earlier keystroke can't land on
 // top of a newer one. Typing is fast and loopback latency is not reliably
-// ordered; without this the list can end up showing a stale filter's matches.
+// ordered; without this the list can end up showing a stale level.
 let newChatLoadSeq = 0;
-// How many rows get built at once. See renderDestinations.
+// How many rows get built at once. One directory rarely has this many
+// subdirectories, but "rarely" is not "never" and a 4000-child node_modules
+// should not be able to lock up the popover. See renderDestinations.
 const NEW_CHAT_RENDER_LIMIT = 200;
 
 function newChatFilterValue() {
   return newChatFilterInput ? newChatFilterInput.value.trim() : '';
 }
 
-// One flat list of destinations out of the two sources that know about any:
-// the filesystem scan (/dirs — every real directory, including ones no
-// session has ever run in) and the backend's own project history (/projects —
-// which can still name a directory the scan's depth cap or exclude list left
-// out). Deduped by cwd, because the overlap between them is most of both.
+// Splits what's typed into the directory being listed and the part being
+// matched within it — the same split a shell makes at the last separator.
 //
-// They are not labelled by origin. A destination is a destination; which of
-// the two happened to know about it first is an implementation detail, and
-// showing it would only raise the question of what the difference means.
-function mergeDestinations(projectsData, dirsData, currentCwd) {
-  const byCwd = new Map();
-  const add = (cwd, label) => {
-    if (!cwd || byCwd.has(cwd)) return;
-    byCwd.set(cwd, { cwd, label: label || cwd, isCurrent: cwd === currentCwd });
-  };
-  for (const d of (dirsData?.dirs || [])) add(d.cwd, d.label);
-  for (const p of (projectsData?.projects || [])) add(p.cwd, p.label);
-  return [...byCwd.values()].sort((a, b) => {
-    // The current project stays pinned to the top: continuing where you
-    // already are is the common case, and it should never require reading.
-    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    if ((a.cwd === newChatRoot) !== (b.cwd === newChatRoot)) return a.cwd === newChatRoot ? -1 : 1;
-    return a.label.localeCompare(b.label);
-  });
+//   "podprompt/vie" -> scope "podprompt", segment "vie"
+//   "podprompt/"    -> scope "podprompt", segment ""
+//   "pod"           -> scope "",          segment "pod"
+//
+// A leading "/" is dropped rather than treated as absolute: everything here
+// is relative to the workspace root, and someone typing "/podprompt" means
+// the same thing as "podprompt".
+function splitTypedPath(value) {
+  const text = (value || '').replace(/^\/+/, '');
+  const cut = text.lastIndexOf('/');
+  if (cut < 0) return { scope: '', segment: text };
+  return { scope: text.slice(0, cut), segment: text.slice(cut + 1) };
 }
 
 function setActiveRow(index) {
@@ -7111,14 +7155,92 @@ function newChatNote(text, isError) {
   return note;
 }
 
+function newChatSectionLabel(text) {
+  const el = document.createElement('div');
+  el.className = 'new-chat-section-label';
+  el.textContent = text;
+  return el;
+}
+
+// Starts a session in a directory the picker is sure about. The root is sent
+// as "no cwd at all" — /prompt treats a missing cwd as the default, and
+// naming it explicitly would take a different path to the same place.
+function chooseDestination(cwd) {
+  startNewChatInProject(cwd === newChatRoot ? undefined : cwd, newChatSelectedBackend);
+}
+
+// Descending is just typing: the box becomes "<path>/", and everything else
+// follows from re-reading it. Keeping one source of truth for where we are —
+// the text — is what stops the list and the box from ever disagreeing.
+function descendInto(label) {
+  if (!newChatFilterInput) return;
+  newChatFilterInput.value = `${label}/`;
+  newChatFilterInput.focus();
+  onNewChatFilterChanged();
+}
+
+// Builds one destination row: label starts a session, "›" goes deeper.
+//
+// `onChoose` overrides what the label does, for the one row that isn't a
+// directory yet (the offer to create one). It is a PARAMETER rather than
+// something the caller patches onto the returned row afterwards, because
+// patching only reaches the keyboard: the element's click listener closes
+// over whatever this function built, so a mouse click would still have run
+// the default — starting a session with no cwd instead of creating the
+// directory, silently landing it in the default project.
+function newChatRow({ text, title, cwd, descendLabel, extraClass, hint, onChoose }) {
+  const item = document.createElement('div');
+  item.className = 'new-chat-project-item' + (extraClass ? ` ${extraClass}` : '');
+  if (title) item.title = title;
+
+  const name = document.createElement('span');
+  name.className = 'new-chat-row-name';
+  name.textContent = text;
+  item.appendChild(name);
+
+  if (hint) {
+    const hintEl = document.createElement('span');
+    hintEl.className = 'new-chat-row-hint';
+    hintEl.textContent = hint;
+    item.appendChild(hintEl);
+  }
+
+  const choose = onChoose || (() => chooseDestination(cwd));
+  item.addEventListener('click', choose);
+
+  let descend = null;
+  if (descendLabel) {
+    descend = () => descendInto(descendLabel);
+    const chevron = document.createElement('span');
+    chevron.className = 'new-chat-chevron';
+    chevron.textContent = '›';
+    chevron.title = `Show folders inside ${descendLabel}`;
+    // stopPropagation, or the row's own click starts a session in the very
+    // directory the user just asked to look inside.
+    chevron.addEventListener('click', (e) => {
+      e.stopPropagation();
+      descend();
+    });
+    item.appendChild(chevron);
+  }
+
+  const index = newChatRows.length;
+  // Keeps the keyboard highlight and the mouse pointer on the same row, so
+  // there is never more than one thing that looks like what Enter takes.
+  item.addEventListener('mouseenter', () => setActiveRow(index));
+  newChatDestList.appendChild(item);
+  newChatRows.push({ el: item, choose, descend });
+  return item;
+}
+
 // Creates a directory the picker offered to create, then starts the session
 // in it. The round trip happens HERE, on the click, rather than being left
 // for the first prompt to discover: a destination that can't be used is
 // something to find out about while still looking at the picker.
 //
-// Doubles as the escape hatch for a directory that exists but the scan
-// doesn't offer (hidden, excluded, or past the depth cap) — mkdir -p on
-// something already there succeeds and resolves to the same path.
+// Doubles as the escape hatch for a directory that exists but is not offered
+// (excluded, or a dotfolder in a level that wasn't asked to show them) —
+// mkdir -p on something already there succeeds and resolves to the same path.
 async function createDestinationAndStart(path) {
   newChatDestList.appendChild(newChatNote('Creating…'));
   try {
@@ -7135,7 +7257,7 @@ async function createDestinationAndStart(path) {
       return;
     }
     if (data.root) newChatRoot = data.root;
-    startNewChatInProject(data.cwd === newChatRoot ? undefined : data.cwd, newChatSelectedBackend);
+    chooseDestination(data.cwd);
   } catch (e) {
     console.error('Failed to create directory:', e);
     if (!newChatDestList) return;
@@ -7144,107 +7266,199 @@ async function createDestinationAndStart(path) {
   }
 }
 
-// Paints newChatDestinations through the filter box. Pure display — no
-// fetching — so a keystroke over an already-loaded list is instant; the
-// server only gets involved again when the scan was truncated (see the input
-// handler).
+// Paints the level currently loaded, through the segment being typed. Pure
+// display — no fetching — so matching within a directory is instant; the
+// server is only consulted when the SCOPE changes (see
+// onNewChatFilterChanged).
 function renderDestinations() {
   if (!newChatDestList) return;
-  const typed = newChatFilterValue();
-  const needle = typed.toLowerCase();
-  const matches = needle
-    ? newChatDestinations.filter((d) => d.label.toLowerCase().includes(needle))
-    : newChatDestinations;
+  const typed = newChatFilterValue().replace(/^\/+/, '');
+  const { scope, segment } = splitTypedPath(typed);
+  const needle = segment.toLowerCase();
 
   newChatDestList.innerHTML = '';
   newChatRows = [];
 
-  // A real workspace scans to ~2000 directories, and building that many rows
-  // on every keystroke is the only part of this that is not free. Filtering
-  // still runs over ALL of them — it is only the painting that stops early,
-  // so narrowing the filter always reaches anything the cap is hiding.
-  const shown = matches.slice(0, NEW_CHAT_RENDER_LIMIT);
-
-  shown.forEach((d) => {
-    const item = document.createElement('div');
-    item.className = 'new-chat-project-item' + (d.isCurrent ? ' current' : '');
-    item.textContent = d.isCurrent ? `${d.label} (current)` : d.label;
-    item.title = d.cwd; // the full path, for a label that had to be ellipsed
-    const choose = () =>
-      startNewChatInProject(d.cwd === newChatRoot ? undefined : d.cwd, newChatSelectedBackend);
-    const index = newChatRows.length;
-    item.addEventListener('click', choose);
-    // Keeps the keyboard highlight and the mouse pointer on the same row, so
-    // there is never more than one thing that looks like what Enter takes.
-    item.addEventListener('mouseenter', () => setActiveRow(index));
-    newChatDestList.appendChild(item);
-    newChatRows.push({ el: item, choose });
-  });
-
-  if (!matches.length && typed) {
-    // Nothing matched, so the typed text is read as a path to create rather
-    // than as a filter. Only reachable when the list is empty, which is what
-    // keeps Enter from ever creating a directory while a real destination was
-    // still on screen and selected.
-    const item = document.createElement('div');
-    item.className = 'new-chat-project-item new-chat-create-item';
-    item.textContent = `+ Create “${typed}” and start here`;
-    const choose = () => createDestinationAndStart(typed);
-    item.addEventListener('click', choose);
-    item.addEventListener('mouseenter', () => setActiveRow(0));
-    newChatDestList.appendChild(item);
-    newChatRows.push({ el: item, choose });
-  } else if (!matches.length) {
-    newChatDestList.appendChild(newChatNote('No directories found.'));
+  // The typed scope doesn't exist. Nothing can be listed, but the path is
+  // still a perfectly good thing to ask for — so offer to make it.
+  if (!newChatScope) {
+    const wanted = typed.replace(/\/+$/, '');
+    if (wanted) {
+      newChatRow({
+        text: `+ Create “${wanted}” and start here`,
+        extraClass: 'new-chat-create-item',
+        onChoose: () => createDestinationAndStart(wanted),
+      });
+    } else if (newChatRecents.length) {
+      // Nothing typed and no level to show: either the root itself became
+      // unreadable, or this is a viewer talking to a driver.mjs too old to
+      // have /dirs at all. The backend's own project history still works, so
+      // the picker degrades to exactly what it offered before /dirs existed
+      // rather than to nothing.
+      for (const r of newChatRecents.slice(0, NEW_CHAT_RENDER_LIMIT)) {
+        newChatRow({
+          text: r.isCurrent ? `${r.label} (current)` : r.label,
+          title: r.cwd,
+          cwd: r.cwd,
+          extraClass: r.isCurrent ? 'current' : '',
+        });
+      }
+    } else {
+      newChatDestList.appendChild(newChatNote('No such directory.'));
+    }
+    setActiveRow(0);
+    return;
   }
 
-  const notShown = matches.length - shown.length;
+  const atRoot = newChatScope.cwd === newChatRoot;
+
+  // Recently used projects, at the root with nothing typed. They are often
+  // two or three levels down, so without this the everyday case — "the thing
+  // I was working in yesterday" — would cost a descent per level. As soon as
+  // anything is typed this gives way to plain path completion.
+  const showRecents = atRoot && !typed && newChatRecents.length > 0;
+  if (showRecents) {
+    newChatDestList.appendChild(newChatSectionLabel('Recent'));
+    for (const r of newChatRecents.slice(0, NEW_CHAT_RENDER_LIMIT)) {
+      newChatRow({
+        text: r.isCurrent ? `${r.label} (current)` : r.label,
+        title: r.cwd,
+        cwd: r.cwd,
+        descendLabel: r.cwd === newChatRoot ? null : r.label,
+        extraClass: r.isCurrent ? 'current' : '',
+      });
+    }
+    newChatDestList.appendChild(newChatSectionLabel('Workspace'));
+  }
+
+  // The scope itself, so accepting the directory you have navigated to is a
+  // row rather than a mode. Only while nothing is being matched within it —
+  // half-typed text means you are reaching for a child, not for this.
+  if (!segment) {
+    newChatRow({
+      text: newChatScope.label,
+      title: newChatScope.cwd,
+      cwd: newChatScope.cwd,
+      hint: 'start here',
+      extraClass: 'new-chat-scope-item'
+        + (newChatScope.cwd === newChatCurrentCwd && !showRecents ? ' current' : ''),
+    });
+  }
+
+  // Prefix matches first: typing "vie" means "viewer", not "preview", even
+  // when both are in the same directory.
+  const matches = newChatChildren
+    .filter((d) => !needle || d.name.toLowerCase().includes(needle))
+    .sort((a, b) => {
+      const ap = a.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      const bp = b.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      return ap - bp || a.name.localeCompare(b.name);
+    });
+
+  for (const d of matches.slice(0, NEW_CHAT_RENDER_LIMIT)) {
+    newChatRow({
+      text: d.name,
+      title: d.cwd,
+      cwd: d.cwd,
+      descendLabel: d.label,
+    });
+  }
+
+  if (!matches.length && segment) {
+    // Nothing in this directory matched, so the typed text is read as a path
+    // to create rather than as something to match. Reachable only when the
+    // level has nothing to offer, which is what keeps Enter from creating a
+    // directory while a real destination was still on screen and selected.
+    const wanted = scope ? `${scope}/${segment}` : segment;
+    newChatRow({
+      text: `+ Create “${wanted}” and start here`,
+      extraClass: 'new-chat-create-item',
+      onChoose: () => createDestinationAndStart(wanted),
+    });
+  }
+  // Deliberately no "this folder is empty" note: when nothing is being
+  // matched the scope's own "start here" row is already sitting there on its
+  // own, which says the same thing without a sentence.
+
+  const notShown = matches.length - Math.min(matches.length, NEW_CHAT_RENDER_LIMIT);
   if (notShown > 0) {
     newChatDestList.appendChild(newChatNote(
-      `${notShown} more ${notShown === 1 ? 'directory' : 'directories'} not shown — keep typing to narrow.`));
-  } else if (newChatTruncated) {
-    // A different statement from the one above, and worth its own wording:
-    // this one means the SERVER stopped walking, so what is missing was never
-    // sent and cannot be found by filtering what is already here. Typing
-    // re-runs the scan with the filter applied during the walk.
-    newChatDestList.appendChild(newChatNote(
-      'Showing part of a large workspace — keep typing to search the rest.'));
+      `${notShown} more ${notShown === 1 ? 'folder' : 'folders'} not shown — keep typing to narrow.`));
   }
 
   setActiveRow(0);
 }
 
-// Fetches both destination sources for one specific backend and re-renders.
-// /projects is per-backend because each backend's history is its own (Claude
-// Code scans ~/.claude/projects; OpenCode asks its own server), so switching
-// the picker's selected backend without re-fetching would show one backend's
-// list while the other is selected right above it. /dirs is not per-backend
-// at all — one filesystem, one answer, see driver.mjs's own note on the route.
-async function loadDestinations(backend, { q = '' } = {}) {
+// Loads one level of the tree. `scope` is root-relative ("" being the root);
+// `hidden` asks for dotfolders, which the caller turns on the moment a
+// leading dot is typed.
+//
+// /projects is fetched alongside, and only for its own sake: it is the
+// backend's record of where sessions have actually run, which the filesystem
+// cannot know. It is per-backend (claude-code scans ~/.claude/projects;
+// opencode asks its own server), so switching the picker's backend re-fetches
+// it; /dirs is not per-backend at all — one filesystem, one answer, see
+// driver.mjs's own note on the route.
+async function loadNewChatLevel(backend, scope, hidden) {
   const seq = ++newChatLoadSeq;
+  const params = new URLSearchParams();
+  if (scope) params.set('under', scope);
+  if (hidden) params.set('hidden', '1');
+  const query = params.toString();
   try {
     const [projectsRes, dirsRes] = await Promise.all([
       fetch(`${driverBase}/projects?backend=${encodeURIComponent(backend)}`).catch(() => null),
-      // Tolerate an older driver.mjs without this route — the picker then
-      // degrades to exactly its previous behaviour (known projects only),
-      // rather than showing nothing.
-      fetch(`${driverBase}/dirs${q ? `?q=${encodeURIComponent(q)}` : ''}`).catch(() => null),
+      fetch(`${driverBase}/dirs${query ? `?${query}` : ''}`).catch(() => null),
     ]);
     const projectsData = projectsRes && projectsRes.ok ? await projectsRes.json() : null;
+    // A 404 here is the ordinary "that directory isn't there" answer, not a
+    // failure: it is what every half-typed path looks like, and it drives the
+    // offer to create one.
     const dirsData = dirsRes && dirsRes.ok ? await dirsRes.json() : null;
     if (seq !== newChatLoadSeq) return; // a newer keystroke already won
     if (!newChatDestList) return; // picker dismissed while this was in flight
-    if (!projectsData && !dirsData) throw new Error('neither /projects nor /dirs answered');
-    newChatRoot = dirsData?.root || projectsData?.root || null;
-    newChatTruncated = !!dirsData?.truncated;
-    newChatDestinations = mergeDestinations(projectsData, dirsData, newChatCurrentCwd);
+    if (!dirsRes && !projectsData) throw new Error('neither /projects nor /dirs answered');
+
+    newChatScopeRel = scope;
+    newChatScopeHidden = hidden;
+    newChatScope = dirsData ? dirsData.scope : null;
+    newChatChildren = dirsData ? (dirsData.dirs || []) : [];
+    if (dirsData?.root) newChatRoot = dirsData.root;
+    else if (projectsData?.root) newChatRoot = projectsData.root;
+
+    newChatRecents = (projectsData?.projects || []).map((p) => ({
+      cwd: p.cwd,
+      label: p.label,
+      isCurrent: p.cwd === newChatCurrentCwd,
+    })).sort((a, b) => {
+      // Continuing where you already are is the common case, and should
+      // never require reading the list to find.
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      if ((a.cwd === newChatRoot) !== (b.cwd === newChatRoot)) return a.cwd === newChatRoot ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+
     renderDestinations();
   } catch (e) {
     if (seq !== newChatLoadSeq || !newChatDestList) return;
-    newChatDestList.innerHTML = '<div class="palette-empty">Failed to load destinations.</div>';
+    newChatDestList.innerHTML = '<div class="palette-empty">Failed to load folders.</div>';
     newChatRows = [];
-    console.error('Failed to load new-chat destinations:', e);
+    console.error('Failed to load new-chat folders:', e);
   }
+}
+
+// Every change to the box comes through here. The server is only asked again
+// when the SCOPE changed — i.e. when a "/" was typed or deleted, or a leading
+// dot asked for dotfolders. Matching within a level that is already loaded is
+// local and immediate, so there is nothing to debounce.
+function onNewChatFilterChanged() {
+  const { scope, segment } = splitTypedPath(newChatFilterValue());
+  const hidden = segment.startsWith('.');
+  if (newChatScopeRel !== null && scope === newChatScopeRel && hidden === newChatScopeHidden) {
+    renderDestinations();
+    return;
+  }
+  loadNewChatLevel(newChatSelectedBackend, scope, hidden);
 }
 
 async function openNewChatPicker() {
@@ -7274,9 +7488,16 @@ async function openNewChatPicker() {
       ?.find((s) => s.sessionId === currentSessionId)?.cwd || null;
 
     newChatPicker.innerHTML = '';
-    newChatDestinations = [];
+    // Every open starts at the root with an empty box. Carrying the last
+    // visit's scope over would mean the picker sometimes opens somewhere
+    // other than where it says it is, which is exactly the confusion the
+    // typed-path-is-the-truth arrangement exists to prevent.
     newChatRows = [];
-    newChatTruncated = false;
+    newChatScope = null;
+    newChatScopeRel = null;
+    newChatScopeHidden = false;
+    newChatChildren = [];
+    newChatRecents = [];
 
     // Backend row — only worth showing a choice at all when more than one
     // backend is actually registered (a single-backend deployment just
@@ -7295,9 +7516,12 @@ async function openNewChatPicker() {
           newChatSelectedBackend = b;
           backendRow.querySelectorAll('.new-chat-backend-btn')
             .forEach((el) => el.classList.toggle('selected', el === btn));
-          // Whatever was typed survives the switch — the filter is about
-          // where you're going, not about which runtime takes you there.
-          loadDestinations(b, { q: newChatTruncated ? newChatFilterValue() : '' });
+          // Whatever was typed survives the switch — the path is about where
+          // you're going, not about which runtime takes you there. Only the
+          // recents actually differ between backends, but they are refetched
+          // together, so this re-reads the box rather than assuming.
+          const { scope, segment } = splitTypedPath(newChatFilterValue());
+          loadNewChatLevel(b, scope, segment.startsWith('.'));
         });
         backendRow.appendChild(btn);
       }
@@ -7307,22 +7531,10 @@ async function openNewChatPicker() {
     const filterRow = document.createElement('div');
     filterRow.className = 'new-chat-filter-row';
     newChatFilterInput = document.createElement('input');
-    newChatFilterInput.placeholder = 'Filter or type a path…';
+    newChatFilterInput.placeholder = 'Folder name, or a path…';
     newChatFilterInput.setAttribute('spellcheck', 'false');
     newChatFilterInput.addEventListener('click', (e) => e.stopPropagation());
-    newChatFilterInput.addEventListener('input', () => {
-      // A truncated scan can't be filtered in the browser: the match being
-      // looked for may be one the entry cap cut off, so the walk has to be
-      // re-run server-side with the filter applied during it. Debounced,
-      // and the local render still happens immediately so typing never
-      // feels like it's waiting on anything.
-      if (newChatTruncated) {
-        clearTimeout(newChatFilterTimer);
-        const q = newChatFilterValue();
-        newChatFilterTimer = setTimeout(() => loadDestinations(newChatSelectedBackend, { q }), 150);
-      }
-      renderDestinations();
-    });
+    newChatFilterInput.addEventListener('input', onNewChatFilterChanged);
     newChatFilterInput.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -7330,6 +7542,23 @@ async function openNewChatPicker() {
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         setActiveRow(newChatActiveIndex - 1);
+      } else if (e.key === 'Tab' || e.key === 'ArrowRight') {
+        // Tab descends, the way it completes a path in a shell. ArrowRight
+        // only does when the caret is already at the end of the text —
+        // otherwise it is somebody moving through what they typed, and
+        // stealing that would make the box impossible to edit.
+        const atEnd = newChatFilterInput.selectionStart === newChatFilterInput.value.length
+          && newChatFilterInput.selectionEnd === newChatFilterInput.value.length;
+        if (e.key === 'ArrowRight' && !atEnd) return;
+        const row = newChatRows[newChatActiveIndex];
+        if (!row || !row.descend) {
+          // Nothing to descend into. Swallow Tab anyway — letting focus jump
+          // out of the picker mid-path is worse than it doing nothing.
+          if (e.key === 'Tab') e.preventDefault();
+          return;
+        }
+        e.preventDefault();
+        row.descend();
       } else if (e.key === 'Enter') {
         e.preventDefault();
         // Only ever the highlighted row — never the raw text. A path that
@@ -7341,6 +7570,9 @@ async function openNewChatPicker() {
         e.preventDefault();
         dismissNewChatPicker();
       }
+      // Backspace is deliberately NOT handled: deleting a "/" re-scopes by
+      // itself, because the scope is read back out of the text. Going up a
+      // level needs no key of its own.
     });
     filterRow.appendChild(newChatFilterInput);
     newChatPicker.appendChild(filterRow);
@@ -7351,9 +7583,9 @@ async function openNewChatPicker() {
     newChatPicker.appendChild(newChatDestList);
 
     newChatFilterInput.focus();
-    await loadDestinations(newChatSelectedBackend);
+    await loadNewChatLevel(newChatSelectedBackend, '', false);
   } catch (e) {
-    newChatPicker.innerHTML = '<div class="palette-empty">Failed to load destinations.</div>';
+    newChatPicker.innerHTML = '<div class="palette-empty">Failed to load folders.</div>';
     console.error('Failed to load new-chat picker:', e);
   }
 }

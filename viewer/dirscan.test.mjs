@@ -22,13 +22,26 @@
 // Everything runs against a real temp tree — symlinks and permission bits do
 // not survive being mocked, and they are exactly what is being checked.
 
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync,
+  symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
-import { realpathSync } from "node:fs";
 import {
-  createDirUnderRoot, isUnderOrEqual, resolveUnderRoot, scanDirs,
+  createDirUnderRoot, isUnderOrEqual, listDirs, resolveUnderRoot,
 } from "./dirscan.mjs";
+
+// Whether this process can read a directory regardless of its mode — true
+// when running as root, which makes the permissions test meaningless.
+function readableAnyway(dir) {
+  try {
+    readdirSync(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -145,80 +158,98 @@ try {
       createDirUnderRoot("README.md", root) === null);
   }
 
-  // ── scanDirs: what the picker is handed ────────────────────────────────
+  // ── listDirs: ONE level, which is the whole point ──────────────────────
   {
-    const { dirs, truncated, root: reported } = scanDirs(root);
-    const labels = dirs.map((d) => d.label);
-    check("the scan reports the normalized root", reported === root, reported);
-    check("the root is always offered, and first",
-      labels[0] === "(root)" && dirs[0].cwd === root, labels.slice(0, 3));
-    check("an untruncated scan says so", truncated === false);
-    check("a nested directory is found",
-      labels.includes(nodePath.join("podprompt", "viewer", "backends")), labels);
-    check("a sibling project at the top level is found",
-      labels.includes("other-project"), labels);
-    check("node_modules is excluded", !labels.some((l) => l.includes("node_modules")), labels);
-    check("hidden directories are excluded by default",
-      !labels.some((l) => l.includes(".hidden-dir")), labels);
-    check("a plain file is not listed",
-      !labels.some((l) => l.includes("README.md")), labels);
+    const top = listDirs(root);
+    const names = top.dirs.map((d) => d.name);
+    check("the listing reports the normalized root", top.root === root, top.root);
+    check("the root scope is labelled the way both backends label it",
+      top.scope.label === "(root)" && top.scope.cwd === root, top.scope);
+    check("the root has no parent to go up to", top.scope.parent === null, top.scope);
+
+    check("top-level directories are listed", names.includes("podprompt"), names);
+    check("...and so are their siblings", names.includes("other-project"), names);
+    // THE REGRESSION THIS WHOLE REWRITE IS: a recursive scan put every
+    // directory six levels down in front of someone who asked for a project.
+    check("NOTHING below the top level is listed",
+      !names.includes("viewer") && !names.includes("backends") && !names.includes("docs"),
+      names);
+    check("rows are ordered", names.join(",") === [...names].sort().join(","), names);
+
+    check("node_modules is excluded", !names.includes("node_modules"), names);
+    check("hidden directories are not offered unasked",
+      !names.includes(".hidden-dir"), names);
+    check("a plain file is not listed", !names.includes("README.md"), names);
     check("a symlink escaping the root is not listed",
-      !labels.some((l) => l.includes("escape-hatch")), labels);
+      !names.includes("escape-hatch"), names);
     // An alias and its target are not interchangeable destinations —
     // claude-code keys session storage by the cwd string — so only the
     // canonical path is offered, and the alias must not shadow it.
     check("a symlink to a directory INSIDE the root is not listed",
-      !labels.some((l) => l.includes("alias-to-podprompt")), labels);
+      !names.includes("alias-to-podprompt"), names);
     check("the aliased directory itself is still listed under its real path",
-      labels.includes("podprompt"), labels);
+      names.includes("podprompt"), names);
+
     check("every listed directory is one resolveUnderRoot would accept",
-      dirs.every((d) => resolveUnderRoot(d.cwd, root) === d.cwd),
-      dirs.filter((d) => resolveUnderRoot(d.cwd, root) !== d.cwd));
-    check("hidden directories can be opted back in",
-      scanDirs(root, { includeHidden: true }).dirs.some((d) => d.label === ".hidden-dir"));
+      top.dirs.every((d) => resolveUnderRoot(d.cwd, root) === d.cwd),
+      top.dirs.filter((d) => resolveUnderRoot(d.cwd, root) !== d.cwd));
+    check("a row carries both what it shows and what it means",
+      top.dirs.every((d) => d.name && d.label && d.cwd),
+      top.dirs[0]);
+    check("at the top level, name and label are the same thing",
+      top.dirs.every((d) => d.name === d.label), top.dirs);
+
+    // Shell behaviour: dotfolders stay out of the way until you say the word.
+    check("hidden directories can be asked for",
+      listDirs(root, "", { includeHidden: true }).dirs.some((d) => d.name === ".hidden-dir"));
+    check("...and asking for them does not also unhide the exclude list",
+      !listDirs(root, "", { includeHidden: true }).dirs.some((d) => d.name === ".git"));
   }
 
-  // ── scanDirs: the caps, and why BFS ────────────────────────────────────
+  // ── listDirs: descending ───────────────────────────────────────────────
   {
-    const shallow = scanDirs(root, { maxDepth: 1 });
-    check("maxDepth 1 lists only immediate children (plus the root)",
-      shallow.dirs.every((d) => d.label === "(root)" || !d.label.includes(nodePath.sep)),
-      shallow.dirs.map((d) => d.label));
-    check("maxDepth 1 still finds the top-level projects",
-      shallow.dirs.some((d) => d.label === "podprompt")
-        && shallow.dirs.some((d) => d.label === "other-project"));
+    const scoped = listDirs(root, "podprompt");
+    const names = scoped.dirs.map((d) => d.name);
+    check("descending lists that directory's own children",
+      names.includes("viewer") && names.includes("docs"), names);
+    check("...and not its parent's", !names.includes("other-project"), names);
+    check("...and still not its grandchildren", !names.includes("backends"), names);
+    check("the scope reports where it is",
+      scoped.scope.label === "podprompt" && scoped.scope.cwd === nodePath.join(root, "podprompt"),
+      scoped.scope);
+    check("the scope knows the way back up", scoped.scope.parent === "", scoped.scope);
+    check("a row shows its bare name",
+      scoped.dirs.find((d) => d.name === "viewer").name === "viewer");
+    check("...but means its full path from the root",
+      scoped.dirs.find((d) => d.name === "viewer").label === nodePath.join("podprompt", "viewer"));
 
-    const capped = scanDirs(root, { maxEntries: 3 });
-    check("maxEntries caps the result list", capped.dirs.length === 3, capped.dirs.length);
-    check("hitting the cap reports truncated", capped.truncated === true);
-    // BFS: what survives a cap is the shallow rows, not one deep branch.
-    check("a truncated scan keeps the SHALLOWEST rows",
-      capped.dirs.every((d) => d.label === "(root)" || !d.label.includes(nodePath.sep)),
-      capped.dirs.map((d) => d.label));
+    const deeper = listDirs(root, nodePath.join("podprompt", "viewer"));
+    check("two levels down still works",
+      deeper.dirs.map((d) => d.name).includes("backends"), deeper.dirs);
+    check("a deeper scope's parent is its real parent",
+      deeper.scope.parent === "podprompt", deeper.scope);
 
-    const workCapped = scanDirs(root, { maxVisited: 2 });
-    check("maxVisited bounds the walk even when few rows match",
-      workCapped.truncated === true);
+    const absolute = listDirs(root, nodePath.join(root, "podprompt"));
+    check("an absolute scope under the root works the same as a relative one",
+      JSON.stringify(absolute) === JSON.stringify(scoped));
+
+    const leaf = listDirs(root, nodePath.join("podprompt", "docs"));
+    check("a directory with no subdirectories lists nothing, and is not an error",
+      leaf !== null && leaf.dirs.length === 0, leaf);
   }
 
-  // ── scanDirs: server-side filtering ────────────────────────────────────
+  // ── listDirs: a scope is validated, never guessed ──────────────────────
   {
-    const hits = scanDirs(root, { q: "backends" });
-    check("a filter returns the matching row",
-      hits.dirs.some((d) => d.label === nodePath.join("podprompt", "viewer", "backends")),
-      hits.dirs.map((d) => d.label));
-    check("a filter excludes non-matching rows",
-      !hits.dirs.some((d) => d.label === "other-project"), hits.dirs.map((d) => d.label));
-    check("filtering is case-insensitive",
-      scanDirs(root, { q: "BACKENDS" }).dirs.length === hits.dirs.length);
-    // The reason filtering is offered server-side at all: a match that lives
-    // below a non-matching parent is only reachable if the walk descends
-    // through directories it will never return.
-    check("a filter still descends through non-matching parents",
-      scanDirs(root, { q: "viewer" }).dirs.some(
-        (d) => d.label === nodePath.join("podprompt", "viewer")));
-    check("a filter matching nothing returns nothing",
-      scanDirs(root, { q: "zzz-no-such-thing" }).dirs.length === 0);
+    check("a scope that does not exist is refused",
+      listDirs(root, "no-such-dir") === null);
+    check("a scope outside the root is refused", listDirs(root, "/etc") === null);
+    check("a scope escaping via ../ is refused",
+      listDirs(root, "podprompt/../../workspace-other") === null);
+    check("the prefix-sharing sibling is refused as a scope",
+      listDirs(root, sibling) === null);
+    check("a FILE is not a scope", listDirs(root, "README.md") === null);
+    check("an escaping symlink is not a scope",
+      listDirs(root, "escape-hatch") === null);
   }
 
   // ── isUnderOrEqual, directly ───────────────────────────────────────────
@@ -233,11 +264,37 @@ try {
 
   // ── A missing root is survivable, not fatal ────────────────────────────
   {
-    const gone = scanDirs(nodePath.join(tmp, "no-such-root"));
-    check("scanning a nonexistent root returns an empty list, not a throw",
-      gone.dirs.length === 0 && gone.truncated === false);
+    const missingRoot = nodePath.join(tmp, "no-such-root");
+    check("listing a nonexistent root refuses rather than throwing",
+      listDirs(missingRoot) === null);
     check("a nonexistent root resolves nothing",
-      resolveUnderRoot("anything", nodePath.join(tmp, "no-such-root")) === null);
+      resolveUnderRoot("anything", missingRoot) === null);
+  }
+
+  // ── An unreadable directory is empty, not broken ───────────────────────
+  //
+  // The scope itself is still a perfectly good place to start a session, so
+  // failing the whole listing because its children cannot be enumerated
+  // would take away the one thing that still works.
+  {
+    const locked = nodePath.join(root, "locked");
+    mkdirSync(locked, { recursive: true });
+    try {
+      chmodSync(locked, 0o000);
+      const result = listDirs(root, "locked");
+      // Running as root defeats the point of the test — permissions do not
+      // apply, so skip rather than assert something untrue.
+      if (readableAnyway(locked)) {
+        check("(skipped: this process can read a 0o000 directory)", true);
+      } else {
+        check("an unreadable scope lists nothing but still resolves",
+          result !== null && result.dirs.length === 0, result);
+        check("...and still reports itself as a destination",
+          result.scope.cwd === locked, result && result.scope);
+      }
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });

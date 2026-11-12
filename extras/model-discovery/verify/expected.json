@@ -1,0 +1,5 @@
+{
+  "shape-openai":  {"ctx-from-meta": 65536, "ctx-defaulted": 32768},
+  "shape-litellm": {"rich-model": 200000},
+  "shape-alcf":    {"bare-array-model": 262144}
+}

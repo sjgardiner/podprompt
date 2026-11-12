@@ -1,0 +1,35 @@
+// Example provider blocks for use with model-discovery.ts.
+//
+// The point of every block below: it names an endpoint and a key and NOTHING
+// ELSE. There is no "models" list, because the plugin asks the endpoint what
+// it serves and registers the answer.
+//
+// Merge the "provider" entries you want into ~/.config/opencode/opencode.jsonc.
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "provider": {
+    // A local OpenAI-compatible server — llama.cpp, Ollama, vLLM, LM Studio.
+    // Needs no entry in model-discovery.json: its model list is at
+    // {baseURL}/models in the standard shape, which is the default.
+    "local": {
+      "name": "Local models",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "not-needed"
+      }
+    },
+
+    // A LiteLLM proxy. See model-discovery.example.json for why this one
+    // wants an endpoint override.
+    "litellm": {
+      "name": "LiteLLM",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://litellm.example.org/v1",
+        "apiKey": "{env:LITELLM_API_KEY}"
+      }
+    }
+  }
+}

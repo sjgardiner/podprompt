@@ -35,6 +35,7 @@
       <a class="nav-link sub" href="#launch">5 · Launch</a>
       <a class="nav-link sub" href="#terminal">Terminal instead</a>
       <a class="nav-link sub" href="#litellm">Using a LiteLLM proxy</a>
+      <a class="nav-link sub" href="#discovery">Your own model providers</a>
       <a class="nav-link sub" href="#network">Reaching host services</a>
       <a class="nav-link sub" href="#custom-image">A custom image</a>
       <a class="nav-link sub" href="#trouble">When it won't start</a>
@@ -489,6 +490,63 @@ podprompt</pre>
           OpenAI-compatible route.
         </p>
       </div>
+    </section>
+
+    <section id="discovery">
+      <h2>Your own model providers</h2>
+
+      <p>
+        OpenCode can talk to any OpenAI-compatible endpoint — a local
+        <code>llama.cpp</code> or Ollama server, a LiteLLM proxy, an
+        institutional inference service — by adding it to
+        <code>~/.config/opencode/opencode.jsonc</code>. Each provider needs a
+        base URL, a key, and a list of the model ids it serves.
+      </p>
+
+      <p>
+        That list is the annoying part. A provider with no <code>models</code>
+        block contributes nothing at all, so you write the ids out by hand —
+        and then they drift. A model added upstream stays invisible until you
+        notice; one withdrawn upstream sits in your picker until a turn fails
+        on it.
+      </p>
+
+      <p>
+        PodPrompt ships an optional OpenCode plugin that removes the list:
+        it asks each provider what it currently serves and registers the
+        answer, re-checking periodically. It lives in
+        <code>extras/model-discovery/</code> in the repository, with a README,
+        a worked example of both files you need, and a self-test.
+      </p>
+
+      <div class="callout info">
+        <div class="callout-label">Opt in by hand</div>
+        <p>
+          Nothing installs it for you. OpenCode's plugin directory is shared
+          with any non-Docker OpenCode on the same machine, and a plugin that
+          polls your endpoints on a timer is not something PodPrompt should put
+          there on your behalf. Two <code>cp</code> commands, both in the
+          README.
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-label">Gotcha · It uses an API OpenCode does not document</div>
+        <p>
+          The way a plugin adds models to the catalog was worked out by
+          experiment and verified against OpenCode 2.2.7. An OpenCode upgrade
+          could change it. Run <code>extras/model-discovery/verify/run.sh</code>
+          after upgrading — it checks the whole path against stand-in servers in
+          about a minute, and needs none of your real providers to be running.
+        </p>
+      </div>
+
+      <p>
+        Discovered models appear a few seconds after startup rather than
+        instantly, and a provider that is unreachable costs you only that
+        provider: it keeps whatever it found last time and leaves the rest of
+        your picker alone.
+      </p>
     </section>
 
     <section id="network">

@@ -1,0 +1,26 @@
+{
+  // How often to re-ask each provider what it serves. Minimum 30.
+  "intervalSeconds": 600,
+
+  // Only needed for providers that do NOT publish their model list at
+  // {baseURL}/models in the usual OpenAI shape. Anything that does needs no
+  // entry here at all.
+  "providers": {
+    // A LiteLLM proxy. Its /v1/models lists ids but historically omits context
+    // windows, so every model would land on the default. /model/info carries
+    // the real numbers — hence both the endpoint and the shape.
+    //
+    // Newer LiteLLM does surface max_input_tokens on /v1/models; if yours
+    // does, delete this entry and let it auto-detect.
+    "litellm": {
+      "endpoint": "model/info",
+      "shape": "litellm-info"
+    }
+
+    // Other things you can set per provider:
+    //   "endpoint": "https://example.org/some/other/models"   absolute, when
+    //       the list does not live under baseURL at all
+    //   "shape": "openai" | "litellm-info" | "alcf"           skip sniffing
+    //   "enabled": false                                      never poll this one
+  }
+}

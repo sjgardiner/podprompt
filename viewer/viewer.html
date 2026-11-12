@@ -2249,24 +2249,52 @@ function renderPlanUsage() {
   const s = lastPlanUsageStatus;
   if (!s) return;
   const WARN_THRESHOLD = 70;
-  // Not named `window` — that'd shadow the global browser window object.
-  const rateWindow = s.rate_limits?.five_hour?.utilization != null
-    ? s.rate_limits.five_hour
-    : (s.rate_limits?.seven_day?.utilization != null ? s.rate_limits.seven_day : null);
-  if (s.subscription_type && rateWindow) {
-    const pct = Math.round(rateWindow.utilization);
-    const resetStr = rateWindow.resets_at
-      ? (settings.planResetFormat === 'relative' ? formatRelativeReset(rateWindow.resets_at) : formatTs(rateWindow.resets_at))
-      : '';
-    // Percentage always shown now (used to disappear behind just the reset
-    // time) — the reset time is appended when available, not swapped in.
-    planUsageWrap.textContent = resetStr ? `${pct}% · resets ${resetStr}` : `${pct}%`;
-    planUsageWrap.title = `Subscription: ${s.subscription_type} — ${pct}% of usage window used`;
-    planUsageWrap.classList.toggle('warn', pct >= WARN_THRESHOLD);
-    planUsageWrap.classList.add('show');
-  } else {
+  // BOTH WINDOWS, because they answer different questions and only one of
+  // them used to be visible. The five-hour window says whether you can keep
+  // working this afternoon; the seven-day one says whether you can keep
+  // working this week, and it is the slower, more consequential of the two.
+  // This used to show five-hour whenever it existed and fall back to
+  // seven-day only in its absence — so on a subscription reporting both, the
+  // weekly figure was collected, broadcast, and never once displayed.
+  //
+  // Labelled rather than bare, so you never have to work out which window a
+  // lone percentage belongs to.
+  const windows = [
+    { key: 'five_hour', label: '5h' },
+    { key: 'seven_day', label: '7d' },
+  ].map(({ key, label }) => {
+    const w = s.rate_limits?.[key];
+    return w?.utilization != null
+      ? { label, pct: Math.round(w.utilization), resetsAt: w.resets_at || null }
+      : null;
+  }).filter(Boolean);
+
+  if (!s.subscription_type || !windows.length) {
     planUsageWrap.classList.remove('show');
+    return;
   }
+
+  // The warning belongs to whichever window is worst — being fine for the
+  // next five hours is no comfort if the week is nearly spent.
+  const worst = windows.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const warn = worst.pct >= WARN_THRESHOLD;
+
+  const fmtReset = (iso) => (settings.planResetFormat === 'relative'
+    ? formatRelativeReset(iso) : formatTs(iso));
+
+  // The reset time is appended only while warning, and only for the window
+  // that triggered it: it is the thing you need exactly when you are close
+  // to the limit, and noise the rest of the time in a header this dense.
+  const body = windows.map((w) => `${w.label} ${w.pct}%`).join(' · ');
+  planUsageWrap.textContent = (warn && worst.resetsAt)
+    ? `${body} · ${worst.label} resets ${fmtReset(worst.resetsAt)}`
+    : body;
+
+  planUsageWrap.title = `Subscription: ${s.subscription_type}\n`
+    + windows.map((w) => `${w.label === '5h' ? 'Five-hour' : 'Seven-day'} window: ${w.pct}% used`
+        + (w.resetsAt ? `, resets ${fmtReset(w.resetsAt)}` : '')).join('\n');
+  planUsageWrap.classList.toggle('warn', warn);
+  planUsageWrap.classList.add('show');
 }
 
 // Feed placement helper: a late-seeded history batch (see the 'history-batch'

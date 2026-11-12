@@ -36,8 +36,15 @@ const state = {
 function sse(res, frames) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
   let i = 0;
+  // KEEPS TICKING once the initial frames are spent, instead of clearing the
+  // timer. A real event stream stays open and can deliver something minutes
+  // later; a fake that shuts its own mouth the moment it runs out cannot
+  // express "the turn held on, and then more arrived" at all — which is the
+  // behaviour the end-of-turn reconciliation exists to produce. Tests append
+  // to the SAME array (the reference is captured here at subscribe time).
+  // The response's own close handler is what stops it.
   const timer = setInterval(() => {
-    if (i >= frames.length) { clearInterval(timer); return; }
+    if (i >= frames.length) return;
     res.write(`event: message\ndata: ${JSON.stringify(frames[i++])}\n\n`);
   }, 10);
   res.on("close", () => clearInterval(timer));
@@ -85,6 +92,14 @@ const server = createServer((req, res) => {
         cursor: { previous: null, next: more ? Buffer.from(String(nextAt)).toString("base64") : null },
       });
     }
+    // BEFORE the {sessionID} regex below, which would otherwise match
+    // "active" as a session id and 404. The server's own account of what it
+    // is executing — what an end-of-turn reconciliation asks for. Keyed by
+    // REAL id, like the server's.
+    if (p === "/api/session/active") {
+      if (state.failActive) return send(500, { error: "down" });
+      return send(200, { data: state.activeSessions || {} });
+    }
     const m = p.match(/^\/api\/session\/([^/]+)(\/.*)?$/);
     if (m) {
       const [, sid, rest] = m;
@@ -102,6 +117,7 @@ const server = createServer((req, res) => {
       if (rest === "/prompt") { state.prompts.push({ sid, ...json }); return send(200, { data: { id: "msg_1" } }); }
       if (rest === "/interrupt") { state.interrupts.push(sid); return send(200, { data: {} }); }
       if (rest === "/model") return send(204, {});
+      if (rest === "/inbox") return send(200, { data: (state.serverInbox || {})[sid] || [] });
       if (rest === "/message") {
         // PAGED too, and this is the one that mattered most: a long
         // transcript returned its most recent page and looked whole, so a
@@ -1267,6 +1283,81 @@ function make(extra = {}) {
   check("refusing is not losing: the driver re-queues what this declines,"
     + " so nothing was posted for the second one",
     state.prompts.filter((p) => p.text === "too late").length === 0);
+}
+
+// ── the sliver: asking the server instead of inferring ─────────────────────
+//
+// A fold POSTed in the instant the turn stops reading events is accepted by
+// the server and run with nobody watching — and if that work needs
+// permission it waits FOREVER (measured against a live server: `active`
+// stayed "running" with an outstanding card indefinitely, and did not
+// self-resolve). So the turn asks the server rather than inferring from
+// having seen the session go quiet.
+{
+  const { b } = make();
+  const sid = "oc-reconcile";
+  await b.setModel(sid, "opencode/big-pickle");
+  const realId = b._ids.toReal(sid);
+  // The server says it is still executing this session, even though we saw
+  // its terminal event and our own inbox count is clear.
+  state.activeSessions = { [realId]: { type: "running" } };
+  let ended = false;
+  state.events = [
+    { type: "session.idle", data: {} },
+    // Only reached if the turn did NOT stop at that first idle.
+    { type: "session.text.ended", data: { assistantMessageID: "m1", ordinal: 0, text: "WORK NOBODY WAS WATCHING" } },
+  ];
+  const run = b.runTurn(sid, "go", { cwd: "/tmp" }).then((o) => { ended = true; return o; });
+  // Let the stream play out, then let the session go quiet on the server.
+  await new Promise((r) => setTimeout(r, 600));
+  check("a turn does not end while the server says it is still running", !ended);
+  state.activeSessions = {};
+  // PUSHED, not reassigned: the fake SSE handler closes over the array it
+  // was handed at subscribe time, so swapping the reference sends nothing.
+  state.events.push({ type: "session.idle", data: {} });
+  const outcome = await Promise.race([run, new Promise((r) => setTimeout(() => r({ reason: "TIMEOUT" }), 8000))]);
+  check("...and ends once the server agrees it is done",
+    outcome.reason === "completed", outcome);
+  state.activeSessions = {};
+}
+
+// Work the server has accepted but not started yet counts too — it is in the
+// inbox, not yet `active`, and that is the gap a single "is it running?"
+// check would fall through.
+{
+  const { b } = make();
+  const sid = "oc-reconcile-inbox";
+  await b.setModel(sid, "opencode/big-pickle");
+  const realId = b._ids.toReal(sid);
+  state.serverInbox = { [realId]: [{ id: "in-x", type: "user" }] };
+  let ended = false;
+  state.events = [{ type: "session.idle", data: {} }];
+  const run = b.runTurn(sid, "go", { cwd: "/tmp" }).then((o) => { ended = true; return o; });
+  await new Promise((r) => setTimeout(r, 600));
+  check("a queued-but-not-started message also holds the turn open", !ended);
+  state.serverInbox = {};
+  state.events.push({ type: "session.idle", data: {} });
+  const outcome = await Promise.race([run, new Promise((r) => setTimeout(() => r({ reason: "TIMEOUT" }), 8000))]);
+  check("...and releases it once the inbox is clear", outcome.reason === "completed", outcome);
+  state.serverInbox = {};
+}
+
+// An unreachable server is not a server running a turn. Holding every turn
+// open on a failed question would wedge the whole backend during an outage —
+// a worse failure than the one being guarded against.
+{
+  const { b } = make();
+  const sid = "oc-reconcile-down";
+  await b.setModel(sid, "opencode/big-pickle");
+  state.failActive = true;
+  state.events = [{ type: "session.idle", data: {} }];
+  const outcome = await Promise.race([
+    b.runTurn(sid, "go", { cwd: "/tmp" }),
+    new Promise((r) => setTimeout(() => r({ reason: "TIMEOUT" }), 8000)),
+  ]);
+  check("a turn still ends when the server cannot be asked",
+    outcome.reason === "completed", outcome);
+  state.failActive = false;
 }
 
 server.close();

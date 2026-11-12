@@ -422,6 +422,10 @@ export function createOpenCodeBackend({
     // turn would make every later fold refuse and silently demote mid-turn
     // delivery to "queued" for the rest of the session's life.
     state.steerClosed = false;
+    // Belt and braces: a previous turn's finally always empties this, but a
+    // stale entry here would make the next turn wait on a settled promise
+    // forever-ish rather than fail loudly.
+    state.pendingSteers = new Set();
     broadcastStatus(sessionId, { type: "turn_start", backend: "opencode" });
     const realId = await ensureSession(sessionId, { cwd: state?.cwd, title: state?.title });
     if (state?.model) {
@@ -467,16 +471,77 @@ export function createOpenCodeBackend({
     const inboxOutstanding = new Set();
     let sawTerminal = false;
 
-    // Ends the turn only when the server has nothing left queued for it.
-    function endIfServerIsDone() {
+    // ASK THE SERVER, rather than infer it from having seen the session go
+    // quiet. Inference is what left the sliver: a fold POSTed in the instant
+    // we stop reading events is accepted and run by the server with nobody
+    // watching, and if that work needs permission it waits FOREVER --
+    // measured, and it does not self-resolve: `active` stayed "running" with
+    // an outstanding card for as long as it was watched.
+    //
+    // Two endpoints answer it, and neither depends on having been listening
+    // at the right moment:
+    //
+    //   GET /api/session/active          sessionID -> {type:"running"}
+    //   GET /api/session/{id}/inbox      accepted, not yet run
+    //
+    // READ TWICE. An item is always in one of those two states, so one read
+    // of both should be enough -- but a black-box probe cannot rule out an
+    // internal transition between them, and "should be enough" is exactly
+    // the kind of reasoning this whole investigation kept punishing. The
+    // second read costs one round-trip to a localhost server (measured at
+    // ~4ms) and removes the last place luck could enter.
+    async function serverHasWorkFor(realId) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const [active, inbox] = await Promise.all([
+            api("/api/session/active", { timeoutMs: 5000 }),
+            api(`/api/session/${realId}/inbox`, { timeoutMs: 5000 }),
+          ]);
+          if (active && active[realId]) return true;
+          if (Array.isArray(inbox) && inbox.length) return true;
+        } catch (e) {
+          // A server we cannot reach is not a server running a turn: it has
+          // died, taking any execution with it. Holding the turn open on a
+          // failed question would wedge every turn during an outage, which
+          // is a worse failure than the one this guards against.
+          console.error(`[opencode] could not ask the server about ${sessionId}:`, e.message);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    // Ends the turn only when the server agrees there is nothing left.
+    //
+    // THE ORDER IS THE WHOLE TRICK. Close the door first, wait for anything
+    // already through it to land, and only then ask -- so the answer cannot
+    // go stale between asking and acting on it.
+    async function endIfServerIsDone() {
       if (!sawTerminal || inboxOutstanding.size > 0) return false;
-      // Set in the SAME TICK as the abort, which is the point: until now
-      // injectIntoTurn gated on state.turnInFlight, and that flag is cleared
-      // only at the very end of the finally below -- after an approval drain
-      // bounded at 30 seconds. That left a window up to half a minute wide
-      // in which a fold was accepted and POSTed to a session the server had
-      // already finished with.
+
+      // 1. No NEW fold from here. Set in the same tick as the decision, not
+      //    when the driver finally clears turnInFlight -- that happens only
+      //    at the very end of the finally below, after an approval drain
+      //    bounded at 30 seconds, which left a window that wide.
       state.steerClosed = true;
+
+      // 2. Let anything already in flight land. injectIntoTurn adds its POST
+      //    to this set synchronously, before any await, so a steer that
+      //    passed the steerClosed check above is necessarily in here. The
+      //    POST returns only once the server holds the work -- so after this,
+      //    everything we ever sent is reflected in what the server will tell
+      //    us next.
+      const inFlight = [...(state.pendingSteers || [])];
+      if (inFlight.length) await Promise.allSettled(inFlight);
+
+      // 3. Now the question is safe to ask: nothing can enter the server's
+      //    queue between the answer and our acting on it.
+      if (await serverHasWorkFor(realId)) {
+        // The stream was never aborted, so we simply carry on reading it.
+        state.steerClosed = false;
+        sawTerminal = false;
+        return false;
+      }
       ctl.abort();
       return true;
     }
@@ -865,9 +930,9 @@ export function createOpenCodeBackend({
           case "session.execution.succeeded":
             // succeeded can arrive before idle; either ends our watch.
             sawTerminal = true;
-            if (!endIfServerIsDone()) {
-              console.log(`[opencode] ${sessionId}: turn finished with ${inboxOutstanding.size}`
-                + " message(s) the server has queued and not yet run; staying on the stream");
+            if (!(await endIfServerIsDone())) {
+              console.log(`[opencode] ${sessionId}: the server still has work for this session`
+                + ` (${inboxOutstanding.size} queued on our count); staying on the stream`);
             }
             break;
           default: break;
@@ -1176,16 +1241,40 @@ export function createOpenCodeBackend({
       // is exactly what it should do once the old one is over.
       if (!state?.turnInFlight || state.steerClosed) return false;
       if (typeof text !== "string" || !text) return false;
+      // PUBLISHED BEFORE THE FIRST AWAIT, which is what makes the turn's
+      // end-of-turn check sound. The steerClosed test above and this add are
+      // in the same tick, so a steer that got past the door is necessarily
+      // visible here -- and the turn waits on exactly this set before asking
+      // the server whether it still has work. Published late, or after an
+      // await, and a steer could be in flight while the turn concluded the
+      // server had nothing: the sliver, reopened.
+      // Resolved before the POST is built, and guarded: a session this
+      // backend cannot resolve is a refusal, not a throw. (Hoisting the
+      // call into the expression below put it outside the try and turned
+      // "never seen this session" into an exception the driver does not
+      // expect -- caught by the test that pins exactly that contract.)
+      let realId;
       try {
-        await api(`/api/session/${requireRealId(sessionId)}/prompt`, {
-          method: "POST",
-          body: { text, delivery: "steer" },
-          timeoutMs: 10000,
-        });
+        realId = requireRealId(sessionId);
+      } catch (e) {
+        console.error(`[opencode] steer refused for ${sessionId}:`, e.message);
+        return false;
+      }
+      const posting = api(`/api/session/${realId}/prompt`, {
+        method: "POST",
+        body: { text, delivery: "steer" },
+        timeoutMs: 10000,
+      });
+      const inFlight = (state.pendingSteers ||= new Set());
+      inFlight.add(posting);
+      try {
+        await posting;
         return true;
       } catch (e) {
         console.error(`[opencode] steer refused for ${sessionId}:`, e.message);
         return false;
+      } finally {
+        inFlight.delete(posting);
       }
     },
 
